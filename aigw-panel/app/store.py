@@ -37,6 +37,8 @@ class Store:
             "accounts": os.path.join(data_dir, "accounts.json"),
             # 线上模型倍率缓存（登录后从 CodeBuddy 目录接口拉的）
             "model_rates": os.path.join(data_dir, "model_rates.json"),
+            # 用户在模型清单里勾选的模型（用于生成客户端配置）
+            "selected_models": os.path.join(data_dir, "selected_models.json"),
             # APP 平台定时自动签到配置
             "autocheckin": os.path.join(data_dir, "autocheckin.json"),
             # 工具调用（function calling）的执行选项
@@ -69,6 +71,7 @@ class Store:
             },
             "accounts": [],
             "model_rates": {},
+            "selected_models": [],
             "autocheckin": {},   # 实际默认值在 app/autocheckin.DEFAULT_CFG
             "toolcall": {},
         }
