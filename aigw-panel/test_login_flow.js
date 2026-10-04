@@ -28,7 +28,18 @@ function mkEl(id) {
     value: '',
     className: '',
     style: {},
-    classList: { add() {}, remove() {}, contains() { return false; } },
+    classList: {
+      _s: new Set(),
+      add(...c) { c.forEach((x) => this._s.add(x)); },
+      remove(...c) { c.forEach((x) => this._s.delete(x)); },
+      // classList.toggle(name, force) 是标准 API —— app.js 用它控制页头按钮显隐
+      toggle(c, force) {
+        const on = force === undefined ? !this._s.has(c) : !!force;
+        if (on) this._s.add(c); else this._s.delete(c);
+        return on;
+      },
+      contains(c) { return this._s.has(c); },
+    },
     appendChild() {},
     remove() {},
     setAttribute() {},

@@ -14,6 +14,7 @@
 
 import json
 import re
+from datetime import datetime
 import os
 import socket
 import sys
@@ -410,7 +411,7 @@ ck("CodeBuddy 国内站已加入", "apk-codebuddy-cn" in gwextra.ACTIONS)
 ck("CodeBuddy 国内站基址是 .cn",
    gwextra.BASE["apk-codebuddy-cn"] == "https://www.codebuddy.cn",
    gwextra.BASE["apk-codebuddy-cn"])
-ck("供应商动作表总数 50", sum(len(v) for v in gwextra.ACTIONS.values()) == 50,
+ck("供应商动作表总数 51", sum(len(v) for v in gwextra.ACTIONS.values()) == 51,
    "%d 条" % sum(len(v) for v in gwextra.ACTIONS.values()))
 # 登录平台也要覆盖
 ck("Loomy 可登录", "apk-loomy" in gwlogin.PLATFORMS)
@@ -436,7 +437,7 @@ ck("Coze 用 Bearer 鉴权",
    gwextra.action_spec("apk-coze", "chat").get("path") == "/v3/chat")
 
 # ---- 端点动态探测（应对「整站 401、404 探测法失效」）
-ck("探测候选覆盖 8 个平台", len(gwextra.PROBE_CANDIDATES) == 8,
+ck("探测候选覆盖 13 个平台", len(gwextra.PROBE_CANDIDATES) == 13,
    str(len(gwextra.PROBE_CANDIDATES)))
 ck("探测候选含 Coze", "apk-coze" in gwextra.PROBE_CANDIDATES)
 ck("探测候选含豆包", "apk-doubao" in gwextra.PROBE_CANDIDATES)
@@ -591,6 +592,85 @@ ck("回传垃圾输入不崩", TL.execute_tool_calls(["x", None, {}])[1] == []
 _si = TL.sandbox_info()
 ck("sandbox_info 含目录", bool(_si.get("sandbox")) and "files" in _si)
 
+# ---- 定时自动签到
+from app import autocheckin as AC  # noqa: E402
+import tempfile as _tf
+from app.store import Store as _Store
+_TMP_DIR = _tf.mkdtemp(prefix="aigw_ac_")
+_TMP_STORE = _Store(_TMP_DIR)
+ck("自动签到覆盖 13 个平台", len(AC.PLATFORM_CHECKIN) == 13,
+   str(len(AC.PLATFORM_CHECKIN)))
+ck("Trae 是 flow 模式", AC.PLATFORM_CHECKIN["apk-trae"]["mode"] == "flow")
+ck("CodeBuddy 是 direct 模式",
+   AC.PLATFORM_CHECKIN["apk-codebuddy"]["mode"] == "direct")
+ck("小浣熊是 bonus 模式", AC.PLATFORM_CHECKIN["apk-raccoon"]["mode"] == "bonus")
+ck("平台时间错开（不都是同一分钟）",
+   len(set((m["hour"], m["minute"]) for m in AC.PLATFORM_CHECKIN.values())) >= 10,
+   str(len(set((m["hour"], m["minute"]) for m in AC.PLATFORM_CHECKIN.values()))))
+_pls = AC.platform_list(_TMP_STORE)
+ck("platform_list 返回 13 条", len(_pls) == 13, str(len(_pls)))
+ck("platform_list 带 hint", all(x.get("hint") for x in _pls))
+ck("platform_list 标出公开签到",
+   sum(1 for x in _pls if x["has_public_checkin"]) == 4,
+   str(sum(1 for x in _pls if x["has_public_checkin"])))
+_cfg = AC.load_cfg(_TMP_STORE)
+ck("默认配置开启", _cfg["enabled"] is True)
+ck("默认错峰 45 秒", _cfg["stagger_sec"] == 45)
+ck("默认重试 2 次", _cfg["retry_times"] == 2)
+_due = AC.due_list(_cfg, dt=datetime(2026, 10, 4, 23, 0))
+ck("23:00 时全部到点", len(_due) == 13, str(len(_due)))
+_due2 = AC.due_list(_cfg, dt=datetime(2026, 10, 4, 8, 0))
+ck("08:00 时都未到点", len(_due2) == 0, str(len(_due2)))
+_due3 = AC.due_list(_cfg, dt=datetime(2026, 10, 4, 9, 12))
+ck("09:12 时到点 2 个（09:05 与 09:10）", len(_due3) == 2, str(len(_due3)))
+# 关闭某个平台后不再到点
+_cfg2 = dict(_cfg)
+_cfg2["platforms"] = {"apk-trae": {"on": False, "time": "09:05"}}
+_due4 = AC.due_list(_cfg2, dt=datetime(2026, 10, 4, 23, 0))
+ck("关闭后不再到点", all(m["name"] != "Trae" for _, m in _due4))
+# 坏时间格式不崩
+ck("坏时间回退默认", AC._hm("乱写", (9, 10)) == (9, 10))
+ck("正常时间解析", AC._hm("07:25") == (7, 25))
+
+
+class _Acc1(object):
+    def __init__(self, secret="tok"):
+        self.s = secret
+
+    def get(self, i):
+        return {"secret": self.s} if i else None
+
+    def usable(self, p):
+        return [{"secret": self.s}]
+
+
+_r1, _m1, _s1 = AC.run_platform(_Acc1(), "apk-trae", "none")
+ck("mode=none 报「无公开端点」并算跳过",
+   _r1 is False and _s1 is True and "签到端点" in _m1, _m1[:44])
+_r2, _m2, _s2 = AC.run_platform(_NoAcc(), "apk-raccoon", "bonus")
+ck("无凭据时算跳过不算失败", _r2 is False and _s2 is True, _m2[:40])
+ck("鉴权类报错被识别为跳过",
+   AC._looks_like_auth_error("401 未登录") is True
+   and AC._looks_like_auth_error("缺少 token") is True
+   and AC._looks_like_auth_error("网络超时") is False)
+# run_round 幂等（必须先关重试，否则失败会等 retry_delay_min × 60 秒卡住测试）
+AC.save_cfg(_TMP_STORE, {"retry_times": 0, "retry_delay_min": 0,
+                          "notify": False, "stagger_sec": 0})
+_auto = AC.AutoCheckin(_TMP_STORE, lambda: _NoAcc(), lambda m: None)
+_auto.mark_done("apk-trae", "2026-10-04")
+ck("mark_done 后 is_done 为真", _auto.is_done("apk-trae", "2026-10-04"))
+ck("别的日期不算完成", _auto.is_done("apk-trae", "2026-10-05") is False)
+_rr = _auto.run_round(only=["apk-trae"], force=False)
+ck("当天已跑过则跳过", _rr["results"][0].get("skipped") is True,
+   str(_rr["results"][0])[:60])
+_rr2 = _auto.run_round(only=["apk-trae"], force=True)
+# force=True 会绕过「今天已跑过」，但没凭据时仍然只能跳过 —— 这是正确行为
+ck("force=True 绕过已跑标记（仍因无凭据而跳过）",
+   _rr2["results"][0].get("message") != "今天已执行过",
+   str(_rr2["results"][0].get("message"))[:40])
+ck("run_round 返回 summary", "签到" in (_rr2.get("summary") or ""),
+   str(_rr2.get("summary"))[:40])
+
 # ---- Vibe Coding 反代项目（2026-10-04 调研集成）
 from app import upstreams as UP  # noqa: E402
 ck("反代项目 12 个", len(UP.VIBE_PROXY) == 12, str(len(UP.VIBE_PROXY)))
@@ -619,7 +699,18 @@ ck("扁平视图带 targets", all(isinstance(x.get("targets"), list) for x in vp
 st_ = UP.stats()
 ck("stats 含 vibe_proxy 计数", st_.get("vibe_proxy") == 12, str(st_.get("vibe_proxy")))
 ck("stats 含 vibe_dead 计数", st_.get("vibe_dead") == 9, str(st_.get("vibe_dead")))
-ck("总数 = 50", st_["total_upstreams"] == 50, str(st_["total_upstreams"]))
+ck("总数 = 58", st_["total_upstreams"] == 58, str(st_["total_upstreams"]))
+ck("元宝有 models 动作",
+   gwextra.action_spec("apk-yuanbao", "models")["path"] == "/api/models")
+ck("元宝共 4 个动作", len(gwextra.ACTIONS["apk-yuanbao"]) == 4,
+   str(len(gwextra.ACTIONS["apk-yuanbao"])))
+ck("OFFICIAL 含 DeepSeek",
+   any(o["name"].startswith("DeepSeek") for o in UP.OFFICIAL))
+ck("OFFICIAL 22 个", len(UP.OFFICIAL) == 22, str(len(UP.OFFICIAL)))
+ck("BASE 21 个平台", len(gwextra.BASE) == 21, str(len(gwextra.BASE)))
+for _pid in ("apk-chatglm", "apk-qwen", "apk-kimi", "apk-ernie"):
+    ck("%s 有基址" % _pid, _pid in gwextra.BASE)
+    ck("%s 有探测候选" % _pid, _pid in gwextra.PROBE_CANDIDATES)
 
 
 # ================================================================ 7. 内置倍率表
