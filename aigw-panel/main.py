@@ -1107,6 +1107,50 @@ def api_catalog():
     })
 
 
+def api_localproxy(action=None, body=None):
+    """
+    本机反代上游管理（内置 CLIProxyAPI）
+      status  二进制/服务/凭据/模型 状态
+      start   启动（端口占用自动顺延）
+      stop    停止
+      restart 重启
+      config  改端口 / API Key
+      login   触发 OAuth 登录，返回授权链接
+      log     看服务日志
+    """
+    from app import localproxy as LP
+    b = body or {}
+
+    if action == "start":
+        okk, msg = LP.start(port=b.get("port"), key=b.get("key"))
+        return ok({"message": msg}) if okk else fail(msg, code="start_failed")
+    if action == "stop":
+        killed = LP.stop()
+        return ok({"killed": killed,
+                   "message": "已停止（%d 个进程）" % len(killed) if killed
+                   else "本来就没在运行"})
+    if action == "restart":
+        LP.stop()
+        okk, msg = LP.start(port=b.get("port"), key=b.get("key"))
+        return ok({"message": msg}) if okk else fail(msg, code="restart_failed")
+    if action == "config":
+        okk, msg = LP.write_config(port=b.get("port"), key=b.get("key"),
+                                   host=b.get("host"))
+        if not okk:
+            return fail(msg, code="config_failed")
+        if b.get("apply") and LP.status()["online"]:
+            LP.restart(port=b.get("port"), key=b.get("key"))
+        return ok({"message": msg, "status": LP.status()})
+    if action == "login":
+        okk, d = LP.start_login(b.get("provider") or "",
+                                no_browser=b.get("no_browser", True))
+        return ok(d) if okk else fail(d.get("message", "登录失败"),
+                                     code="login_failed")
+    if action == "log":
+        return ok({"log": LP.tail_log(int(b.get("lines") or 80))})
+    return ok(LP.status())
+
+
 def api_upstreams():
     """全量上游档案（7 本地网关 + 17 公益站 + 22 官方 + 12 Vibe Coding 反代）"""
     st = upstreams.stats()
@@ -1224,6 +1268,7 @@ ROUTES = {
     "/api/notify": lambda q, b: api_notify(q.get("action", [None])[0], b),
     "/api/logs": lambda q, b: api_logs(),
     "/api/toolcall": lambda q, b: api_toolcall(q.get("action", ["list"])[0], b),
+    "/api/localproxy": lambda q, b: api_localproxy(q.get("action", ["status"])[0], b),
     "/api/autocheckin": lambda q, b: api_autocheckin(q.get("action", ["status"])[0], b),
     "/api/catalog": lambda q, b: api_catalog(),
     "/api/upstreams": lambda q, b: api_upstreams(),
