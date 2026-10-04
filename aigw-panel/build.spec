@@ -23,6 +23,7 @@ a = Analysis(
         'app.notify', 'app.scheduler', 'app.tray',
         'app.bundled_models',   # 内置模型倍率表
         'app.tools',          # 工具调用（function calling）执行器
+        'app.autocheckin',    # APP 平台定时自动签到
     ],
     hookspath=[],
     hooksconfig={},
