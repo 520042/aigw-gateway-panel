@@ -56,3 +56,7 @@ Thumbs.db
 cli-proxy/*.exe
 cli-proxy/cliproxy.zip
 cli-proxy/auths/
+
+# 本地反代的运行时数据（68 MB 二进制 + 凭据）
+aigw-panel/dist/data/
+aigw-panel/data/cliproxy/
