@@ -29,5 +29,5 @@ global.confirm = () => true;
 
 const here = __dirname;
 const app = fs.readFileSync(path.join(here, 'app', 'static', 'app.js'), 'utf8');
-const body = fs.readFileSync(path.join(here, 'test_view_body.js'), 'utf8');
+const body = fs.readFileSync(path.join(here, 'test_views_body.js'), 'utf8');
 vm.runInThisContext(app + '\n' + body, { filename: 'app.js' });

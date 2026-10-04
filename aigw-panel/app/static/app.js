@@ -1,7 +1,7 @@
 /* AI 资源整合网关面板 —— 前端逻辑 */
 'use strict';
 
-const S = { v:'dash', data:{}, busy:false, timer:null, loaded:'' };
+const S = { v:'sources', data:{}, busy:false, timer:null, loaded:'' };
 
 // ---------------------------------------------------------------- 工具
 function $(s,r){return (r||document).querySelector(s);}
@@ -194,8 +194,7 @@ function dtBindOnce(){
 }
 
 // ---------------------------------------------------------------- 路由
-const TITLES={dash:'总览',account:'账号与签到',route:'智能路由',usage:'用量看板',
-  models:'模型与倍率',toolcall:'工具调用',localproxy:'本地反代',settings:'设置与日志'};
+const TITLES={sources:'接入源',route:'路由与模型',tools:'工具与集成',settings:'设置与日志'};
 
 document.addEventListener('click',e=>{
   const b=e.target.closest('.navbtn');
@@ -247,13 +246,11 @@ const LOADABLE = {};          // 哪些视图需要 loader（LOADERS 里有就�
 const CHECKIN_VIEWS = ['dash', 'checkin', 'autocheckin'];
 
 function render(){
-  const f=VIEWS[S.v]||VIEWS.dash;
+  const f=VIEWS[S.v]||VIEWS.sources;
   $('#view').innerHTML=f();
-  if(S.v==='login')paintLoginSession();
   const box=$('#oneClickBox');
   if(box)box.innerHTML=viewOneClick();
-  // 账号与签到页需要把当前会话/探测结果同步进去
-  if(S.v==='account')paintLoginSession();
+  if(S.v==='sources'||S.v==='tools')paintLoginSession();
 }
 async function switchView(v,force){
   S.v=v;
@@ -272,6 +269,370 @@ async function switchView(v,force){
 }
 
 // ---------------------------------------------------------------- 总览
+/* ================================================================
+ * 接入源 —— 面板首页
+ *
+ * 用户心智只有一条主线：把各种 AI 接进来 → 统一反代 → 自动路由。
+ * 所以首页不是「功能仪表盘」，而是一面**源卡片墙**：
+ * 一眼看清「我接了哪些源 / 每个源能干什么 / 现在能不能用」。
+ * 签到、模型、探测都是卡片上的操作，不占一级入口。
+ * ================================================================ */
+let SRC_VIEW = 'card';        // card | detail
+
+function loadSources(){
+  Promise.all([
+    api('/api/login?action=platforms').catch(()=>({platforms:[]})),
+    api('/api/accounts').catch(()=>({accounts:[],stats:{}})),
+    api('/api/autocheckin?action=status').catch(()=>({platforms:[]})),
+    api('/api/models?action=sources').catch(()=>({sources:[]})),
+    api('/api/models').catch(()=>({models_enriched:[],rate_summary:{}})),
+    api('/api/overview').catch(()=>({})),
+  ]).then(([lp,ac,au,src,md,ov])=>{
+    S.data.loginPlatforms=lp.platforms||[];
+    S.data.accounts=ac.accounts||[];
+    S.data.accountStats=ac.stats||{};
+    S.data.autoCheckin=au;
+    S.data.catalogSources=src.sources||[];
+    S.data.models=md;
+    S.data.overview=ov;
+    render();
+  }).catch(e=>toast('加载接入源失败：'+e.message,'err'));
+}
+
+/** 把「可登录平台 + 可拉目录平台 + 网关本地模型」合成一张源清单 */
+function sourceList(){
+  const accs=S.data.accounts||[];
+  const logged=new Set(accs.map(a=>a.platform));
+  const au=S.data.autoCheckin||{};
+  const plan={};
+  for(const p of (au.platforms||[]))plan[p.platform]=p;
+  const canModels=new Set((S.data.catalogSources||[]).map(x=>x.platform));
+  const rows=(S.data.models||{}).models_enriched||[];
+  const withRate=rows.filter(x=>x.credits).length;
+
+  const out=[];
+  // 1) 本地网关（面板的反代主体）
+  out.push({
+    key:'gateway', name:'本地网关（workbuddy）', kind:'本地反代',
+    desc:'腾讯 CodeBuddy / WorkBuddy 的反代，面板托管它的进程并接管登录/签到/倍率',
+    logged:true, endpoint:'http://127.0.0.1:8317/v1',
+    models:rows.length, withRate:withRate,
+    checkin:true, at:'09:00', canModels:true, local:true,
+  });
+  // 2) 本地反代（CLIProxyAPI）
+  const lp=S.data.lp||{};
+  out.push({
+    key:'localproxy', name:'本地反代（CLIProxyAPI）', kind:'本地反代',
+    desc:'Kimi / Codex / Claude / Antigravity / Grok / Devin / Meta 的 CLI 订阅反代',
+    logged:!!lp.online, endpoint:lp.base_url||'http://127.0.0.1:8318/v1',
+    models:lp.models||0, withRate:0, checkin:false,
+    canModels:true, local:true, view:'localproxy',
+  });
+  // 3) 可登录的平台
+  for(const p of (S.data.loginPlatforms||[])){
+    const pl=plan[p.id];
+    out.push({
+      key:p.id, name:p.name, kind:'账号接入',
+      desc:p.hint||'', method:p.method,
+      logged:logged.has(p.id), endpoint:p.upstream||'',
+      models:0, withRate:0,
+      checkin:!!(pl&&pl.has_public_checkin),
+      at:pl?pl.time:'', canModels:canModels.has(p.id),
+      on:pl?pl.on:true, done:pl?pl.done_today:false,
+    });
+  }
+  return out;
+}
+
+/* ================================================================
+ * 工具与集成 —— 可选增强，不占主流程
+ * ================================================================ */
+let TOOLS_TAB = 'call';
+
+async function loadTools(){
+  Promise.all([
+    api('/api/localproxy').catch(()=>({})),
+    api('/api/toolcall?action=list').catch(()=>({tools:[]})),
+  ]).then(([lp,tc])=>{
+    S.data.lp=lp; S.data.toolList=tc.tools||[]; S.data.toolNames=tc.names||[];
+    render();
+  }).catch(()=>{});
+}
+
+function viewTools(){
+  let h='<div class="note">这些是<b>可选增强</b>。'
+    +'不接也完全不影响「接入源 → 统一反代 → 自动路由」这条主线。</div>';
+  h+='<div class="tabs">'
+    +[['call','⚒ 工具调用'],['proxy','⇅ 本地反代'],['plan','⏰ 签到计划'],['acct','⎔ 账号与凭据']]
+      .map(x=>'<button class="'+(TOOLS_TAB===x[0]?'on':'')+'" '
+        +'onclick="setToolsTab(\''+x[0]+'\')">'+x[1]+'</button>').join('')
+    +'</div>';
+  if(TOOLS_TAB==='call') h+=viewToolcall();
+  else if(TOOLS_TAB==='proxy') h+='<div class="card"><div class="cb">'+viewLocalproxy()+'</div></div>';
+  else if(TOOLS_TAB==='plan') h+=viewCheckinPlan();
+  else h+=viewAccountPool();
+  return h;
+}
+function setToolsTab(k){ TOOLS_TAB=k; render(); }
+
+function viewCheckinPlan(){
+  const au=S.data.autoCheckin||{};
+  const accP=au.platforms||[];
+  const onN=accP.filter(p=>(p._on!==undefined?p._on:p.on)).length;
+  let h='<div class="card"><div class="ch"><b>定时签到计划</b>'
+    +'<div class="flex n">'
+    +'<label style="margin:0;display:flex;align-items:center;gap:6px">'
+    +'<input type="checkbox" style="width:auto" '+(au.enabled?'checked':'')
+    +' onchange="acSet(\'enabled\',this.checked)">启用定时</label>'
+    +'<label style="margin:0;display:flex;align-items:center;gap:6px">'
+    +'<input type="checkbox" style="width:auto" '+(au.notify?'checked':'')
+    +' onchange="acSet(\'notify\',this.checked)">完成后通知</label>'
+    +'<input type="number" value="'+esc(au.stagger_sec)+'" style="width:88px" title="错峰秒数" onchange="acSet(\'stagger_sec\',+this.value)">'
+    +'<input type="number" value="'+esc(au.retry_times)+'" style="width:88px" title="重试次数" onchange="acSet(\'retry_times\',+this.value)">'
+    +'<input type="number" value="'+esc(au.retry_delay_min)+'" style="width:110px" title="重试间隔分钟" onchange="acSet(\'retry_delay_min\',+this.value)">'
+    +'<button class="btn pri" onclick="acSave()">保存</button>'
+    +'<button class="btn" onclick="acRun(false)">执行一轮</button>'
+    +'<button class="btn" onclick="acRun(true)">强制全部</button>'
+    +'</div></div><div class="cb">';
+  h+=dataTable({
+    key:'tPlan', rows:accP, size:20,
+    searchHint:'搜索平台…', searchKeys:['name','hint'],
+    cols:[
+      {k:'name',t:'平台',render:x=>'<b>'+esc(x.name)+'</b>'},
+      {k:'_on',t:'启用',render:x=>{
+        const v=x._on!==undefined?x._on:x.on;
+        return '<input type="checkbox" style="width:auto" '+(v?'checked':'')
+          +' onchange="acToggle(this,\''+esc(x.platform)+'\',this.checked)">';
+      }},
+      {k:'_time',t:'每日时间',render:x=>{
+        const v=x._time!==undefined?x._time:x.time;
+        return '<input type="time" style="width:120px" value="'+esc(v)+'" '
+          +'onchange="acTime(this,\''+esc(x.platform)+'\',this.value)">';
+      }},
+      {k:'logged_in',t:'凭据',render:x=>x.logged_in?tag('已登录','ok'):tag('未登录','warn')},
+      {k:'done_today',t:'今日',render:x=>x.done_today?tag('已跑','ok'):'—'},
+      {k:'_go',t:'',render:x=>'<button class="btn sm" onclick="acRunOne(\''+esc(x.platform)+'\')">执行</button>'},
+    ]});
+  h+='<div class="muted mt" style="font-size:12px">勾选 '+onN+' / '+accP.length
+    +' 个平台 · 同一天每平台只跑一次</div></div></div>';
+  return h;
+}
+
+function viewAccountPool(){
+  const accs=S.data.accounts||[];
+  let h='<div class="card"><div class="ch"><b>账号池（'+accs.length+'）</b>'
+    +'<span class="faint">凭据只存本机 data/ 目录，不外传</span></div><div class="cb">';
+  if(!accs.length){
+    h+=empty('还没有账号。去「接入源」点卡片接入。');
+  }else{
+    h+=dataTable({
+      key:'tAcc', rows:accs, size:20,
+      searchHint:'搜索平台 / 名称…', searchKeys:['platform','name','source'],
+      cols:[
+        {k:'platform',t:'平台',render:x=>'<span class="mono" style="font-size:12px">'+esc(x.platform)+'</span>'},
+        {k:'name',t:'名称'},
+        {k:'source',t:'来源',render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.source||'')+'</span>'},
+        {k:'secret',t:'凭据',render:x=>'<span class="mono faint">'+esc(x.secret||'')+'</span>'},
+        {k:'obtained_at',t:'获取时间',render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.obtained_at||'')+'</span>'},
+        {k:'_op',t:'',render:x=>'<button class="btn sm dgr" onclick="delAccount(\''+esc(x.id)+'\')">删除</button>'},
+      ]});
+  }
+  h+='</div></div>';
+  return h;
+}
+
+/** 路由与模型：合并了原来的「智能路由」「模型与倍率」「上游档案」「用量看板」 */
+let ROUTE_TAB = 'models';
+
+async function loadRoute(){
+  Promise.all([
+    api('/api/route').catch(()=>({})),
+    api('/api/models').catch(()=>({models_enriched:[],rate_summary:{},bundled:{}})),
+    api('/api/usage?range=all').catch(()=>({})),
+    api('/api/upstreams').catch(()=>({stats:{}})),
+  ]).then(([rt,md,us,up])=>{
+    S.data.route=rt; S.data.models=md; S.data.usage=us; S.data.upstreams=up;
+    render();
+  }).catch(()=>{});
+}
+
+function viewRoute(){
+  let h='<div class="tabs">'
+    +[['models','⌗ 模型与倍率'],['auto','⇄ 自动路由'],
+       ['usage','◔ 用量'],['up','▤ 上游档案']]
+      .map(x=>'<button class="'+(ROUTE_TAB===x[0]?'on':'')+'" '
+        +'onclick="setRouteTab(\''+x[0]+'\')">'+x[1]+'</button>').join('')
+    +'</div>';
+  if(ROUTE_TAB==='models') h+=viewModels();
+  else if(ROUTE_TAB==='auto') h+=viewRouteAuto();
+  else if(ROUTE_TAB==='usage') h+=viewUsage();
+  else h+=viewUpstreams();
+  return h;
+}
+function setRouteTab(k){ ROUTE_TAB=k; render(); }
+function viewRouteAuto(){ return viewRoute0(); }
+
+function viewSources(){
+  if(SRC_VIEW==='detail'&&S.data.srcDetail){
+    return srcDetail();
+  }
+  const rows=sourceList();
+  const loggedN=rows.filter(x=>x.logged).length;
+  const modelN=(S.data.models||{}).models_enriched||[];
+  const o=S.data.overview||{};
+  const g=o.gateway||{};
+
+  let h='';
+  // ---- 顶部：链路状态，一眼看清「接入 → 反代 → 路由」三个环节
+  h+='<div class="grid g4 mb">'
+    +'<div class="kpi"><div class="lb">① 接入源</div>'
+    +'<div class="vl">'+loggedN+' <span class="faint" style="font-size:14px">/ '+rows.length+'</span></div>'
+    +'<div class="ex">已接入 / 可接入</div></div>'
+    +'<div class="kpi"><div class="lb">② 统一反代</div>'
+    +'<div class="vl" style="color:'+(g.alive?'var(--ok)':'var(--err)')+'">'
+    +(g.alive?'在线':'离线')+'</div>'
+    +'<div class="ex">'+esc(g.addr||'127.0.0.1:8317')+' · 面板即 OpenAI 兼容端点</div></div>'
+    +'<div class="kpi"><div class="lb">可用模型</div>'
+    +'<div class="vl">'+modelN.length+'</div>'
+    +'<div class="ex">其中 '+modelN.filter(x=>x.credits).length+' 个有倍率</div></div>'
+    +'<div class="kpi"><div class="lb">③ 自动路由</div>'
+    +'<div class="vl">3</div>'
+    +'<div class="ex">auto-fast / weight / priority</div></div>'
+    +'</div>';
+
+  // ---- 怎么用
+  h+='<div class="note">'
+    +'<b>用法就三步</b>：① 下面点卡片接入源（扫码 / Cookie / 填 Key）'
+    +'② 所有源都汇到面板这个 OpenAI 兼容端点：<code>'+esc(panelBaseUrl())+'</code>，'
+    +'api_key 用 <code>admin</code> ③ 客户端里把 model 填成 <code>auto-fast</code>，'
+    +'面板按实测延迟自动挑最快的源。<br>'
+    +'<span class="faint">签到、任务、工具调用都是<b>可选增强</b>，不配置也不影响主流程。</span>'
+    +'</div>';
+
+  // ---- 源卡片墙
+  h+='<div class="grid g3" id="srcWall">';
+  for(const s of rows){
+    const badge=s.logged
+      ?'<span class="tag ok">已接入</span>'
+      :'<span class="tag">未接入</span>';
+    const chk=s.checkin
+      ?'<span class="tag acc" title="每日 '+esc(s.at||'')+' 自动签到">签到 '+(s.done?'✓':'')+'</span>'
+      :'';
+    // 未接入的一级就给「接入」按钮，不用点两次
+    const act=s.logged
+      ?'<button class="btn sm" onclick="event.stopPropagation();openSrc(\''+esc(s.key)+'\')">详情</button>'
+      :'<button class="btn sm pri" onclick="event.stopPropagation();openSrc(\''+esc(s.key)+'\')">接入</button>';
+    h+='<div class="card" style="margin:0;cursor:pointer" '
+      +'onclick="openSrc(\''+esc(s.key)+'\')">'
+      +'<div class="flex" style="justify-content:space-between;margin-bottom:8px">'
+      +'<b style="font-size:14px">'+esc(s.name)+'</b>'+badge+'</div>'
+      +'<div class="faint" style="font-size:11.5px;line-height:1.5;min-height:48px">'
+      +esc(s.desc||'')+'</div>'
+      +'<div class="flex" style="margin-top:8px;gap:5px">'
+      +'<span class="tag info">'+esc(s.kind)+'</span>'+chk
+      +(s.models?'<span class="tag acc">'+s.models+' 模型</span>':'')
+      +'</div>'
+      +'<div class="faint mono" style="font-size:10.5px;margin-top:7px;word-break:break-all">'
+      +esc(s.endpoint||'—')+'</div>'
+      +'<div style="margin-top:9px">'+act+'</div>'
+      +'</div>';
+  }
+  h+='</div>';
+  return h;
+}
+
+function openSrc(key){
+  S.data.srcDetail=key;
+  SRC_VIEW='detail';
+  render();
+}
+function closeSrc(){ S.data.srcDetail=null; SRC_VIEW='card'; render(); }
+
+/** 点开某个源：登录 / 看模型 / 签到 / 探测，都在这一层完成 */
+function srcDetail(){
+  const s=sourceList().find(x=>x.key===S.data.srcDetail);
+  if(!s){
+    // 防死循环：viewSources 在 detail 模式下会再调 srcDetail，
+    // 这里必须先把模式切回 card，否则无限递归把浏览器卡死
+    S.data.srcDetail=null; SRC_VIEW='card';
+    return viewSources();
+  }
+  if(s.view==='localproxy'){
+    return '<div class="card"><div class="ch"><b>'+esc(s.name)+'</b>'
+      +'<button class="btn sm" onclick="closeSrc()">← 返回源列表</button></div>'
+      +'<div class="cb">'+viewLocalproxy()+'</div></div>';
+  }
+  const acc=(S.data.accounts||[]).find(a=>a.platform===s.key);
+  let h='<div class="card"><div class="ch"><b>'+esc(s.name)+'</b>'
+    +'<button class="btn sm" onclick="closeSrc()">← 返回源列表</button></div><div class="cb">';
+  h+='<div class="flex mb">'
+    +'<span class="tag '+(s.logged?'ok':'')+'">'+(s.logged?'已接入':'未接入')+'</span>'
+    +'<span class="tag info">'+esc(s.kind)+'</span>'
+    +(s.checkin?'<span class="tag acc">支持每日签到'+(s.at?' '+esc(s.at):'')+'</span>':'')
+    +'</div>';
+  h+='<div class="muted" style="font-size:12.5px;margin-bottom:10px">'+esc(s.desc||'')+'</div>';
+
+  if(s.key==='gateway'){
+    h+='<div class="note">这个源由面板托管。上面点「⚡ 一键执行」会连带它一起签到；'
+      +'模型与倍率在「路由」页看。</div>';
+    h+='<div class="btnrow">'
+      +'<button class="btn" onclick="switchView(\'route\')">去看模型与路由</button>'
+      +'<button class="btn" onclick="switchView(\'settings\')">网关设置</button>'
+      +'</div>';
+  }else if(s.logged){
+    h+='<div class="note ok" style="color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)">'
+      +'已接入 · 凭据 <code>'+esc(acc?String(acc.secret||''):'')+'</code>'
+      +'（'+esc(acc&&acc.source||'')+'，'+esc(acc&&acc.obtained_at||'')+'）</div>';
+    h+='<div class="btnrow">'
+      +'<button class="btn" onclick="loadSrcModels(\''+esc(s.key)+'\')">查看该源模型</button>'
+      +(s.checkin?'<button class="btn pri" onclick="acRunOne(\''+esc(s.key)+'\')">立即签到</button>':'')
+      +'<button class="btn" onclick="platformProbe(\''+esc(s.key)+'\')">探测端点</button>'
+      +'<button class="btn dgr" onclick="delAccountFor(\''+esc(s.key)+'\')">解除接入</button>'
+      +'</div>';
+    h+='<div id="srcModels" class="mt"></div>';
+  }else{
+    h+='<div class="btnrow">'
+      +'<button class="btn pri" onclick="srcLogin(\''+esc(s.key)+'\')">'
+      +(s.method==='qrcode'?'扫码接入':s.method==='cookie'?'用浏览器 Cookie 接入':'填 API Key 接入')
+      +'</button>'
+      +'<button class="btn" onclick="platformProbe(\''+esc(s.key)+'\')">先探测端点</button>'
+      +'</div>';
+    h+=viewLoginSession();
+  }
+  h+='</div></div>';
+  return h;
+}
+
+function srcLogin(pid){
+  const p=(S.data.loginPlatforms||[]).find(x=>x.id===pid);
+  startLogin(pid,(p&&p.edition)||'');
+}
+async function loadSrcModels(pid){
+  const box=$('#srcModels');
+  if(box)box.innerHTML='<div class="sk line" style="height:34px"></div>';
+  const r=await api('/api/models?action=platform_models',{platform:pid})
+    .catch(e=>({ok:false,message:e.message}));
+  if(!box)return;
+  if(r.ok===false){box.innerHTML='<div class="note warn">'+esc(r.message||'取不到')+'</div>';return;}
+  const ms=r.models||[];
+  if(!ms.length){box.innerHTML=empty('该源返回空列表（可能还没登录）');return;}
+  box.innerHTML='<h3 style="margin-top:12px">'+esc(r.name||pid)+' 的模型（'+ms.length+'）</h3>'
+    +dataTable({
+      key:'srcM_'+pid, rows:ms, size:15, sort:'id',
+      searchHint:'搜索模型…', searchKeys:['id','name'],
+      cols:[
+        {k:'id',t:'模型 ID',render:x=>'<span class="mono">'+esc(x.id)+'</span>'},
+        {k:'name',t:'显示名',render:x=>esc(x.name||'—')},
+        {k:'credits',t:'倍率',render:x=>x.credits?tag(String(x.credits),'acc'):'<span class="faint">—</span>'},
+      ]});
+}
+function delAccountFor(pid){
+  const a=(S.data.accounts||[]).find(x=>x.platform===pid);
+  if(!a){toast('没有找到该源的凭据','err');return;}
+  if(!confirm('确定解除「'+(a.name||pid)+'」的接入？凭据会从账号池删除。'))return;
+  delAccount(a.id);
+}
+
 function viewDash(){
   const o=S.data.overview||{};
   const g=o.gateway||{},c=o.checkin||{},t=o.tasks||{},u=o.usage||{};
@@ -1415,7 +1776,7 @@ async function loadRoute(){
   S.data.route=r;
   render();
 }
-function viewRoute(){
+function viewRoute0(){
   const r=S.data.route||{};
   const models=r.models||{};
   const names=Object.keys(models);
@@ -2580,7 +2941,7 @@ async function acTime(el,pid,v){
 /* ================================================================
  * 全局「一键执行」：签到 + 到期任务，一处触发
  * ================================================================ */
-const ONECLICK = {running:false, steps:[], result:null};
+let ONECLICK = {running:false, steps:[], result:null};
 
 async function oneClick(){
   if(ONECLICK.running){toast('正在执行中…','err');return;}
@@ -3234,13 +3595,14 @@ function viewLogin(){
   return h;
 }
 
-const VIEWS={dash:viewDash,account:viewAccount,route:viewRoute,usage:viewUsage,
-  models:viewModels,toolcall:viewToolcall,localproxy:viewLocalproxy,
-  settings:viewSettings};
+function copyEndpoint(){
+  const base=panelBaseUrl();
+  copyText(base+'\napi_key = admin',()=>toast('已复制：'+base,'ok'));
+}
 
-const LOADERS={account:loadAccount,usage:loadUsage,models:loadModels,
-  toolcall:loadToolcall,localproxy:loadLocalproxy,route:loadRoute,
-  settings:loadSettings};
+const VIEWS={sources:viewSources,route:viewRoute,tools:viewTools,settings:viewSettings};
+
+const LOADERS={sources:loadSources,route:loadRoute,tools:loadTools,settings:loadSettings};
 
 function loadExtra(){
   const f=LOADERS[S.v];

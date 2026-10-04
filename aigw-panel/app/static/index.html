@@ -11,39 +11,31 @@
   <aside class="side">
     <div class="brand"><span class="logo">◈</span>AI 资源网关</div>
 
-    <div class="navgrp">日常</div>
-    <button class="navbtn on" data-v="dash"><span class="ic">◎</span>总览</button>
-    <button class="navbtn" data-v="account"><span class="ic">⎔</span>账号与签到</button>
-    <button class="navbtn" data-v="route"><span class="ic">⇄</span>智能路由</button>
-    <button class="navbtn" data-v="usage"><span class="ic">◔</span>用量看板</button>
+    <div class="navgrp">主流程</div>
+    <button class="navbtn on" data-v="sources"><span class="ic">◈</span>接入源</button>
+    <button class="navbtn" data-v="route"><span class="ic">⇄</span>路由与模型</button>
 
-    <div class="navgrp">模型与上游</div>
-    <button class="navbtn" data-v="models"><span class="ic">⌗</span>模型与倍率</button>
-
-    <div class="navgrp">工具</div>
-    <button class="navbtn" data-v="toolcall"><span class="ic">⚒</span>工具调用</button>
-    <button class="navbtn" data-v="localproxy"><span class="ic">⇅</span>本地反代</button>
-
-    <div class="navgrp">系统</div>
+    <div class="navgrp">更多</div>
+    <button class="navbtn" data-v="tools"><span class="ic">⚒</span>工具与集成</button>
     <button class="navbtn" data-v="settings"><span class="ic">⚙</span>设置与日志</button>
 
     <div style="flex:1"></div>
-    <div class="row n" style="padding:0 6px 8px;gap:6px">
-      <button class="btn sm gh" id="themeBtn" onclick="toggleTheme()" title="切换亮/暗主题">◐ 主题</button>
-      <div class="faint" style="font-size:11.5px;margin-left:auto" id="sideFoot">v1.0.0</div>
+    <div class="faint" style="padding:8px 10px;font-size:11px;line-height:1.6">
+      统一网关<br>
+      <span id="sideFoot">v1.0.0</span>
     </div>
   </aside>
 
   <main class="main">
     <div class="hd">
       <div>
-        <h1 id="ttl">总览</h1>
+        <h1 id="ttl">接入源</h1>
         <div class="sub" id="stl">正在加载…</div>
       </div>
       <div class="flex">
-        <button class="btn" onclick="refresh()">↻ 刷新</button>
+        <button class="btn" onclick="copyEndpoint()">复制网关地址</button>
         <button class="btn pri" id="hdOneClick" onclick="oneClick()"
-          title="自动签到所有勾选的平台，并执行到期任务">⚡ 一键执行</button>
+          title="所有已接入的源跑一轮签到与任务">⚡ 一键执行</button>
         <button class="btn dgr" onclick="quitPanel()"
           title="退出面板（关浏览器页面不等于退出）">退出</button>
       </div>

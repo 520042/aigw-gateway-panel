@@ -60,3 +60,6 @@ cli-proxy/auths/
 # 本地反代的运行时数据（68 MB 二进制 + 凭据）
 aigw-panel/dist/data/
 aigw-panel/data/cliproxy/
+
+# 打包产物里的运行数据（首次运行会在此生成）
+aigw-panel/dist/data/
