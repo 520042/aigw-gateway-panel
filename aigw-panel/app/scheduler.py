@@ -175,23 +175,12 @@ class Scheduler(threading.Thread):
 
     # ------------------------------------------------------------ 主循环
     def run(self):
-        self._log("调度器已启动")
+        self._log("调度器已启动（仅在启用「自动拉起网关」时才会启动）")
         client = self._make_client()
         # 启动后先静默观察一段时间，避免刚开面板就补跑当天的签到
         self.stop_flag.wait(45)
-        # APP 平台自动签到（独立线程，配置在 autocheckin）
-        try:
-            from . import autocheckin
-            from .accounts import Accounts
-
-            accts = Accounts(os.path.join(getattr(self.store, "dir", "."),
-                                           "accounts.json"))
-            self.auto = autocheckin.AutoCheckin(
-                self.store, lambda: accts, self._log, self.notifier)
-            self.auto.start()
-        except Exception as e:
-            self._log("APP 自动签到线程启动失败：%s" % e)
-            self.auto = None
+        # 注意：APP 平台自动签到已移到 main.py 独立启动（AutoCheckin 线程），
+        # 不再挂在这里 —— 否则「不自动拉起网关」时定时签到会跟着停。
         while not self.stop_flag.is_set():
             try:
                 self.ticks += 1

@@ -58,7 +58,11 @@ class Store:
                 "checkin_hour": 9,
                 "auto_growth": True,
                 "growth_hour": 10,
-                "auto_start_gateway": True,
+                # 默认**不**自动拉起 workbuddy-gateway。
+                # 用户明确要求「不要一次性启动两个软件」—— 面板不依赖它也能工作
+                # （内置倍率表、其它源、工具调用、定时签到都不依赖网关进程）。
+                # 网关只在你手动开、或路由里真的用到它时才需要。
+                "auto_start_gateway": False,
                 "theme": "light",
                 "refresh_interval": 15,
             },

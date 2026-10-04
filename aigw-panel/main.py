@@ -154,8 +154,25 @@ def init_app():
 
     sched = Scheduler(store, gw_path, log)
     APP["scheduler"] = sched
-    if s.get("auto_start_gateway", True):
+    # 默认不启调度器（也就不会自动拉起 workbuddy-gateway）。
+    # 用户明确要求「不要一次性启动两个软件」—— 面板不依赖网关进程也能工作。
+    # 想让面板托管网关，去「设置」里把「自动拉起网关」打开。
+    if s.get("auto_start_gateway", False):
         sched.start()
+
+    # ---- APP 平台自动签到：独立线程，不依赖网关是否被托管 ----
+    # 之前它藏在 scheduler.run() 里，一旦「不自动拉起网关」就跟着停，
+    # 定时签到会静默失效。这里拆开。
+    try:
+        from app import autocheckin as AC
+        from app.accounts import Accounts as _Acc
+        _acc = _Acc(store)
+        _auto = AC.AutoCheckin(store, lambda: _acc, log, sched.notifier)
+        _auto.start()
+        APP["auto_checkin"] = _auto
+        log("APP 自动签到线程已启动（独立于网关）")
+    except Exception as e:
+        log("自动签到线程启动失败：%s" % e)
 
     # ---- 账号登录：面板自己跑完 7 个网关/平台的登录，凭据落账号池 ----
     from app.accounts import Accounts
@@ -373,8 +390,7 @@ def api_autocheckin(action=None, body=None):
 
     if action == "status":
         st = AC.status(store, acc)
-        sch = APP.get("scheduler")
-        auto = getattr(sch, "auto", None) if sch else None
+        auto = APP.get("auto_checkin")
         st["thread_alive"] = bool(auto and auto.is_alive())
         st["running"] = bool(auto and auto.running)
         st["last_result"] = getattr(auto, "last_result", None) if auto else None
@@ -398,9 +414,8 @@ def api_autocheckin(action=None, body=None):
         return ok(AC.status(store, acc))
 
     if action == "run":
-        # 手动触发不依赖后台线程 —— 面板刚启动的 45 秒静默观察期里也要能用。
-        sch = APP.get("scheduler")
-        auto = getattr(sch, "auto", None) if sch else None
+        # 手动触发不依赖后台线程 —— 面板刚启动的静默观察期里也要能用。
+        auto = APP.get("auto_checkin")
         only = b.get("platforms")
         force = bool(b.get("force"))
         result = {}
