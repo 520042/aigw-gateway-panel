@@ -774,11 +774,13 @@ async function loadModels(){
     const s=await api('/api/models?action=sources').catch(()=>({sources:[]}));
     S.data.catalogSources=s.sources||[];
   }catch(e){ S.data.catalogSources=[]; }
+  loadModelSel();
   render();
 }
 /* ---------------------------------------------------------------- 模型选择
  * 用户反馈「模型清单里选不到我需要的模型」—— 原来这张表只能看，不能选。
- * 现在每行一个勾选框，支持全选 / 复制 ID / 导出。
+ * 现在每行一个勾选框，选择结果持久化，并可一键生成客户端配置片段
+ * （Cherry Studio / NextChat / Claude Code 粘贴即用）。
  */
 const MODEL_SEL = new Set();
 
@@ -793,22 +795,74 @@ function selOne(el,id){
   if(el&&el.checked)MODEL_SEL.add(id); else MODEL_SEL.delete(id);
   const c=$('#selCount');
   if(c)c.textContent=MODEL_SEL.size;
+  saveModelSel();
 }
 function selAllModels(on){
   const ids=allModelIds();
   if(on)ids.forEach(i=>MODEL_SEL.add(i));
   else MODEL_SEL.clear();
+  saveModelSel();
   render();
 }
 function selClear(){
   MODEL_SEL.clear();
+  saveModelSel();
   render();
 }
-function selCopyIds(){
-  const ids=[...MODEL_SEL];
-  if(!ids.length){toast('先勾选要复制的模型','err');return;}
-  const txt=ids.join('\n');
-  const done=()=>toast('已复制 '+ids.length+' 个模型 ID','ok');
+function selList(){
+  if(MODEL_SEL.size)return [...MODEL_SEL];
+  return allModelIds();          // 没勾就当全选，方便直接复制配置
+}
+function saveModelSel(){
+  api('/api/models?action=select',{models:[...MODEL_SEL]}).catch(()=>{});
+}
+function loadModelSel(){
+  api('/api/models?action=select').then(r=>{
+    MODEL_SEL.clear();
+    for(const m of (r.models||[]))MODEL_SEL.add(String(m));
+    render();
+  }).catch(()=>{});
+}
+function panelBaseUrl(){
+  const u=location.origin||'';
+  return (u?u.replace(/\/$/,'')+'/v1':'http://127.0.0.1:8790/v1');
+}
+function selClientConfig(){
+  const ids=selList();
+  if(!ids.length){toast('先勾选模型','err');return;}
+  const base=panelBaseUrl();
+  const cfg=[
+    '# ===== AI 资源网关 · 客户端配置（'+ids.length+' 个模型）=====',
+    'base_url = '+base,
+    'api_key  = admin',
+    '',
+    '# 可用模型 ID',
+  ].concat(ids.map(i=>'  '+i)).concat([
+    '',
+    '# --- Cherry Studio / NextChat / LobeChat 通用 JSON ---',
+    JSON.stringify({providers:[{
+      id:'aigw', name:'AI 资源网关', type:'openai',
+      baseUrl:base, apiKey:'admin',
+      models:ids.map(id=>({id:id,name:id})),
+    }]},null,2),
+    '',
+    '# --- Claude Code（Anthropic 兼容）---',
+    'ANTHROPIC_BASE_URL = '+base.replace(/\/v1$/,''),
+    'ANTHROPIC_API_KEY  = admin',
+    '',
+    '# --- curl 自测 ---',
+    'curl '+base+'/chat/completions -H "Content-Type: application/json" \\',
+    '  -H "Authorization: Bearer admin" \\',
+    '  -d '+JSON.stringify(JSON.stringify({
+      model:ids[0]||'default',
+      messages:[{role:'user',content:'你好'}],
+    })),
+  ]).join('\n');
+  const box=$('#clientCfg');
+  if(box)box.textContent=cfg;
+  copyText(cfg,()=>toast('配置片段已复制（'+ids.length+' 个模型）','ok'));
+}
+function copyText(txt,done){
   if(navigator.clipboard&&navigator.clipboard.writeText){
     navigator.clipboard.writeText(txt).then(done).catch(()=>fallbackCopy(txt,done));
   }else fallbackCopy(txt,done);
@@ -821,8 +875,13 @@ function fallbackCopy(txt,done){
   catch(e){toast('复制失败，请手动选择','err');}
   ta.remove();
 }
+function selCopyIds(){
+  const ids=selList();
+  if(!ids.length){toast('先勾选要复制的模型','err');return;}
+  copyText(ids.join('\n'),()=>toast('已复制 '+ids.length+' 个模型 ID','ok'));
+}
 function selExport(){
-  const ids=[...MODEL_SEL];
+  const ids=selList();
   if(!ids.length){toast('先勾选要导出的模型','err');return;}
   const r=S.data.models||{};
   const enr=r.models_enriched||[];
@@ -937,10 +996,12 @@ function viewModels(){
       </label>
       <span class="cnt" style="margin-left:0">已选 <b id="selCount">${MODEL_SEL.size}</b> / ${rows.length}</span>
       <span class="sp"></span>
-      <button class="btn sm" onclick="selCopyIds()">复制选中 ID</button>
-      <button class="btn sm" onclick="selExport()">导出选中</button>
+      <button class="btn sm pri" onclick="selClientConfig()">生成客户端配置</button>
+      <button class="btn sm" onclick="selCopyIds()">复制 ID</button>
+      <button class="btn sm" onclick="selExport()">导出 JSON</button>
       <button class="btn sm" onclick="selClear()">清空选择</button>
     </div>
+    <pre id="clientCfg" style="display:none"></pre>
     <div class="mt" id="modelTable">${dataTable({
       key:'models',
       rows:rows,
@@ -1440,9 +1501,11 @@ function viewUpstreams(){
   const st=u.stats||{};
   const gw=u.gateways||[],rel=u.relays||[],off=u.official||[],os=u.open_source||[];
   const all=u.all||[];
+  const probes=u.local_probes||{};
   const vp=all.filter(x=>x.category==='vibe_proxy').map(x=>
-    Object.assign({},x,{_targets:(x.targets||[]).join(' ')}));
+    Object.assign({},x,{_targets:(x.targets||[]).join(' '),_live:probes[x.id.replace(/^vibe-/,'')]||null}));
   const dead=u.vibe_dead||[];
+  const liveN=vp.filter(x=>x._live&&x._live.online).length;
   return `
   <div class="note">清单核验 <b>${esc(st.verified_at||'—')}</b> ·
   共 <b>${st.total_upstreams||0}</b> 个可作为路由目标的上游，
@@ -1572,9 +1635,10 @@ function viewUpstreams(){
           把 Vibe Coding 工具的登录凭据转成 OpenAI 兼容 API。本机部署任意一个，
           就能直接作为上游挂进路由引擎</div></div>
       <div class="flex n">
+        ${tag('本机在跑 '+liveN+' / '+vp.length, liveN?'ok':'')}
         ${tag('带签到 '+st.vibe_proxy_with_checkin,'ok')}
-        ${tag('有默认端点 '+st.vibe_proxy_deployed,'acc')}
         ${tag('已失效 '+st.vibe_dead,'err')}
+        <button class="btn sm" onclick="loadUpstreams()">重新探活</button>
       </div>
     </div>
     ${dataTable({
@@ -1599,9 +1663,20 @@ function viewUpstreams(){
          render:x=>'<span class="mono" style="font-size:11px">'+esc((x.protocol||[]).join(' / ')||'—')+'</span>'},
         {k:'auth', t:'鉴权', render:x=>'<span class="mono" style="font-size:11.5px">'+esc(x.auth||'—')+'</span>'},
         {k:'checkin', t:'签到', render:x=>x.checkin?tag('有','ok'):'—'},
-        {k:'endpoint', t:'本机端点', render:x=>x.endpoint
-            ?'<span class="mono" style="font-size:11px">'+esc(x.endpoint)+'</span>'
-            :'<span class="faint" style="font-size:11.5px">未部署</span>'},
+        {k:'_live', t:'本机状态', render:x=>{
+            const L=x._live;
+            if(!L)return '<span class="faint" style="font-size:11.5px">未探测</span>';
+            if(L.online)return tag('在线 '+L.ms+'ms','ok');
+            if(L.code===401)return tag('Key 不符','warn');
+            return tag('未运行','');
+          }},
+        {k:'endpoint', t:'本机端点', render:x=>{
+            const L=x._live;
+            const ep=(L&&L.url)||x.endpoint||'';
+            return ep?('<span class="mono" style="font-size:11px">'+esc(ep)+'</span>'
+                       +'<div class="faint" style="font-size:11px">'+esc(L?L.note:x.deployed?'未探测':'未部署')+'</div>')
+                     :'<span class="faint" style="font-size:11.5px">未部署</span>';
+          }},
         {k:'deploy', t:'部署方式',
          render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.deploy||'')+'</span>'},
         {k:'note', t:'说明', render:x=>'<span class="muted" style="font-size:11.5px;display:block;min-width:240px">'

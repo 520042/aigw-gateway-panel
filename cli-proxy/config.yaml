@@ -1,0 +1,15 @@
+# CLIProxyAPI 最小配置（面板集成用）
+# 文档：https://github.com/router-for-me/CLIProxyAPI
+host: "127.0.0.1"
+port: 8318
+auth-dir: "auths"
+api-keys:
+  - "aigw-local-key"
+debug: false
+logging-to-file: false
+usage-statistics-enabled: false
+proxy-url: ""
+request-retry: 2
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true

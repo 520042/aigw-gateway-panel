@@ -823,6 +823,32 @@ _marked = gwextra.mark_catalog_accounts(_srcs, None)
 ck("mark_catalog_accounts 不崩",
    isinstance(_marked, list) and len(_marked) == len(_srcs))
 
+# ---- 本机上游探活（判断反代是真在跑还是只是纸面档案）
+ck("探活表覆盖 4 个反代", len(gwextra.LOCAL_PROBES) == 4,
+   str(len(gwextra.LOCAL_PROBES)))
+ck("探活表含 CLIProxyAPI", "cliproxyapi" in gwextra.LOCAL_PROBES)
+_rp = gwextra.probe_local_upstreams(timeout=2)
+ck("探活返回 4 条", len(_rp) == 4, str(len(_rp)))
+ck("探活项字段齐全",
+   all({"id", "url", "online", "code", "models", "ms", "note"} <= set(x.keys())
+       for x in _rp))
+ck("探活都给了可读说明", all(x.get("note") for x in _rp))
+_off = [x for x in _rp if x["code"] == 0]
+ck("不通的都标为未运行", all(x["online"] is False and "未运行" in x["note"]
+                             for x in _off),
+   "code=0 的有 %d 个" % len(_off))
+ck("探活不抛异常", isinstance(gwextra.probe_local_upstreams(timeout=1), list))
+# CLIProxyAPI 档案里的登录项必须与实测一致（不能写错）
+_cpa = [x for x in UP.VIBE_PROXY if x["id"] == "cliproxyapi"][0]
+ck("CLIProxyAPI 登录项不含 CodeBuddy（实测 v8.0.13 没有）",
+   not any("CodeBuddy" in t for t in _cpa["targets"]),
+   str(_cpa["targets"])[:80])
+ck("CLIProxyAPI 登录项含 Kimi/Codex/Claude/Antigravity",
+   all(any(k in t for t in _cpa["targets"])
+       for k in ("Kimi", "Codex", "Claude", "Antigravity")))
+ck("CLIProxyAPI 记录了 login_flags",
+   isinstance(_cpa.get("login_flags"), list) and len(_cpa["login_flags"]) >= 6)
+
 
 # ================================================================ 汇总
 print()

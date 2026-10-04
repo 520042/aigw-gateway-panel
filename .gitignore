@@ -51,3 +51,8 @@ Thumbs.db
 # 会话密钥（凭据）
 .wb-session-key
 .wb-session-epoch
+
+# CLIProxyAPI 可执行（大文件）
+cli-proxy/*.exe
+cli-proxy/cliproxy.zip
+cli-proxy/auths/

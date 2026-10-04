@@ -779,3 +779,68 @@ def mark_catalog_accounts(items, accounts):
         except Exception:
             it["has_account"] = False
     return items
+
+
+# ================================================================ 本机上游探活
+# 用户会把调研到的反代项目（CLIProxyAPI / claude-code-router / Trae2api-cn …）
+# 部署到本机。面板要能一眼看出「哪些真在跑、哪些只是纸面档案」，
+# 否则档案页全是绿的，实际一个都没起，排查起来很浪费时间。
+LOCAL_PROBES = {
+    "cliproxyapi":      {"url": "http://127.0.0.1:8318/v1/models", "key": "aigw-local-key"},
+    "claude-code-router": {"url": "http://127.0.0.1:3456/v1/models", "key": ""},
+    "trae2api-cn":      {"url": "http://127.0.0.1:8000/v1/models", "key": ""},
+    "workbuddy-manager": {"url": "http://127.0.0.1:8080/v1/models", "key": ""},
+}
+
+
+def probe_local_upstreams(timeout=6):
+    """
+    探活本机部署的反代上游。
+    返回 [{id, url, online, code, models, ms, note}]
+    online 的判据：拿到 2xx 且能解析出模型列表（空列表也算在线 —— 说明服务活着只是没挂账号）
+    """
+    import time as _t
+    out = []
+    for pid, cfg in LOCAL_PROBES.items():
+        url = cfg["url"]
+        item = {"id": pid, "url": url, "online": False, "code": 0,
+                "models": 0, "ms": 0, "note": ""}
+        headers = {"Accept": "application/json", "User-Agent": UA}
+        if cfg.get("key"):
+            headers["Authorization"] = "Bearer " + cfg["key"]
+        req = urllib.request.Request(url, headers=headers)
+        t0 = _t.time()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout,
+                                        context=_ssl_ctx()) as r:
+                raw = r.read().decode("utf-8", "replace")
+                item["code"] = r.status
+                item["ms"] = int((_t.time() - t0) * 1000)
+                try:
+                    d = json.loads(raw)
+                    data = d.get("data") if isinstance(d, dict) else None
+                    if isinstance(data, list):
+                        item["models"] = len(data)
+                        item["online"] = True
+                        item["note"] = ("在线，%d 个模型" % len(data)) if data \
+                            else "在线，但还没登录任何账号（模型列表为空）"
+                    else:
+                        item["online"] = True
+                        item["note"] = "在线（响应不是标准模型列表）"
+                except json.JSONDecodeError:
+                    item["online"] = True
+                    item["note"] = "在线（非 JSON 响应）"
+        except urllib.error.HTTPError as e:
+            item["code"] = e.code
+            item["ms"] = int((_t.time() - t0) * 1000)
+            if e.code == 401:
+                item["note"] = "服务在跑，但 API Key 不对（面板配的 key 与它不一致）"
+            elif e.code == 404:
+                item["note"] = "端口有响应但没有这个路径，可能不是这个服务"
+            else:
+                item["note"] = "HTTP %d" % e.code
+        except Exception as e:
+            item["ms"] = int((_t.time() - t0) * 1000)
+            item["note"] = "未运行（%s）" % type(e).__name__
+        out.append(item)
+    return out

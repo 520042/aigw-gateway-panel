@@ -595,14 +595,23 @@ VIBE_PROXY = [
         "endpoint": "http://127.0.0.1:8317",   # 默认端口，按需改
         "protocol": ["openai", "anthropic", "gemini", "codex"],
         "auth": "oauth",
-        "targets": ["Claude Code", "Codex", "Gemini CLI", "Kimi",
-                    "Antigravity", "Devin", "Grok Build",
-                    "CodeBuddy CN", "CodeBuddy Intl", "Qoder"],
-        "deploy": "Go 单二进制 / Docker",
+        # ★ 实测 v8.0.13（2026-10-03 下载后跑 --help 确认）：
+        #   登录项只有 -kimi-login / -kimi-ai-login / -codex-login /
+        #   -codex-device-login / -claude-login / -antigravity-login /
+        #   -xai-login / -devin-login / -meta-login
+        #   **没有 CodeBuddy，也没有 Qoder** —— 早期资料说「原生支持
+        #   CodeBuddy CN/Intl」是错的，已在此更正，别再按那个去配。
+        "targets": ["Kimi", "Codex(OpenAI)", "Claude", "Antigravity(Gemini)",
+                    "xAI Grok", "Devin", "Meta Muse"],
+        "login_flags": ["-kimi-login", "-codex-login", "-claude-login",
+                        "-antigravity-login", "-xai-login", "-devin-login",
+                        "-meta-login"],
+        "deploy": "Go 单二进制（71 MB）",
         "checkin": False,
         "free": "取决于所挂的订阅账号",
-        "note": "★ 覆盖面最广，事实标准。原生支持 CodeBuddy CN/Intl 与 Qoder 的 OAuth，"
-                "多账号 round-robin + Management API 都有。可直接复用你面板现有两个厂商的凭据。",
+        "note": "★ 把 CLI 订阅（Kimi Code / Codex / Claude Code / Antigravity）"
+                "转成 OpenAI 兼容 API，多账号轮询 + Management API。"
+                "本机已下载 v8.0.13 到 cli-proxy/。",
         "priority": 1,
     },
     {
