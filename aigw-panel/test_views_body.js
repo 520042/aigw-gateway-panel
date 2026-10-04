@@ -51,6 +51,17 @@ S.data = {
      on:true,time:'09:20',logged_in:false,done_today:false,has_models:true},
   ],notify:true,stagger_sec:45,retry_times:2,retry_delay_min:10},
   catalogSources:[{platform:'apk-codebuddy',name:'CodeBuddy 国际版',has_models:true,has_account:false}],
+  srcCats:[
+    {kind:'LOCAL',name:'本地 AI',icon:'◈',desc:'有桌面客户端',color:'acc'},
+    {kind:'API',name:'平台 API',icon:'⇄',desc:'正规 OpenAI 兼容',color:'info'},
+    {kind:'WEB',name:'网页对话',icon:'☁',desc:'只有网页版',color:'warn'},
+  ],
+  srcSummary:{LOCAL:19,API:15,WEB:2,total:36},
+  srcKinds:{
+    'apk-codebuddy':{kind:'LOCAL',facts:{desktop:true,web:true,api:true},meta:{name:'本地 AI'}},
+    'apk-yuanbao':{kind:'LOCAL',facts:{desktop:true,web:true,api:false},meta:{name:'本地 AI'}},
+    'apk-kuku':{kind:'WEB',facts:{desktop:false,web:true,api:false},meta:{name:'网页对话'}},
+  },
   lp:{online:true,base_url:'http://127.0.0.1:8318/v1',models:0,installed:true},
   toolList:[{type:'function',function:{name:'calculator',description:'算式计算',
     parameters:{properties:{expression:{}}}}}],
@@ -68,10 +79,11 @@ ck('有 ② 统一反代 KPI', h.includes('② 统一反代'));
 ck('有 ③ 自动路由 KPI', h.includes('③ 自动路由'));
 ck('写明三步用法', h.includes('用法就三步') && h.includes('auto-fast'));
 ck('说明增强功能可选', h.includes('可选增强'));
-ck('卡片墙渲染', h.includes('srcWall'));
+ck('分类 Tab 渲染', h.includes('本地 AI') && h.includes('平台 API') && h.includes('网页对话'));
 ck('列出本地网关源', h.includes('本地网关（workbuddy）'));
 ck('列出本地反代源', h.includes('CLIProxyAPI'));
-ck('列出可登录平台', h.includes('WorkBuddy 网关') && h.includes('元宝'));
+SRC_TAB='LOCAL'; h=viewSources();
+ck('LOCAL 类含桌面平台', h.includes('WorkBuddy 网关') || h.includes('CodeBuddy 国际版'), h.length+' 字节');
 ck('已接入显示标签', h.includes('已接入'));
 ck('未接入可点击', h.includes("openSrc('apk-yuanbao')"));
 ck('未接入平台给「接入」按钮', h.includes('>接入</button>'));
@@ -152,9 +164,15 @@ ck('一键执行显示时间戳', h.includes('09:10:01'));
 S.data.srcDetail = null; SRC_VIEW = 'card';
 S.data.loginPlatforms = [{id:'x',name:'<img src=x onerror=alert(1)>',method:'cookie',
   edition:'',hint:'<script>bad</script>',upstream:'u'}];
-h = viewSources();
-ck('源名被转义', !h.includes('<img src=x onerror') && h.includes('&lt;img'));
-ck('源说明被转义', !h.includes('<script>bad'));
+// 恶意平台在两个 Tab 下都要被转义
+let xssHits = 0, xssTabs = 0;
+for (const t of ['LOCAL', 'WEB']) {
+  SRC_TAB = t; h = viewSources();
+  xssTabs++;
+  if (!h.includes('<img src=x onerror') && !h.includes('<script>bad')) xssHits++;
+}
+ck('两个分类下源名都被转义', xssHits === xssTabs && xssTabs === 2,
+  xssHits + '/' + xssTabs);
 
 console.log('');
 console.log('失败 ' + fail + ' 项');

@@ -285,6 +285,7 @@ function loadSources(){
     api('/api/accounts').catch(()=>({accounts:[],stats:{}})),
     api('/api/autocheckin?action=status').catch(()=>({platforms:[]})),
     api('/api/models?action=sources').catch(()=>({sources:[]})),
+    api('/api/models?action=sources').catch(()=>({})),
     api('/api/models').catch(()=>({models_enriched:[],rate_summary:{}})),
     api('/api/overview').catch(()=>({})),
   ]).then(([lp,ac,au,src,md,ov])=>{
@@ -295,6 +296,9 @@ function loadSources(){
     S.data.catalogSources=src.sources||[];
     S.data.models=md;
     S.data.overview=ov;
+    S.data.srcKinds=src.platform_kinds||{};
+    S.data.srcCats=src.categories||[];
+    S.data.srcSummary=src.summary||{};
     render();
   }).catch(e=>toast('加载接入源失败：'+e.message,'err'));
 }
@@ -472,53 +476,91 @@ function viewRoute(){
 function setRouteTab(k){ ROUTE_TAB=k; render(); }
 function viewRouteAuto(){ return viewRoute0(); }
 
+/** 把源清单按 LOCAL / API / WEB 分组 */
+let SRC_TAB = 'LOCAL';
+function srcGroups(){
+  const cls = S.data.srcKinds || {};
+  const cats = S.data.srcCats || [];
+  const out = {};
+  for(const c of cats) out[c.kind] = {meta:c, items:[]};
+  for(const s of sourceList()){
+    const k = (cls[s.key] && cls[s.key].kind) ||
+              (s.key==='gateway'||s.key==='localproxy' ? 'LOCAL' : 'WEB');
+    (out[k] || (out.WEB = out.WEB || {meta:{kind:'WEB',name:'其它',icon:'·',desc:'',color:''},items:[]})).items.push(s);
+  }
+  return out;
+}
+
 function viewSources(){
   if(SRC_VIEW==='detail'&&S.data.srcDetail){
     return srcDetail();
   }
-  const rows=sourceList();
-  const loggedN=rows.filter(x=>x.logged).length;
-  const modelN=(S.data.models||{}).models_enriched||[];
+  const groups=srcGroups();
+  const cats=S.data.srcCats||[];
+  const catId=S.data.srcSummary||{};
   const o=S.data.overview||{};
   const g=o.gateway||{};
+  const allN=Object.values(groups).reduce((n,x)=>n+x.items.length,0);
+  const loggedAll=Object.values(groups).reduce(
+    (n,x)=>n+x.items.filter(i=>i.logged).length,0);
 
   let h='';
   // ---- 顶部：链路状态，一眼看清「接入 → 反代 → 路由」三个环节
   h+='<div class="grid g4 mb">'
     +'<div class="kpi"><div class="lb">① 接入源</div>'
-    +'<div class="vl">'+loggedN+' <span class="faint" style="font-size:14px">/ '+rows.length+'</span></div>'
+    +'<div class="vl">'+loggedAll+' <span class="faint" style="font-size:14px">/ '+allN+'</span></div>'
     +'<div class="ex">已接入 / 可接入</div></div>'
     +'<div class="kpi"><div class="lb">② 统一反代</div>'
     +'<div class="vl" style="color:'+(g.alive?'var(--ok)':'var(--err)')+'">'
     +(g.alive?'在线':'离线')+'</div>'
     +'<div class="ex">'+esc(g.addr||'127.0.0.1:8317')+' · 面板即 OpenAI 兼容端点</div></div>'
-    +'<div class="kpi"><div class="lb">可用模型</div>'
-    +'<div class="vl">'+modelN.length+'</div>'
-    +'<div class="ex">其中 '+modelN.filter(x=>x.credits).length+' 个有倍率</div></div>'
     +'<div class="kpi"><div class="lb">③ 自动路由</div>'
     +'<div class="vl">3</div>'
     +'<div class="ex">auto-fast / weight / priority</div></div>'
+    +'<div class="kpi"><div class="lb">分类</div>'
+    +'<div class="vl" style="font-size:16px">'
+    +'本'+catId.LOCAL+' · API'+catId.API+' · 网'+catId.WEB+'</div>'
+    +'<div class="ex">有桌面客户端的算「本地 AI」</div></div>'
     +'</div>';
 
   // ---- 怎么用
   h+='<div class="note">'
-    +'<b>用法就三步</b>：① 下面点卡片接入源（扫码 / Cookie / 填 Key）'
+    +'<b>用法就三步</b>：① 下面按类选源接入（扫码 / Cookie / 填 Key）'
     +'② 所有源都汇到面板这个 OpenAI 兼容端点：<code>'+esc(panelBaseUrl())+'</code>，'
     +'api_key 用 <code>admin</code> ③ 客户端里把 model 填成 <code>auto-fast</code>，'
     +'面板按实测延迟自动挑最快的源。<br>'
-    +'<span class="faint">签到、任务、工具调用都是<b>可选增强</b>，不配置也不影响主流程。</span>'
+    +'<span class="faint">分类规则：<b>有桌面客户端的一律算「本地 AI」</b>，'
+    +'哪怕它同时有网页版。签到、任务、工具调用都是可选增强，不配置也不影响主流程。</span>'
     +'</div>';
 
-  // ---- 源卡片墙
-  h+='<div class="grid g3" id="srcWall">';
-  for(const s of rows){
+  // ---- 分类 Tab
+  h+='<div class="tabs">'
+    +cats.map(c=>{
+        const n=(groups[c.kind]||{items:[]}).items.length;
+        const on=loggedAll;
+        const cnt=(groups[c.kind]||{items:[]}).items.filter(i=>i.logged).length;
+        return '<button class="'+(SRC_TAB===c.kind?'on':'')+'" '
+          +'onclick="setSrcTab(\''+c.kind+'\')">'
+          +esc(c.icon)+' '+esc(c.name)+' <span class="faint">'+cnt+'/'+n+'</span></button>';
+      }).join('')
+    +'</div>';
+
+  const cur=groups[SRC_TAB]||{meta:{name:'',desc:''},items:[]};
+  h+='<div class="muted" style="font-size:12.5px;margin:-4px 0 12px">'
+    +esc(cur.meta.desc||'')+'</div>';
+
+  // ---- 该分类下的源卡片墙
+  h+='<div class="grid g3">';
+  for(const s of cur.items){
     const badge=s.logged
       ?'<span class="tag ok">已接入</span>'
       :'<span class="tag">未接入</span>';
     const chk=s.checkin
       ?'<span class="tag acc" title="每日 '+esc(s.at||'')+' 自动签到">签到 '+(s.done?'✓':'')+'</span>'
       :'';
-    // 未接入的一级就给「接入」按钮，不用点两次
+    const kindTag=(S.data.srcKinds||{})[s.key];
+    const fact=kindTag&&kindTag.facts?kindTag.facts:{};
+    const marks=((fact.desktop?'桌':'')+(fact.web?'网':'')+(fact.api?'API':''))||'';
     const act=s.logged
       ?'<button class="btn sm" onclick="event.stopPropagation();openSrc(\''+esc(s.key)+'\')">详情</button>'
       :'<button class="btn sm pri" onclick="event.stopPropagation();openSrc(\''+esc(s.key)+'\')">接入</button>';
@@ -529,7 +571,9 @@ function viewSources(){
       +'<div class="faint" style="font-size:11.5px;line-height:1.5;min-height:48px">'
       +esc(s.desc||'')+'</div>'
       +'<div class="flex" style="margin-top:8px;gap:5px">'
-      +'<span class="tag info">'+esc(s.kind)+'</span>'+chk
+      +'<span class="tag info">'+esc(s.kind)+'</span>'
+      +(marks?'<span class="tag">'+esc(marks)+'</span>':'')
+      +chk
       +(s.models?'<span class="tag acc">'+s.models+' 模型</span>':'')
       +'</div>'
       +'<div class="faint mono" style="font-size:10.5px;margin-top:7px;word-break:break-all">'
@@ -540,6 +584,8 @@ function viewSources(){
   h+='</div>';
   return h;
 }
+
+function setSrcTab(k){ SRC_TAB=k; render(); }
 
 function openSrc(key){
   S.data.srcDetail=key;

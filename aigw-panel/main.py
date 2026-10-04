@@ -537,9 +537,22 @@ def api_models(action=None, body=None):
                 data, ensure_ascii=False)[:500], code="catalog_failed")
 
     if action == "sources":
+        # 一次给全：倍率来源清单 + 接入源分类（见 app/sources.py 的分类规则）
         from app import gwextra
-        return ok({"sources": gwextra.mark_catalog_accounts(
-            gwextra.catalog_sources(), APP.get("accounts"))})
+        from app import sources as SRC
+        return ok({
+            # 倍率可拉取的平台
+            "sources": gwextra.mark_catalog_accounts(
+                gwextra.catalog_sources(), APP.get("accounts")),
+            # 接入源分类：有桌面客户端 → LOCAL，否则有 API → API，否则 WEB
+            "categories": SRC.CATEGORIES,
+            "platform_kinds": {p: {"kind": SRC.kind_of(p),
+                                   "facts": SRC.facts_of(p),
+                                   "meta": SRC.category_meta(SRC.kind_of(p))}
+                               for p in SRC.PLATFORM_FACTS},
+            "local_proxies": SRC.LOCAL_PROXIES,
+            "summary": SRC.summary(),
+        })
 
     if action == "select":
         # 持久化用户勾选的模型（前端用来生成客户端配置）

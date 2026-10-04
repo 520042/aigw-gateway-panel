@@ -342,9 +342,16 @@ class TrayIcon:
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         if msg == WM_TRAY:
-            if lparam == WM_LBUTTONDBLCLK:
+            # 鼠标消息既可能在 lParam（v1），也可能在 uParam 低位（v4）。
+            # 两种都判一遍，这样不管系统/图标版本怎么变，右键都能识别。
+            mouse = lparam
+            if not (0x0200 <= (mouse & 0xFFFF) <= 0x0210
+                    or 0x0200 <= (wparam & 0xFFFF) <= 0x0210):
+                mouse = wparam & 0xFFFF
+            code = mouse & 0xFFFF
+            if code == WM_LBUTTONDBLCLK:
                 self._open()
-            elif lparam == WM_RBUTTONUP or lparam == WM_CONTEXTMENU:
+            elif code == WM_RBUTTONUP or code == WM_CONTEXTMENU:
                 self._menu(hwnd)
             return 0
         if msg == WM_TASKBARCREATED:
@@ -417,7 +424,7 @@ class TrayIcon:
 
     def _add_icon(self):
         if not self.hwnd:
-            return
+            return False
         self._icon_handle = self._load_icon()
         nid = self._nid_obj()
         if self._icon_handle:
@@ -426,13 +433,20 @@ class TrayIcon:
         else:
             nid.uFlags = NIF_MESSAGE | NIF_TIP
         nid.szTip = self.title
-        if Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
-            self._nid = nid
-            # v4 版本让左键事件区分左右键
-            v = self._nid_obj()
-            v.uID = ID_TRAY
-            v.uVersion = NOTIFYICON_VERSION_4
-            Shell_NotifyIconW(NIM_SETVERSION, ctypes.byref(v))
+        if not Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
+            # 静默失败是最坑的：图标没挂上，用户完全不知道，只觉得"右键没反应"
+            import sys as _sys
+            _sys.stderr.write("[tray] Shell_NotifyIconW(NIM_ADD) 失败 err=%d\n"
+                             % ctypes.get_last_error())
+            _sys.stderr.flush()
+            return False
+        self._nid = nid
+        # 不要设 NOTIFYICON_VERSION_4。
+        # v4 会把 lParam 从「鼠标消息」改成「通知码(NIN_*)」，
+        # 真实鼠标消息被挪到 uParam 低位 —— 而我们的 wndproc 是按
+        # `lparam == WM_RBUTTONUP` 判断的，v4 下永远不成立，右键菜单就废了。
+        # v1（不调用 NIM_SETVERSION）下 lParam 就是 WM_RBUTTONUP，行为最直接。
+        return True
 
     def _remove_icon(self):
         if self.hwnd:

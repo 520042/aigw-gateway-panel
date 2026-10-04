@@ -91,6 +91,36 @@ def main():
     check("关闭开机自启动", ok2, m2)
     check("确认已关闭", not T.is_autostart_enabled())
 
+    # ---- 右键菜单回归（用户两次反馈「右键没反应」）----
+    # 根因：_add_icon 里设了 NOTIFYICON_VERSION_4，v4 会把 lParam
+    # 从「鼠标消息」改成「通知码」，导致 `lparam == WM_RBUTTONUP`
+    # 永远不成立，菜单永远不弹。必须保证不再设 v4。
+    import inspect
+    _src = inspect.getsource(T.TrayIcon._add_icon)
+    # 真正让右键失效的动作是「调用 NIM_SETVERSION 设 v4」，
+    # 注释里提到版本号常量不算（代码里应该只出现在注释里）
+    _code_only = "\n".join(
+        l for l in _src.split("\n")
+        if not l.strip().startswith("#"))
+    check("不再调用 NIM_SETVERSION（v4 会让右键失效）",
+          "NIM_SETVERSION" not in _code_only,
+          "v4 把 lParam 变成通知码，lparam==WM_RBUTTONUP 永不成立")
+    check("_add_icon 检查 Shell_NotifyIconW 返回值",
+          "if not Shell_NotifyIconW" in _src, "静默失败会让图标根本没挂上")
+    # wndproc 必须同时认 lParam 和 uParam 两种位置
+    _w = inspect.getsource(T.TrayIcon._wndproc)
+    check("wndproc 同时认 lParam 与 uParam",
+          "wparam & 0xFFFF" in _w and "lparam" in _w,
+          "v1/v4 两种消息位置都要覆盖")
+    check("wndproc 识别 WM_RBUTTONUP", "WM_RBUTTONUP" in _w)
+    check("wndproc 识别 WM_LBUTTONDBLCLK", "WM_LBUTTONDBLCLK" in _w)
+    check("wndproc 也认 WM_CONTEXTMENU", "WM_CONTEXTMENU" in _w)
+    # TrackPopupMenu 之后必须发 WM_NULL，否则菜单一闪就没
+    _m = inspect.getsource(T.TrayIcon._menu)
+    check("TrackPopupMenu 后发 WM_NULL", "WM_NULL" in _m,
+          "缺这条菜单会一闪就消失")
+    check("菜单含「退出」项", "ID_EXIT" in _m)
+
     print()
     print("=" * 66)
     print("%-28s %-6s %s" % ("测试项", "结果", "说明"))
