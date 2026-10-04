@@ -748,3 +748,34 @@ def probe_endpoints(accounts, platform, account_id=None, paths=None):
         "note": ("该站整站鉴权（基准路径也是 %d），已用「与基准不同」判定真实端点"
                  % bcode) if gated else "该站为路径级路由，404 可直接判定不存在",
     }
+
+
+def catalog_sources():
+    """
+    列出所有「可拉取线上模型/倍率」的平台。
+    前端「拉取线上倍率」的下拉框以前是硬编码 4 个选项，
+    用户只能选到 4 个 —— 这里改成从 MODEL_CATALOGS 动态生成，
+    并标出哪些平台当前有可用凭据。
+    """
+    from .gwlogin import PLATFORMS
+    acc = None
+    out = []
+    for pid, urls in (MODEL_CATALOGS or {}).items():
+        spec = PLATFORMS.get(pid) or {}
+        out.append({
+            "platform": pid,
+            "name": spec.get("name") or pid,
+            "urls": list(urls),
+            "has_account": False,
+        })
+    return out
+
+
+def mark_catalog_accounts(items, accounts):
+    """标出哪些平台在账号池里有可用凭据（决定能不能真拉到数据）"""
+    for it in items or []:
+        try:
+            it["has_account"] = bool(accounts and accounts.usable(it["platform"]))
+        except Exception:
+            it["has_account"] = False
+    return items
