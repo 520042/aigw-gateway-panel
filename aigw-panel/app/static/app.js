@@ -195,7 +195,7 @@ function dtBindOnce(){
 
 // ---------------------------------------------------------------- 路由
 const TITLES={dash:'总览',gateway:'网关与账号',login:'账号登录',toolcall:'工具调用',autocheckin:'自动签到',checkin:'签到中心',growth:'成长任务',
-  tasks:'任务中心',usage:'用量看板',toolcall:'工具调用',models:'模型与价格',sites:'资源站点',
+  tasks:'任务中心',usage:'用量看板',toolcall:'工具调用',localproxy:'本地反代',models:'模型与价格',sites:'资源站点',
   catalog:'免费资源导航',route:'智能路由',upstreams:'上游档案',
   notify:'通知中心',logs:'日志',settings:'设置'};
 
@@ -2136,6 +2136,153 @@ function viewProbe(){
  */
 const TC = { messages: [], enabled: {}, result: null, execLog: [] };
 
+/* ================================================================ 本地反代上游
+ * 把 CLIProxyAPI 集成进面板：启停、配置、OAuth 登录全在界面里完成，
+ * 用户不必手动装服务、改 YAML、敲命令行。
+ */
+function loadLocalproxy(){
+  api('/api/localproxy?action=status').then(r=>{
+    S.data.lp=r;
+    render();
+  }).catch(e=>toast('读取本地上游状态失败：'+e.message,'err'));
+}
+async function lpAct(action, body){
+  const label={start:'启动',stop:'停止',restart:'重启',config:'保存配置',login:'登录'}[action]||action;
+  toast(label+'中…');
+  const r=await api('/api/localproxy?action='+action, body||{})
+    .catch(e=>({ok:false,message:e.message}));
+  if(r.ok===false){toast(r.message||label+'失败','err');return r;}
+  if(action==='login'){
+    S.data.lpLogin=r;
+    if(r.url){
+      const box=$('#lpLoginBox');
+      if(box){box.style.display='block';
+        box.innerHTML='<div class="note">已生成授权链接，'
+          +'<a href="'+esc(r.url)+'" target="_blank" rel="noreferrer" class="mono">'+esc(r.url)+'</a>'
+          +(r.user_code?('　设备码：<b class="mono">'+esc(r.user_code)+'</b>'):'')
+          +'<br>'+esc(r.note||'')+'</div>';}
+      toast('授权链接已生成，点上面打开','ok');
+    }else{
+      toast('没抓到授权链接，看下方日志','err');
+    }
+  }else{
+    toast(r.message||label+'成功','ok');
+  }
+  loadLocalproxy();
+  return r;
+}
+function viewLocalproxy(){
+  const st=S.data.lp||{};
+  const lg=S.data.lpLogin||null;
+  const logs=S.data.lpLog||'';
+
+  let h='';
+  // 状态卡
+  h+='<div class="grid g4 mb">'
+    +'<div class="kpi"><div class="lb">服务状态</div>'
+    +'<div class="vl" style="color:'+(st.online?'var(--ok)':'var(--faint)')+'">'
+    +(st.online?'运行中':'已停止')+'</div>'
+    +'<div class="ex">'+(st.online?esc(st.base_url):esc(st.note||''))+'</div></div>'
+    +'<div class="kpi"><div class="lb">内置二进制</div>'
+    +'<div class="vl">'+(st.installed?'已就位':'缺失')+'</div>'
+    +'<div class="ex">v'+esc(st.version||'')+' · '+esc(st.size_mb||0)+' MB'
+    +(st.bundled?' · 已内置在 EXE':'')+'</div></div>'
+    +'<div class="kpi"><div class="lb">可用模型</div>'
+    +'<div class="vl">'+esc(st.models||0)+'</div>'
+    +'<div class="ex">'+((st.auth_files||[]).length)+' 个账号凭据</div></div>'
+    +'<div class="kpi"><div class="lb">端点</div>'
+    +'<div class="vl" style="font-size:15px">:'+esc(st.port||8318)+'</div>'
+    +'<div class="ex">key '+esc((st.api_key||'').slice(0,6))+'…</div></div>'
+    +'</div>';
+
+  if(!st.installed){
+    h+='<div class="note err">没有找到 <code>cli-proxy-api.exe</code>。'
+      +'用打包好的面板 EXE 会自动内置；如果是从源码跑，把二进制放到 '
+      +'<code>网关项目/cli-proxy/</code> 或 <code>aigw-panel/data/cliproxy/bin/</code>。</div>';
+  }
+
+  // 控制
+  h+='<div class="card"><div class="ch"><b>CLIProxyAPI</b>'
+    +'<span class="faint">把 Kimi / Codex / Claude / Antigravity / Grok / Devin / Meta '
+    +'的 CLI 订阅转成 OpenAI 兼容 API</span></div><div class="cb">'
+    +'<div class="btnrow mb">'
+    +(st.online?'<button class="btn" onclick="lpAct(\'restart\')">重启</button>'
+              :'<button class="btn pri" onclick="lpAct(\'start\')">启动</button>')
+    +'<button class="btn" onclick="lpAct(\'stop\')">停止</button>'
+    +'<button class="btn" onclick="loadLocalproxy()">刷新状态</button>'
+    +'<button class="btn gh" onclick="lpShowLog()">查看日志</button>'
+    +'</div>'
+    +'<div class="row n">'
+    +'<div><label>端口</label><input id="lpPort" type="number" value="'
+    +esc(st.port||8318)+'"></div>'
+    +'<div><label>API Key</label><input id="lpKey" value="'
+    +esc(st.api_key||'')+'"></div>'
+    +'<div class="n" style="align-self:flex-end">'
+    +'<button class="btn" onclick="lpAct(\'config\',{port:+$(\'#lpPort\').value,'
+    +'key:$(\'#lpKey\').value,apply:true})">保存并重启</button></div>'
+    +'</div>'
+    +'<div class="muted mt" style="font-size:12px">配置文件：<code>'+esc(st.config_path||'')+'</code>'
+    +' · 凭据目录：<code>'+esc(st.auth_dir||'')+'</code></div>'
+    +'</div></div>';
+
+  // 登录
+  h+='<div class="card"><div class="ch"><b>登录账号</b>'
+    +'<span class="faint">授权链接会在下方生成，点开完成授权，凭据自动落盘、服务热加载</span>'
+    +'</div><div class="cb">';
+  if(st.login_status&&st.login_status.running){
+    h+='<div class="note">有登录流程正在进行中，等你授权完…</div>';
+  }
+  h+=dataTable({
+    key:'lpLogin', rows:st.providers||[], size:20,
+    searchHint:'搜索平台…', searchKeys:['name','note','id'],
+    cols:[
+      {k:'name',t:'平台',render:x=>'<b>'+esc(x.name)+'</b>'
+        +'<div class="faint mono" style="font-size:11px">'+esc(x.flag)+'</div>'},
+      {k:'note',t:'说明',render:x=>'<span class="faint" style="font-size:12px">'+esc(x.note)+'</span>'},
+      {k:'_go',t:'',render:x=>'<button class="btn sm pri" onclick="lpAct(\'login\','
+        +'{provider:\''+esc(x.id)+'\'})">获取授权链接</button>'},
+    ]});
+  h+='<div id="lpLoginBox" style="display:none"></div>';
+  h+='<div class="muted mt" style="font-size:12px">'
+    +'说明：v'+esc(st.version||'8.0.13')+' 的登录项就是上面这些 —— '
+    +'<b>没有 CodeBuddy，也没有 Qoder</b>（早期资料说有，实测 --help 确认是错的）。'
+    +'</div>';
+  h+='</div></div>';
+
+  // 已登录账号
+  if((st.auth_files||[]).length){
+    h+='<div class="card"><h2>已保存的凭据（'+(st.auth_files||[]).length+'）</h2>'
+      +dataTable({
+        key:'lpAuth', rows:st.auth_files, size:20,
+        searchHint:'搜索凭据文件…', searchKeys:['name'],
+        cols:[
+          {k:'name',t:'文件',render:x=>'<span class="mono" style="font-size:12px">'+esc(x.name)+'</span>'},
+          {k:'size',t:'大小',num:true,render:x=>x.size+' B'},
+          {k:'mtime',t:'修改时间',render:x=>'<span class="faint">'+esc(x.mtime)+'</span>'},
+        ]})+'</div>';
+  }
+
+  // 模型列表
+  if((st.model_ids||[]).length){
+    h+='<div class="card"><h2>可路由的模型（'+esc(st.models)+'）</h2>'
+      +'<pre>'+esc((st.model_ids||[]).join('\n'))+'</pre></div>';
+  }
+
+  // 日志
+  if(logs){
+    h+='<div class="card"><h2>服务日志</h2><pre>'+esc(logs)+'</pre></div>';
+  }
+  if(lg&&lg.raw){
+    h+='<div class="card"><h2>登录输出</h2><pre>'+esc(lg.raw)+'</pre></div>';
+  }
+  return h;
+}
+async function lpShowLog(){
+  const r=await api('/api/localproxy?action=log',{lines:120}).catch(e=>({ok:false}));
+  S.data.lpLog=(r&&r.log)||'';
+  render();
+}
+
 /* ================================================================ 定时自动签到 */
 function loadAutocheckin(){
   api('/api/autocheckin?action=status').then(r=>{
@@ -2639,12 +2786,12 @@ function viewLogin(){
   return h;
 }
 
-const VIEWS={dash:viewDash,gateway:viewGateway,login:viewLogin,toolcall:viewToolcall,autocheckin:viewAutocheckin,checkin:viewCheckin,growth:viewGrowth,
+const VIEWS={dash:viewDash,gateway:viewGateway,login:viewLogin,toolcall:viewToolcall,localproxy:viewLocalproxy,autocheckin:viewAutocheckin,checkin:viewCheckin,growth:viewGrowth,
   tasks:viewTasks,usage:viewUsage,models:viewModels,sites:viewSites,catalog:viewCatalog,
   route:viewRoute,upstreams:viewUpstreams,
   notify:viewNotify,logs:viewLogs,settings:viewSettings};
 
-const LOADERS={gateway:loadGateway,login:loadLogin,toolcall:loadToolcall,autocheckin:loadAutocheckin,checkin:loadCheckin,growth:loadGrowth,tasks:loadTasks,
+const LOADERS={gateway:loadGateway,login:loadLogin,toolcall:loadToolcall,localproxy:loadLocalproxy,autocheckin:loadAutocheckin,checkin:loadCheckin,growth:loadGrowth,tasks:loadTasks,
   usage:loadUsage,models:loadModels,sites:loadSites,catalog:loadCatalog,
   route:loadRoute,upstreams:loadUpstreams,notify:loadNotify,logs:loadLogs,
   settings:loadSettings};
