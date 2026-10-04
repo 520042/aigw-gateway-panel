@@ -813,10 +813,18 @@ ck("所有模型行都被兜底（不产生 undefined）",
 
 # ---- 倍率来源平台（前端下拉框原来硬编码 4 个，用户反馈选不到）
 _srcs = gwextra.catalog_sources()
-ck("倍率来源 ≥6 个（不再是硬编码 4 个）", len(_srcs) >= 6, str(len(_srcs)))
+ck("倍率来源 ≥8 个（不再是硬编码 4 个）", len(_srcs) >= 8, str(len(_srcs)))
 ck("来源带平台键与名称",
    all(x.get("platform") and x.get("name") for x in _srcs))
-ck("来源带端点列表", all(isinstance(x.get("urls"), list) and x["urls"] for x in _srcs))
+ck("来源带 urls 字段", all(isinstance(x.get("urls"), list) for x in _srcs))
+ck("来源标注了 has_models 能力",
+   all(isinstance(x.get("has_models"), bool) for x in _srcs))
+ck("至少 4 个平台能直接列模型",
+   len([x for x in _srcs if x.get("has_models")]) >= 4,
+   str(len([x for x in _srcs if x.get("has_models")])))
+ck("至少 4 个平台能拉倍率目录",
+   len([x for x in _srcs if x.get("has_catalog")]) >= 4,
+   str(len([x for x in _srcs if x.get("has_catalog")])))
 ck("来源默认 has_account=False",
    all(x.get("has_account") is False for x in _srcs))
 _marked = gwextra.mark_catalog_accounts(_srcs, None)

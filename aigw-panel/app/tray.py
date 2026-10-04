@@ -35,6 +35,7 @@ if IS_WINDOWS:
 
     # ---------------------------------------------------------------- 常量
     WM_DESTROY = 0x0002
+    WM_NULL = 0x0000
     WM_COMMAND = 0x0111
     WM_APP = 0x8000
     WM_TRAY = WM_APP + 1
@@ -393,6 +394,10 @@ class TrayIcon:
         user32.GetCursorPos(ctypes.byref(pt))
         SetForegroundWindow(hwnd)
         TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, None)
+        # 关键：TrackPopupMenu 返回后必须给窗口发一条 WM_NULL，
+        # 否则系统认为菜单没有前景归属，**菜单会一闪就消失** ——
+        # 用户体感就是「图标右键没反应」。这是 ctypes 托盘的经典坑。
+        PostMessageW(hwnd, WM_NULL, 0, 0)
         DestroyMenu(m)
 
     # ---------------------------------------------------------- 图标

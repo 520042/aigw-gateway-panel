@@ -194,10 +194,8 @@ function dtBindOnce(){
 }
 
 // ---------------------------------------------------------------- 路由
-const TITLES={dash:'总览',gateway:'网关与账号',login:'账号登录',toolcall:'工具调用',autocheckin:'自动签到',checkin:'签到中心',growth:'成长任务',
-  tasks:'任务中心',usage:'用量看板',toolcall:'工具调用',localproxy:'本地反代',models:'模型与价格',sites:'资源站点',
-  catalog:'免费资源导航',route:'智能路由',upstreams:'上游档案',
-  notify:'通知中心',logs:'日志',settings:'设置'};
+const TITLES={dash:'总览',account:'账号与签到',route:'智能路由',usage:'用量看板',
+  models:'模型与倍率',toolcall:'工具调用',localproxy:'本地反代',settings:'设置与日志'};
 
 document.addEventListener('click',e=>{
   const b=e.target.closest('.navbtn');
@@ -252,8 +250,10 @@ function render(){
   const f=VIEWS[S.v]||VIEWS.dash;
   $('#view').innerHTML=f();
   if(S.v==='login')paintLoginSession();
-  const hb=$('#hdCheckin');
-  if(hb)hb.classList.toggle('hidden', CHECKIN_VIEWS.indexOf(S.v)<0);
+  const box=$('#oneClickBox');
+  if(box)box.innerHTML=viewOneClick();
+  // 账号与签到页需要把当前会话/探测结果同步进去
+  if(S.v==='account')paintLoginSession();
 }
 async function switchView(v,force){
   S.v=v;
@@ -298,7 +298,7 @@ function viewDash(){
       ${bar(pct,'ok')}
       <div class="flex mt" style="justify-content:space-between">
         <span class="muted">${esc(c.date||'')} · 完成 ${pct}%</span>
-        <button class="btn pri sm" onclick="quickCheckin()">全部签到</button>
+        <button class="btn pri sm" onclick="oneClick()">⚡ 一键执行</button>
       </div>
       <div class="mt">
         <table><thead><tr><th>站点</th><th>连续天数</th><th>状态</th></tr></thead><tbody>
@@ -769,12 +769,35 @@ function chart(pts){
 async function loadModels(){
   const r=await api('/api/models');
   S.data.models=r;
-  // 倍率来源清单（下拉框用），以前是硬编码 4 个选项
+  // 可按平台筛选的来源（全部 / 各平台）
   try{
     const s=await api('/api/models?action=sources').catch(()=>({sources:[]}));
     S.data.catalogSources=s.sources||[];
   }catch(e){ S.data.catalogSources=[]; }
   loadModelSel();
+  // 上游档案并进模型页了，一并加载
+  api('/api/upstreams').then(x=>{S.data.upstreams=x;render();}).catch(()=>{});
+  render();
+}
+
+/** 切平台：拉该平台自己的模型，表格跟着换 */
+async function switchModelPlatform(pid){
+  S.data.modelPlatform=pid;
+  S.data.platformModels=null;
+  render();
+  if(pid==='gateway'){render();return;}
+  const el=$('#modelPlatform');
+  if(el)el.value=pid;
+  toast('正在取 '+pid+' 的模型列表…');
+  const r=await api('/api/models?action=platform_models',{platform:pid})
+    .catch(e=>({ok:false,message:e.message}));
+  if(r.ok===false){
+    S.data.platformModels={error:r.message,models:[]};
+    toast(r.message||'取不到该平台的模型','err');
+  }else{
+    S.data.platformModels=r;
+    toast(r.note||('该平台 '+((r.models||[]).length)+' 个模型'),'ok');
+  }
   render();
 }
 /* ---------------------------------------------------------------- 模型选择
@@ -915,6 +938,82 @@ async function fetchCatalog(){
   render();
 }
 
+/** 平台来源的模型表（选了某个平台时显示；默认走网关表） */
+function platformTable(){
+  const pid=S.data.modelPlatform||'gateway';
+  if(pid==='gateway')return gatewayTable(S._rows||[],S._v1||[]);
+  const pm=S.data.platformModels;
+  if(!pm)return '<div class="sk line" style="height:40px"></div>';
+  if(pm.error){
+    return '<div class="note warn">'+esc(pm.error)
+      +'<br>可以点右上角「拉取线上倍率」试试该平台的目录接口，'
+      +'或者在「账号登录」里给这个平台存一份凭据再重试。</div>';
+  }
+  const ms=pm.models||[];
+  if(!ms.length){
+    return empty('该平台返回了空列表 —— 多半是还没登录，或该账号没有可用模型');
+  }
+  return '<div class="mt">'+dataTable({
+    key:'platModels', rows:ms, size:25, sort:'id',
+    searchHint:'搜索模型…', searchKeys:['id','name','credits'],
+    cols:[
+      {k:'_sel',t:'',w:'34px',render:x=>
+        '<input type="checkbox" style="width:auto" '+(MODEL_SEL.has(x.id)?'checked':'')
+        +' onchange="selOne(this,\''+esc(x.id)+'\')">'},
+      {k:'id',t:'模型 ID',render:x=>'<span class="mono">'+esc(x.id)+'</span>'},
+      {k:'name',t:'显示名',render:x=>esc(x.name||'—')},
+      {k:'credits',t:'倍率',render:x=>x.credits?tag(String(x.credits),'acc')
+        :'<span class="faint">—</span>'},
+    ]})+'</div>';
+}
+
+/** 网关来源的模型表（默认视图） */
+function gatewayTable(rows,v1){
+  return '<div class="dtbar" style="border:1px solid var(--line);border-radius:var(--r);margin-bottom:0">'
+    +'<label style="margin:0;display:flex;align-items:center;gap:6px;white-space:nowrap">'
+    +'<input type="checkbox" style="width:auto" '+(MODEL_SEL.size===rows.length&&rows.length?'checked':'')
+    +' onchange="selAllModels(this.checked)"> 全选</label>'
+    +'<span class="cnt" style="margin-left:0">已选 <b id="selCount">'+MODEL_SEL.size+'</b> / '+rows.length+'</span>'
+    +'<span class="sp"></span>'
+    +'<button class="btn sm pri" onclick="selClientConfig()">生成客户端配置</button>'
+    +'<button class="btn sm" onclick="selCopyIds()">复制 ID</button>'
+    +'<button class="btn sm" onclick="selExport()">导出 JSON</button>'
+    +'<button class="btn sm" onclick="selClear()">清空选择</button>'
+    +'</div><pre id="clientCfg" style="display:none"></pre>'
+    +'<div class="mt" id="modelTable">'+dataTable({
+      key:'models', rows:rows, size:25, sort:'id',
+      searchHint:'搜索模型 ID / 倍率 / 来源…',
+      searchKeys:['id','credits','rate_source','name'],
+      cols:[
+        {k:'_sel', t:'', w:'34px', render:x=>
+          '<input type="checkbox" style="width:auto" '+(MODEL_SEL.has(x.id)?'checked':'')
+          +' onchange="selOne(this,\''+esc(x.id)+'\')">'},
+        {k:'id', t:'模型 ID', render:x=>'<span class="mono">'+esc(x.id)+'</span>'},
+        {k:'credits', t:'倍率', render:x=>x.credits
+            ?tag(x.credits,'acc')
+            :'<span class="faint" title="公开接口里没查到该模型的倍率">未知</span>'},
+        {k:'rate_source', t:'来源', render:x=>'<span class="faint" style="font-size:12px">'+esc(x.rate_source||'—')+'</span>'},
+        {k:'ctx', t:'上下文', num:true, render:x=>x.ctx?Number(x.ctx).toLocaleString():'<span class="faint">—</span>'},
+        {k:'out', t:'输出', num:true, render:x=>x.out?Number(x.out).toLocaleString():'<span class="faint">—</span>'},
+        {k:'cnFree', t:'国内站', render:x=>x.cnFree&&x.cnFree!=='-'?tag(x.cnFree,'ok'):'<span class="faint">—</span>'},
+        {k:'intlFree', t:'国际站', render:x=>x.intlFree&&x.intlFree!=='-'?tag(x.intlFree,'ok'):'<span class="faint">—</span>'},
+        {k:'cost', t:'实测成本', render:x=>x.cost&&x.cost!=='未观测'
+            ?esc(x.cost):'<span class="faint" title="需要真实跑一次请求才会观测到">未观测</span>'},
+        {k:'availableAccounts', t:'可用账号', num:true, render:x=>{
+            const a=Number(x.availableAccounts||0), t=Number(x.cnAccounts||0)+Number(x.intlAccounts||0);
+            if(!a&&!t) return '<span class="faint">0</span>';
+            return a+' <span class="faint">/ '+t+'</span>';
+        }},
+      ]})+'</div>';
+}
+
+function gatewayToolsHtml(){return '';}
+
+/** 缓存当前视图的行，供 platformTable 取用 */
+function cacheModelRows(rows,v1){
+  S._rows=rows||[]; S._v1=v1||[];
+}
+
 function viewModels(){
   const r=S.data.models||{};
   const m=(r.admin&&r.admin.models)||[];
@@ -924,6 +1023,7 @@ function viewModels(){
   const rows=enr.length?enr:m;
   const sum=r.rate_summary||{};
   const bd=r.bundled||{};
+  cacheModelRows(rows,v1);
   // 倍率覆盖率条
   const pct=sum.total?Math.round(100*(sum.with_rate||0)/sum.total):0;
   let rateBar='';
@@ -967,70 +1067,36 @@ function viewModels(){
   ${rateBar}
   <div class="card">
     <div class="flex" style="justify-content:space-between">
-      <h2>模型清单（${rows.length||v1.length}）</h2>
+      <h2>模型清单</h2>
       <div class="btnrow">
-        <label class="faint" style="margin:0;white-space:nowrap" for="catalogPlatform"
-          title="选择「从哪个平台拉取线上模型与倍率」，与下面的模型清单不是一回事">
-          倍率来源
+        <label class="faint" style="margin:0;white-space:nowrap" for="modelPlatform"
+          title="切换后，下面的表格只显示该来源的模型">
+          模型来源
         </label>
-        <select id="catalogPlatform" style="width:auto;min-width:210px">
-          ${(S.data.catalogSources||[]).length
-            ? (S.data.catalogSources||[]).map(x=>
-                '<option value="'+esc(x.platform)+'"'
-                +(x.has_account?' data-ok="1"':'')+'>'
-                +esc(x.name)+(x.has_account?' ✓已登录':' · 未登录')+'</option>').join('')
-            : '<option value="apk-codebuddy">CodeBuddy 国际</option>'}
+        <select id="modelPlatform" style="width:auto;min-width:230px"
+          onchange="switchModelPlatform(this.value)">
+          <option value="gateway"${(S.data.modelPlatform||'gateway')==='gateway'?' selected':''}>
+            本地网关（全部 ${rows.length||v1.length} 个）</option>
+          ${(S.data.catalogSources||[]).map(x=>
+            '<option value="'+esc(x.platform)+'"'
+            +((S.data.modelPlatform||'gateway')===x.platform?' selected':'')+'>'
+            +esc(x.name)+(x.has_account?' ✓已登录':' · 未登录')+'</option>').join('')}
         </select>
         <button class="btn" onclick="fetchCatalog()">拉取线上倍率</button>
         <button class="btn" onclick="probeModels()">探测免费/收费</button>
       </div>
     </div>
     <div class="muted" style="font-size:12px;margin:-4px 0 10px">
-      上面的下拉框选的是「从哪个平台拉倍率」；下面这张表是网关当前真实可用的模型清单。
-      勾选左侧方框可选择模型，用来复制 ID 或导出配置。
+      选「本地网关」看网关当前真实可用的模型；选某个平台则只显示<b>那个平台自己的</b>模型。
+      勾选左侧方框可选择模型，用来复制 ID 或生成客户端配置。
     </div>
-    <div class="dtbar" style="border:1px solid var(--line);border-radius:var(--r);margin-bottom:0">
-      <label style="margin:0;display:flex;align-items:center;gap:6px;white-space:nowrap">
-        <input type="checkbox" style="width:auto" ${MODEL_SEL.size===rows.length&&rows.length?'checked':''}
-          onchange="selAllModels(this.checked)"> 全选
-      </label>
-      <span class="cnt" style="margin-left:0">已选 <b id="selCount">${MODEL_SEL.size}</b> / ${rows.length}</span>
-      <span class="sp"></span>
-      <button class="btn sm pri" onclick="selClientConfig()">生成客户端配置</button>
-      <button class="btn sm" onclick="selCopyIds()">复制 ID</button>
-      <button class="btn sm" onclick="selExport()">导出 JSON</button>
-      <button class="btn sm" onclick="selClear()">清空选择</button>
-    </div>
-    <pre id="clientCfg" style="display:none"></pre>
-    <div class="mt" id="modelTable">${dataTable({
-      key:'models',
-      rows:rows,
-      size:25,
-      sort:'id',
-      searchHint:'搜索模型 ID / 倍率 / 来源…',
-      searchKeys:['id','credits','rate_source','name'],
-      cols:[
-        {k:'_sel', t:'', w:'34px', render:x=>
-          '<input type="checkbox" style="width:auto" '+(MODEL_SEL.has(x.id)?'checked':'')
-          +' onchange="selOne(this,\''+esc(x.id)+'\')">'},
-        {k:'id', t:'模型 ID', cls:'mono', render:x=>'<span class="mono">'+esc(x.id)+'</span>'},
-        {k:'credits', t:'倍率', render:x=>x.credits
-            ?tag(x.credits,'acc')
-            :'<span class="faint" title="公开接口里没查到该模型的倍率">未知</span>'},
-        {k:'rate_source', t:'来源', render:x=>'<span class="faint" style="font-size:12px">'+esc(x.rate_source||'—')+'</span>'},
-        {k:'ctx', t:'上下文', num:true, render:x=>x.ctx?Number(x.ctx).toLocaleString():'<span class="faint">—</span>'},
-        {k:'out', t:'输出', num:true, render:x=>x.out?Number(x.out).toLocaleString():'<span class="faint">—</span>'},
-        {k:'cnFree', t:'国内站', render:x=>x.cnFree&&x.cnFree!=='-'?tag(x.cnFree,'ok'):'<span class="faint">—</span>'},
-        {k:'intlFree', t:'国际站', render:x=>x.intlFree&&x.intlFree!=='-'?tag(x.intlFree,'ok'):'<span class="faint">—</span>'},
-        {k:'cost', t:'实测成本', render:x=>x.cost&&x.cost!=='未观测'
-            ?esc(x.cost):'<span class="faint" title="需要真实跑一次请求才会观测到">未观测</span>'},
-        {k:'availableAccounts', t:'可用账号', num:true, render:x=>{
-            const a=Number(x.availableAccounts||0), t=Number(x.cnAccounts||0)+Number(x.intlAccounts||0);
-            if(!a&&!t) return '<span class="faint">0</span>';
-            return a+' <span class="faint">/ '+t+'</span>';
-        }},
-      ]})}</div>
-    <div class="muted mt" style="font-size:12.5px">
+    ${platformTable()}
+  </div>
+  ${gatewayToolsHtml()}
+
+  <div class="card">
+    <h2>倍率是怎么来的</h2>
+    <div class="muted" style="font-size:12.5px">
       倍率按优先级取三源：① 网关实测 <code>cost</code>（跑过真实流量才有数值）
       ② 线上目录（登录后点「拉取线上倍率」实时获取，端点
       <code>/console/enterprises/personal/models</code>）
@@ -1041,6 +1107,8 @@ function viewModels(){
       面板聚合端点 <code>/v1/models</code> 共 ${v1.length} 个
     </div>
   </div>
+
+  ${upstreamsSection()}
 
   <div class="card">
     <h2>接入方式</h2>
@@ -1497,6 +1565,10 @@ async function loadUpstreams(){
   render();
 }
 function viewUpstreams(){
+  return upstreamsSection(true);
+}
+/** 上游档案区块：既可独立成页，也可折叠嵌进模型页 */
+function upstreamsSection(standalone){
   const u=S.data.upstreams||{};
   const st=u.stats||{};
   const gw=u.gateways||[],rel=u.relays||[],off=u.official||[],os=u.open_source||[];
@@ -1831,7 +1903,35 @@ async function loadSettings(){
   S.data.settings=r;
   render();
 }
+let SET_TAB = "main";
+
+async function loadSettings(){
+  // 设置页现在是 Tab 容器，数据一次性拉齐
+  await Promise.all([
+    api('/api/settings').catch(()=>({settings:{}})),
+    api('/api/sites').catch(()=>({sites:[],catalog:[]})),
+    api('/api/notify').catch(()=>({config:{}})),
+    api('/api/logs').catch(()=>({lines:[]})),
+  ]);
+}
+
 function viewSettings(){
+  const tabs=[['main','⚙ 基本设置'],['sites','☷ 资源站点'],
+              ['catalog','★ 免费资源'],['notify','✉ 通知'],['logs','≡ 日志']];
+  let h='<div class="tabs">'
+    +tabs.map(x=>'<button class="'+(SET_TAB===x[0]?'on':'')+'" '
+      +'onclick="setSetTab(\''+x[0]+'\')">'+x[1]+'</button>').join('')
+    +'</div>';
+  if(SET_TAB==='main') h+=viewSettingsMain();
+  else if(SET_TAB==='sites') h+=viewSites();
+  else if(SET_TAB==='catalog') h+=viewCatalog();
+  else if(SET_TAB==='notify') h+=viewNotify();
+  else if(SET_TAB==='logs') h+=viewLogs();
+  return h;
+}
+function setSetTab(k){ SET_TAB=k; render(); }
+
+function viewSettingsMain(){
   const r=S.data.settings||{};
   const s=r.settings||{};
   return `
@@ -1858,7 +1958,19 @@ function viewSettings(){
       <div class="flex mt" style="gap:18px">
         <div class="flex"><input type="checkbox" id="sAC" style="width:auto" ${s.auto_checkin!==false?'checked':''}><span>自动签到</span></div>
         <div class="flex"><input type="checkbox" id="sAG" style="width:auto" ${s.auto_growth!==false?'checked':''}><span>自动成长任务</span></div>
-        <div class="flex"><input type="checkbox" id="sAS" style="width:auto" ${s.auto_start_gateway!==false?'checked':''}><span>自动拉起网关</span></div>
+        <div class="flex"><input type="checkbox" id="sAS" style="width:auto" ${s.auto_start_gateway!==false?'checked':''}><span title="面板启动时自动拉起 workbuddy-gateway（它不是本面板的一部分，是腾讯的独立程序，面板只是托管它的进程）">自动拉起网关</span></div>
+      </div>
+      <div class="note" style="margin-top:10px">
+        <b>关于两个反代的关系</b>（不是冗余，是两个不同维度）：<br>
+        · <b>workbuddy-gateway</b>（端口 8317）—— 腾讯官方程序，反代
+        <b>CodeBuddy / WorkBuddy</b> 的订阅。<b>源码不公开，无法像 CLIProxyAPI 那样打进 EXE</b>，
+        面板能做的是「托管它的进程 + 接管它的登录/签到/倍率/模型接口」。<br>
+        · <b>CLIProxyAPI</b>（端口 8318，面板内置）—— 反代
+        <b>Kimi / Codex / Claude Code / Antigravity / Grok / Devin / Meta</b> 这些 CLI 订阅，
+        面板自己实现不了，只能内嵌这个开源项目。<br>
+        <span class="faint">如果你只用 CodeBuddy/WorkBuddy，用不到 CLIProxyAPI：
+        删掉 dist 目录里 data/cliproxy 那份二进制（或用轻量版打包）即可，
+        其余功能不受影响。</span>
       </div>
     </div>
   </div>
@@ -2283,6 +2395,244 @@ async function lpShowLog(){
   render();
 }
 
+/* ================================================================
+ * 账号与签到（把原来 5 个页面合并成 1 个）
+ *   原来：账号登录 / 签到中心 / 成长任务 / 任务中心 / 自动签到
+ *   现在：一个页面，顶部 Tab 切换，登录态和签到计划放在一起
+ * ================================================================ */
+let ACC_TAB = 'login';
+
+function loadAccount(){
+  Promise.all([
+    api('/api/login?action=platforms').catch(()=>({platforms:[]})),
+    api('/api/accounts').catch(()=>({accounts:[],stats:{}})),
+    api('/api/platform?action=actions').catch(()=>({})),
+    api('/api/autocheckin?action=status').catch(()=>({platforms:[]})),
+    api('/api/login?action=browser').catch(()=>({browser:null})),
+  ]).then(([lp,ac,pa,au,bd])=>{
+    S.data.loginPlatforms=lp.platforms||[];
+    S.data.accounts=ac.accounts||[];
+    S.data.accountStats=ac.stats||{};
+    S.data.platformActions=pa||{};
+    S.data.autoCheckin=au;
+    S.data.loginBrowser=(bd&&bd.browser)||null;
+    render();
+  }).catch(e=>toast('加载账号信息失败：'+e.message,'err'));
+}
+
+function viewAccount(){
+  const pls=S.data.loginPlatforms||[];
+  const accs=S.data.accounts||[];
+  const st=S.data.accountStats||{};
+  const au=S.data.autoCheckin||{};
+  const accP=au.platforms||[];
+  const acts=S.data.platformActions||{};
+  const logged=new Set(accs.map(a=>a.platform));
+
+  let h='';
+  // ---- 概览
+  const doneN=accP.filter(p=>(p._on!==undefined?p._on:p.on)&&p.logged_in).length;
+  const onN=accP.filter(p=>(p._on!==undefined?p._on:p.on)).length;
+  h+='<div class="grid g4 mb">'
+    +'<div class="kpi"><div class="lb">已登录平台</div><div class="vl">'+logged.size+' / '+pls.length+'</div>'
+    +'<div class="ex">账号池 '+esc(st.with_secret||0)+' 条有效凭据</div></div>'
+    +'<div class="kpi"><div class="lb">自动签到</div>'
+    +'<div class="vl" style="color:'+(au.enabled?'var(--ok)':'var(--faint)')+'">'
+    +(au.enabled?'已启用':'已停用')+'</div>'
+    +'<div class="ex">勾选 '+onN+' 个 · 其中 '+doneN+' 个已登录</div></div>'
+    +'<div class="kpi"><div class="lb">公开签到接口</div>'
+    +'<div class="vl">'+accP.filter(p=>p.has_public_checkin).length+'</div>'
+    +'<div class="ex">其余需先「探测端点」</div></div>'
+    +'<div class="kpi"><div class="lb">今日已执行</div>'
+    +'<div class="vl">'+accP.filter(p=>p.done_today).length+'</div>'
+    +'<div class="ex">同一天每平台只跑一次</div></div>'
+    +'</div>';
+
+  // ---- Tab
+  h+='<div class="tabs">'
+    +[['login','① 登录与凭据'],['plan','② 签到计划'],
+       ['sess','③ 当前登录'],['log','④ 账号池与能力']]
+      .map(x=>'<button class="'+(ACC_TAB===x[0]?'on':'')+'" '
+      +'onclick="setAccTab(\''+x[0]+'\')">'+x[1]+'</button>').join('')
+    +'</div>';
+
+  if(ACC_TAB==='login'){
+    h+='<div class="card"><div class="ch"><b>可登录的平台（'+pls.length+'）</b>'
+      +'<span class="faint">'+logged.size+' 个已登录</span></div><div class="cb">';
+    h+=dataTable({
+      key:'accPlat', rows:pls, size:25,
+      searchHint:'搜索平台…', searchKeys:['name','hint','upstream'],
+      cols:[
+        {k:'name',t:'平台',render:x=>'<b>'+esc(x.name)+'</b>'
+          +'<div class="faint mono" style="font-size:11px">'+esc(x.id)+'</div>'},
+        {k:'method',t:'方式',render:x=>tag(
+          {qrcode:'扫码',cookie:'Cookie',file:'文件/Key'}[x.method]||x.method,
+          {qrcode:'ok',cookie:'acc',file:''}[x.method]||'acc')},
+        {k:'_in',t:'登录态',render:x=>logged.has(x.id)
+          ?'<span class="tag ok">已登录</span>'
+          :'<button class="btn sm" onclick="setAccTab(\'login\');startLogin(\''+esc(x.id)+'\',\''+esc(x.edition||'')+'\')">去登录</button>'},
+        {k:'upstream',t:'上游',render:x=>'<span class="mono faint" style="font-size:11.5px">'+esc(x.upstream||'—')+'</span>'},
+        {k:'hint',t:'说明',render:x=>'<span class="faint" style="font-size:11.5px;min-width:220px;display:block">'+esc(x.hint||'')+'</span>'},
+      ]});
+    h+='</div></div>';
+  }
+
+  if(ACC_TAB==='plan'){
+    h+='<div class="card"><div class="ch"><b>定时签到计划</b>'
+      +'<div class="flex n">'
+      +'<label style="margin:0;display:flex;align-items:center;gap:6px">'
+      +'<input type="checkbox" style="width:auto" '+(au.enabled?'checked':'')
+      +' onchange="acSet(\'enabled\',this.checked)">启用定时</label>'
+      +'<label style="margin:0;display:flex;align-items:center;gap:6px">'
+      +'<input type="checkbox" style="width:auto" '+(au.notify?'checked':'')
+      +' onchange="acSet(\'notify\',this.checked)">完成后通知</label>'
+      +'<input type="number" value="'+esc(au.stagger_sec)+'" style="width:88px" title="平台间错峰秒数" onchange="acSet(\'stagger_sec\',+this.value)">'
+      +'<input type="number" value="'+esc(au.retry_times)+'" style="width:88px" title="失败重试次数" onchange="acSet(\'retry_times\',+this.value)">'
+      +'<input type="number" value="'+esc(au.retry_delay_min)+'" style="width:110px" title="重试间隔分钟" onchange="acSet(\'retry_delay_min\',+this.value)">'
+      +'<button class="btn pri" onclick="acSave()">保存</button>'
+      +'<button class="btn" onclick="acRun(false)">执行一轮</button>'
+      +'<button class="btn" onclick="acRun(true)">强制全部</button>'
+      +'</div></div><div class="cb">';
+    h+=dataTable({
+      key:'accPlan', rows:accP, size:20,
+      searchHint:'搜索平台…', searchKeys:['name','hint'],
+      cols:[
+        {k:'name',t:'平台',render:x=>'<b>'+esc(x.name)+'</b>'
+          +'<div class="faint mono" style="font-size:11px">'+esc(x.platform)+'</div>'},
+        {k:'_on',t:'启用',render:x=>{
+          const v=x._on!==undefined?x._on:x.on;
+          return '<input type="checkbox" style="width:auto" '+(v?'checked':'')
+            +' onchange="acToggle(this,\''+esc(x.platform)+'\',this.checked)">';
+        }},
+        {k:'_time',t:'每日时间',render:x=>{
+          const v=x._time!==undefined?x._time:x.time;
+          return '<input type="time" style="width:120px" value="'+esc(v)+'" '
+            +'onchange="acTime(this,\''+esc(x.platform)+'\',this.value)">';
+        }},
+        {k:'mode',t:'方式',render:x=>tag(
+          {flow:'先查后领',direct:'直接领',bonus:'登录送',none:'需探测'}[x.mode]||x.mode,
+          x.mode==='none'?'':'acc')},
+        {k:'logged_in',t:'凭据',render:x=>x.logged_in?tag('已登录','ok'):tag('未登录','warn')},
+        {k:'done_today',t:'今日',render:x=>x.done_today?tag('已跑','ok'):'—'},
+        {k:'hint',t:'说明',render:x=>'<span class="faint" style="font-size:11.5px;min-width:200px;display:block">'+esc(x.hint||'')+'</span>'},
+        {k:'_go',t:'',render:x=>'<button class="btn sm" onclick="acRunOne(\''+esc(x.platform)+'\')">单独执行</button>'},
+      ]});
+    h+='<div class="muted mt" style="font-size:12px">每个平台到点跑一次，同一天同一平台只跑一次；'
+      +'失败按上面配的次数重试。「需探测」表示公开接口里没找到签到端点，'
+      +'先在下面「当前登录」里点「🔍 探测端点」扫出真实路径。</div>';
+    h+='</div></div>';
+  }
+
+  if(ACC_TAB==='sess'){
+    h+=viewLoginSession();
+  }
+
+  if(ACC_TAB==='log'){
+    h+='<div class="card"><div class="ch"><b>账号池（'+accs.length+'）</b>'
+      +'<span class="faint">凭据只存本机 data/ 目录，不外传</span></div><div class="cb">';
+    if(!accs.length){
+      h+=empty('还没有账号。去「登录与凭据」扫码或粘贴 Cookie。');
+    }else{
+      h+=dataTable({
+        key:'accList', rows:accs, size:20,
+        searchHint:'搜索平台 / 名称…', searchKeys:['platform','name','source'],
+        cols:[
+          {k:'platform',t:'平台',render:x=>'<span class="mono" style="font-size:12px">'+esc(x.platform)+'</span>'},
+          {k:'name',t:'名称'},
+          {k:'type',t:'类型',render:x=>tag(x.type||'')},
+          {k:'source',t:'来源',render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.source||'')+'</span>'},
+          {k:'secret',t:'密钥',render:x=>'<span class="mono faint">'+esc(x.secret||'')+'</span>'},
+          {k:'obtained_at',t:'获取时间',render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.obtained_at||'')+'</span>'},
+          {k:'enabled',t:'状态',render:x=>x.enabled===false?tag('已停用','warn'):tag('启用','ok')},
+          {k:'_op',t:'',render:x=>'<button class="btn sm" onclick="toggleAccount(\''+esc(x.id)+'\','
+            +(x.enabled===false?'true':'false')+')">'+(x.enabled===false?'启用':'停用')+'</button> '
+            +'<button class="btn sm dgr" onclick="delAccount(\''+esc(x.id)+'\')">删除</button>'},
+        ]});
+    }
+    h+='</div></div>';
+    // 平台内部能力也放这里（点进去才展开）
+    h+=viewPlatformCaps(acts);
+  }
+  return h;
+}
+
+function setAccTab(k){ ACC_TAB=k; render(); }
+async function acSet(k,v){
+  const au=S.data.autoCheckin||(S.data.autoCheckin={});
+  au[k]=v;
+  await acSave();
+}
+async function acToggle(el,pid,on){
+  const au=S.data.autoCheckin||(S.data.autoCheckin={});
+  au.platforms=au.platforms||[];
+  const p=au.platforms.find(x=>x.platform===pid);
+  if(p)p.on=on; else au.platforms.push({platform:pid,on:on});
+  await acSave();
+}
+async function acTime(el,pid,v){
+  const au=S.data.autoCheckin||(S.data.autoCheckin={});
+  au.platforms=au.platforms||[];
+  const p=au.platforms.find(x=>x.platform===pid);
+  if(p)p.time=v; else au.platforms.push({platform:pid,time:v});
+  await acSave();
+}
+
+/* ================================================================
+ * 全局「一键执行」：签到 + 到期任务，一处触发
+ * ================================================================ */
+const ONECLICK = {running:false, steps:[], result:null};
+
+async function oneClick(){
+  if(ONECLICK.running){toast('正在执行中…','err');return;}
+  ONECLICK.running=true; ONECLICK.steps=[]; ONECLICK.result=null;
+  render();
+  const step=(n,msg)=>{ONECLICK.steps.push({n,msg,at:new Date().toLocaleTimeString('zh-CN')});render();};
+
+  step('准备','检查网关与凭据…');
+  // 1) 自动签到（所有勾选且已登录的平台）
+  const r1=await api('/api/autocheckin?action=run',{}).catch(e=>({ok:false,message:e.message}));
+  if(r1&&r1.finished){
+    const res=r1.results||[];
+    const ok=res.filter(x=>x.ok).length;
+    const sk=res.filter(x=>x.skipped).length;
+    const fl=res.filter(x=>!x.ok&&!x.skipped).length;
+    step('签到',`成功 ${ok} · 跳过 ${sk} · 失败 ${fl}`);
+  }else if(r1&&r1.ok===false){
+    step('签到','跳过：'+(r1.message||'自动签到未就绪'));
+  }else{
+    step('签到','已触发，后台执行中');
+  }
+  // 2) 任务中心里到期的任务
+  step('任务','检查待执行任务…');
+  const r2=await api('/api/tasks?action=run_all',{}).catch(()=>({ok:false}));
+  if(r2&&r2.ok!==false){
+    const rs=r2.results||[];
+    step('任务',rs.length?('执行 '+rs.filter(x=>x.ok).length+' / '+rs.length):'没有到期的任务');
+  }else{
+    step('任务','任务中心没有需要跑的');
+  }
+  // 3) 刷新
+  step('收尾','刷新面板数据…');
+  await refresh().catch(()=>{});
+  ONECLICK.running=false;
+  ONECLICK.result=new Date().toLocaleTimeString('zh-CN');
+  render();
+  toast('一键执行完成','ok');
+}
+function viewOneClick(){
+  if(!ONECLICK.steps.length)return '';
+  let h='<div class="card"><div class="ch"><b>⚡ 一键执行</b>'
+    +'<span class="faint">'+(ONECLICK.running?'执行中…':(ONECLICK.result||'记录'))+'</span></div><div class="cb">';
+  for(const s of ONECLICK.steps){
+    h+='<div class="flex" style="padding:4px 0;border-bottom:1px solid var(--line)">'
+      +'<span class="tag acc" style="min-width:64px;justify-content:center">'+esc(s.n)+'</span>'
+      +'<span class="faint" style="font-size:11.5px;min-width:70px">'+esc(s.at)+'</span>'
+      +'<span style="font-size:13px">'+esc(s.msg)+'</span></div>';
+  }
+  h+='</div></div>';
+  return h;
+}
+
 /* ================================================================ 定时自动签到 */
 function loadAutocheckin(){
   api('/api/autocheckin?action=status').then(r=>{
@@ -2642,6 +2992,104 @@ function tcEnabled(name, on){
   TC.enabled[name]=on;
 }
 
+/** 登录会话区（扫码 / Cookie 粘贴），由「账号与签到 → 当前登录」调用 */
+function viewLoginSession(){
+  const sess=S.data.loginSession;
+  let h='';
+  if(sess){
+    h+='<div class="card" style="margin-bottom:14px"><div class="ch"><b>登录会话</b>'
+      +'<span id="lsStatus">'+loginStatusTag(sess)+'</span></div><div class="cb">';
+    h+='<div class="row" style="align-items:flex-start">';
+    h+='<div class="n" id="lsQr">';
+    if(sess.qr)h+='<img src="'+sess.qr+'" alt="登录二维码" style="width:196px;height:196px;border-radius:10px;border:1px solid var(--line)">';
+    h+='</div>';
+    h+='<div style="flex:1;min-width:220px">';
+    h+='<div style="font-weight:600;margin-bottom:6px">'+esc(sess.platform_name||sess.platform)+'</div>';
+    h+='<div class="faint" id="lsMsg" style="margin-bottom:4px">'+esc(sess.message||sess.error||'')+'</div>';
+    h+='<div class="faint" id="lsLeft">'+(sess.seconds_left?('剩余 '+sess.seconds_left+' 秒'):'')+'</div>';
+    h+='<div class="row n" style="margin-top:10px;gap:8px">';
+    if(sess.auth_url){
+      h+='<a class="btn pri n" href="'+esc(sess.auth_url)+'" target="_blank" rel="noreferrer">打开授权页</a>';
+    }
+    if(sess.method==='cookie'){
+      h+='<button class="btn n" onclick="pollCookieOnce()">我已登录，立即获取</button>';
+    }
+    h+='<button class="btn dgr n" onclick="cancelLogin()">取消</button>';
+    h+='</div></div></div>';
+    if(sess.method==='cookie'){
+      const dg=S.data.browserDiag;
+      let tip='自动获取会被浏览器加密策略挡住时，可直接粘贴 Cookie'
+        +'（浏览器 F12 → Network → 复制 Request Headers 里的 cookie）';
+      if(dg){
+        tip=(dg.auto_supported
+          ? '本机浏览器可直接读取 Cookie（'+esc(dg.reason)+'）'
+          : '⚠ '+esc(dg.reason));
+      }
+      h+='<div style="margin-top:12px"><div class="faint" style="margin-bottom:5px">'+tip+'</div>'
+        +'<textarea id="manualCookie" rows="3" placeholder="粘贴 Cookie，例如 sessionid=xxx; passport_csrf_token=yyy" '
+        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
+        +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualCookie()">提交 Cookie</button></div>';
+    }
+    h+='</div></div>';
+  }else{
+    h+='<div class="note">当前没有进行中的登录。去「登录与凭据」选一个平台点「去登录」。</div>';
+  }
+  h+=viewProbe();
+  h+=viewPlatformCaps(S.data.platformActions||{});
+  return h;
+}
+
+/** 平台内部能力（签到/积分/探测端点），折叠展示 */
+function viewPlatformCaps(acts){
+  const pids=Object.keys(acts).filter(k=>Array.isArray(acts[k])&&acts[k].length);
+  let h='<div class="card"><div class="ch"><b>平台内部能力</b>'
+    +'<span class="faint">签到 / 任务 / 积分 / 兑换 / 送积分 / 探测端点</span></div><div class="cb">';
+  h+=viewProbe();
+  if(!pids.length){
+    h+=empty('暂无。平台能力由后端接口表驱动，加了动作就会出现在这里。');
+  }else{
+    for(const pid of pids){
+      h+='<details style="margin-bottom:10px"><summary style="cursor:pointer;font-weight:600;padding:6px 0">'
+        +esc(pid)+' <span class="faint">（'+acts[pid].length+' 项）</span></summary>'
+        +'<div class="btnrow" style="margin:8px 0 6px">'
+        +'<button class="btn sm" onclick="platformProbe(\''+esc(pid)+'\')">🔍 探测端点</button></div>'
+        +'<div class="btnrow">';
+      for(const a of acts[pid]){
+        const isLocal=!!a.local, isProxy=!!a.needs_proxy;
+        const title=isLocal?('APP 本地网关路由，面板无法直接调用（'+esc(a.path)+'）')
+          :(isProxy?('需代理：'+esc(a.path)):(esc(a.method||'GET')+' '+esc(a.path)));
+        if(isLocal){
+          h+='<button class="btn sm n" disabled title="'+title+'" '
+            +'style="opacity:.45;cursor:not-allowed">'+esc(a.name)+'（本地）</button>';
+        }else if(a.id==='checkin_claim'||a.id==='login_bonus'){
+          h+='<button class="btn pri sm n" title="'+title+'" onclick="platformCheckin(\''+esc(pid)+'\')">'
+            +esc(a.name)+' ⚡</button>';
+        }else{
+          h+='<button class="btn sm n"'+(isProxy?' style="border-color:var(--warn)"':'')
+            +' title="'+title+'" onclick="runPlatformAction(\''+esc(pid)+'\',\''+esc(a.id)+'\','
+            +JSON.stringify(a.need||[]).replace(/"/g,'&quot;')+')">'+esc(a.name)
+            +(isProxy?' 🌍':'')+'</button>';
+        }
+      }
+      h+='</div>';
+      const need=acts[pid].filter(a=>a.need&&a.need.length);
+      if(need.length){
+        const keys=[];
+        for(const a of need)for(const k of a.need)if(keys.indexOf(k)<0)keys.push(k);
+        h+='<div class="row n" style="margin-top:6px">';
+        for(const k of keys){
+          h+='<input id="pa_'+esc(k)+'" placeholder="'+esc(k)+'" '
+            +'style="padding:5px 8px;border:1px solid var(--line2);border-radius:7px;font-size:12px">';
+        }
+        h+='</div>';
+      }
+      h+='</details>';
+    }
+  }
+  h+='</div></div>';
+  return h;
+}
+
 function viewLogin(){
   const pls=S.data.loginPlatforms||[];
   const sess=S.data.loginSession;
@@ -2786,14 +3234,12 @@ function viewLogin(){
   return h;
 }
 
-const VIEWS={dash:viewDash,gateway:viewGateway,login:viewLogin,toolcall:viewToolcall,localproxy:viewLocalproxy,autocheckin:viewAutocheckin,checkin:viewCheckin,growth:viewGrowth,
-  tasks:viewTasks,usage:viewUsage,models:viewModels,sites:viewSites,catalog:viewCatalog,
-  route:viewRoute,upstreams:viewUpstreams,
-  notify:viewNotify,logs:viewLogs,settings:viewSettings};
+const VIEWS={dash:viewDash,account:viewAccount,route:viewRoute,usage:viewUsage,
+  models:viewModels,toolcall:viewToolcall,localproxy:viewLocalproxy,
+  settings:viewSettings};
 
-const LOADERS={gateway:loadGateway,login:loadLogin,toolcall:loadToolcall,localproxy:loadLocalproxy,autocheckin:loadAutocheckin,checkin:loadCheckin,growth:loadGrowth,tasks:loadTasks,
-  usage:loadUsage,models:loadModels,sites:loadSites,catalog:loadCatalog,
-  route:loadRoute,upstreams:loadUpstreams,notify:loadNotify,logs:loadLogs,
+const LOADERS={account:loadAccount,usage:loadUsage,models:loadModels,
+  toolcall:loadToolcall,localproxy:loadLocalproxy,route:loadRoute,
   settings:loadSettings};
 
 function loadExtra(){

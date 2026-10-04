@@ -39,12 +39,12 @@ async function __run(BASE, T) {
   CALLS.length = 0;
   dbg('调 viewLogin() 直接渲染…');
   let direct = '';
-  try { direct = viewLogin(); } catch (e) { dbg('viewLogin 抛异常', e.message); }
+  try { direct = viewAccount(); } catch (e) { dbg('viewAccount 抛异常', e.message); }
   dbg('viewLogin 返回', direct.length, '字节');
   try { render(); dbg('render() OK, VIEW=', VIEW.innerHTML.length); }
   catch (e) { dbg('render() 抛异常:', e.message); }
   dbg('调 switchView…');
-  await switchView('login');
+  await switchView('account');
   dbg('switchView 完成');
   const n1 = CALLS.length;
   await sleep(400);
@@ -65,18 +65,23 @@ async function __run(BASE, T) {
 
   // 重复切同一视图不重复拉
   CALLS.length = 0;
-  await switchView('login');
+  await switchView('account');
   await sleep(200);
   ck('重复切同一视图不重复加载', CALLS.length === 0, CALLS.length + ' 个');
   // force=true 才重拉
   CALLS.length = 0;
-  await switchView('login', true);
+  await switchView('account', true);
   ck('force=true 强制重拉', CALLS.length > 0, CALLS.length + ' 个');
 
   // ---------------------------------------------------- 1. 平台列表
-  await loadLogin();
+  await loadAccount(); ACC_TAB='login';
   const pls = S.data.loginPlatforms || [];
-  ck('拉到平台列表', pls.length > 0, pls.length + ' 个');
+  // 标出哪些已在账号池里（页面对已登录的平台显示标签而不是按钮）
+  for (const p of pls) {
+    p._logged = (S.data.accounts || []).some(a => a.platform === p.id);
+  }
+  ck('拉到平台列表', pls.length > 0, pls.length + ' 个'
+    + '（已登录 ' + pls.filter(p => p._logged).length + '）');
   ck('平台含 name/method',
     pls.every(p => p.id && p.name && p.method),
     pls.map(p => p.method).join(','));
@@ -91,13 +96,15 @@ async function __run(BASE, T) {
     console.log('--- 异常堆栈 ---');
     console.log((renderErr.stack || '').split('\n').slice(0, 6).join('\n'));
   }
-  ck('渲染出平台卡片', html.includes('可登录的平台'),
+  ck('渲染出平台卡片', html.includes('可登录') || html.includes('扫码'),
     'len=' + html.length + ' 含平台名=' + html.includes('WorkBuddy'));
-  const onclick = (html.match(/onclick="startLogin\('([^']+)','([^']*)'\)"/g) || []);
-  ck('按钮 onclick 已挂上', onclick.length === pls.length,
-    onclick.length + ' / ' + pls.length);
-  ck('onclick 指向真实平台 id',
-    pls.every(p => html.includes("startLogin('" + p.id + "'")),
+  const onclick = (html.match(/startLogin\('[^']+'[^)]*\)/g) || []);
+  // 已登录的平台显示「已登录」标签而不是按钮，所以按钮数 = 未登录平台数
+  const logged = pls.filter(p => p._logged).length;
+  ck('按钮 onclick 已挂上', onclick.length === pls.length - logged,
+    onclick.length + ' / ' + (pls.length - logged) + '（已登录 ' + logged + '）');
+  ck('onclick 指向未登录平台',
+    pls.filter(p => !p._logged).every(p => html.includes("startLogin('" + p.id + "'")),
     pls.map(p => p.id).join(','));
   if (html.length && !html.includes('可登录的平台')) {
     console.log('--- 实际渲染前 400 字节 ---');
@@ -130,10 +137,11 @@ async function __run(BASE, T) {
         sess && String(sess.auth_url).slice(0, 60));
       ck('轮询已启动', INTERVALS.length > 0, INTERVALS.length + ' 个定时器');
     }
-    // 渲染后 HTML 里应能看到会话卡
+    // 渲染后 HTML 里应能看到会话卡（会话在「当前登录」页）
+    ACC_TAB = 'sess'; render();
     const h2 = VIEW.innerHTML || "";
     ck('会话卡渲染到页面',
-      h2.includes('lsStatus') || h2.includes('取消'),
+      h2.includes('lsStatus') || h2.includes('取消') || h2.includes('登录会话'),
       h2.length + ' 字节');
   }
 
@@ -147,6 +155,7 @@ async function __run(BASE, T) {
     ck('Cookie 平台也建了会话', !!(sess && sess.id), sess && sess.id);
     ck('Cookie 平台 method 正确', sess && sess.method === 'cookie',
       sess && sess.method);
+    ACC_TAB='sess'; render();
     const h3 = VIEW.innerHTML || '';
     ck('渲染出粘贴 Cookie 框', h3.includes('manualCookie'));
     ck('渲染出「我已登录」按钮', h3.includes('pollCookieOnce'));

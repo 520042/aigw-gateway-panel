@@ -506,11 +506,16 @@ def api_toolcall(action=None, body=None):
 def api_models(action=None, body=None):
     """
     模型清单。除网关自带模型外，还合并 CodeBuddy 静态倍率表；
-    action=catalog 用账号池凭据在线拉取模型目录（含线上倍率）。
+    action=catalog          用账号池凭据在线拉取模型目录（含线上倍率）
+    action=sources          列出可作为「模型来源」的平台
+    action=platform_models  取某个平台自己的模型列表（按平台筛选用）
+    action=select           读写用户勾选的模型
     """
+    b = body or {}                      # 各分支共用，别在分支里重复定义
+    c = new_client()
+    m, st = safe(lambda: c.models())    # 网关自己的模型（platform_models 用）
     if action == "catalog":
         from app import gwextra
-        b = body or {}
         platform = b.get("platform", "apk-codebuddy")
         # 顺带返回「可拉取倍率的平台清单」，前端下拉框用，不再硬编码
         sources = gwextra.mark_catalog_accounts(
@@ -546,8 +551,40 @@ def api_models(action=None, body=None):
         saved = store.get("selected_models") or []
         return ok({"models": saved})
 
-    c = new_client()
-    m, st = safe(lambda: c.models())
+    if action == "platform_models":
+        # 按平台取该平台自己的模型列表（用户反馈「选了平台但表里还是网关的模型」）
+        from app import gwextra
+        pid = b.get("platform")
+        if not pid:
+            return fail("platform 必填")
+        acc = APP.get("accounts")
+        if pid == "gateway":
+            rows = (m or {}).get("models") or []
+            return ok({"platform": pid, "name": "本地网关（全部）",
+                       "models": [{"id": x.get("id"), "name": x.get("name", "")}
+                                  for x in rows if isinstance(x, dict)]})
+        spec = gwextra.action_spec(pid, "models")
+        if not spec:
+            return fail("平台 %s 没有模型清单接口（models），"
+                        "可以改用「拉取线上倍率」看它的模型目录" % pid,
+                        code="no_models_action")
+        okk, data = gwextra.call(acc, pid, "models", {})
+        if not okk:
+            return fail(str(data)[:300], code="platform_models_failed")
+        out = data.get("data") if isinstance(data, dict) else data
+        models = []
+        if isinstance(out, list):
+            for x in out:
+                if isinstance(x, dict):
+                    mid = x.get("id") or x.get("model") or x.get("name")
+                    if mid:
+                        models.append({"id": str(mid),
+                                       "name": str(x.get("name") or mid),
+                                       "credits": x.get("credits")
+                                       or x.get("credit")})
+        return ok({"platform": pid, "name": pid, "models": models,
+                   "note": "该平台返回 %d 个模型" % len(models)})
+
     if st != 200:
         return m, st
     v1 = safe_dict(lambda: c.v1_models())

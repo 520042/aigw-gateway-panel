@@ -7,15 +7,15 @@ function ck(n, c, extra) {
 }
 
 // ---------------------------------------------------------------- 视图注册
-ck('VIEWS 注册 login', typeof VIEWS.login === 'function');
-ck('LOADERS 注册 login', typeof LOADERS.login === 'function');
-ck('TITLES 有 login', TITLES.login === '账号登录', TITLES.login);
+ck('VIEWS 注册 account', typeof VIEWS.account === 'function');
+ck('LOADERS 注册 account', typeof LOADERS.account === 'function');
+ck('TITLES 有 account', TITLES.account === '账号与签到', TITLES.account);
 
 // ---------------------------------------------------------------- 空数据
 S.data = {};
-let h = viewLogin();
+S.v='account'; setAccTab('login'); let h = viewAccount();
 ck('空数据渲染不崩', typeof h === 'string' && h.length > 0, 'len=' + h.length);
-ck('空数据含平台区', h.includes('可登录的平台'));
+ck('空数据不崩且有 Tab', h.includes('登录与凭据') || h.includes('可登录'));
 
 // ---------------------------------------------------------------- 完整数据
 S.data.loginPlatforms = [
@@ -31,9 +31,12 @@ S.data.platformActions = {
                { id: 'redeem', name: '兑换码兑换', method: 'POST', path: '/y', need: ['code'] }],
   'apk-raccoon': [{ id: 'login_bonus', name: '登录送积分', method: 'POST', path: '/z' }]
 };
-h = viewLogin();
+// 平台列表在「登录与凭据」页
+setAccTab('login'); h = viewAccount();
 ck('平台卡片渲染', h.includes('WorkBuddy 网关') && h.includes('豆包') && h.includes('Go 网关'));
-ck('方式标签渲染', h.includes('二维码') && h.includes('Cookie') && h.includes('文件/Key'));
+ck('方式标签渲染', h.includes('扫码') && h.includes('Cookie') && h.includes('文件/Key'));
+// 账号池与平台能力在「账号池与能力」页
+setAccTab('log'); h = viewAccount();
 ck('账号池表格渲染', h.includes('张三') && h.includes('CDP'));
 ck('掩码密钥显示', h.includes('sessionid…7890'));
 ck('平台能力渲染', h.includes('签到状态') && h.includes('登录送积分'));
@@ -44,7 +47,7 @@ ck('一键签到按钮', h.includes('platformCheckin'));
 S.data.loginSession = { id: 's1', platform: 'wb-gateway', platform_name: 'WorkBuddy 网关 · 国内站',
   method: 'qrcode', status: 'waiting', message: '等待授权', qr: 'data:image/png;base64,AAAA',
   auth_url: 'https://copilot.tencent.com/login?state=x', seconds_left: 299 };
-h = viewLogin();
+setAccTab('sess'); h = viewAccount();
 ck('二维码渲染', h.includes('src="data:image/png;base64,AAAA"'));
 ck('授权链接按钮', h.includes('打开授权页') && h.includes('copilot.tencent.com'));
 ck('剩余秒数', h.includes('剩余 299 秒'));
@@ -52,7 +55,7 @@ ck('剩余秒数', h.includes('剩余 299 秒'));
 // ---------------------------------------------------------------- Cookie 会话
 S.data.loginSession = { id: 's2', platform: 'apk-doubao', platform_name: '豆包',
   method: 'cookie', status: 'waiting', message: '请在浏览器登录', qr: '', auth_url: '', seconds_left: 0 };
-h = viewLogin();
+setAccTab('sess'); h = viewAccount();
 ck('Cookie 手动输入框', h.includes('id="manualCookie"'));
 ck('我已登录按钮', h.includes('pollCookieOnce'));
 ck('无二维码时不渲染 img', !h.includes('src="data:image'));
@@ -61,7 +64,7 @@ ck('无二维码时不渲染 img', !h.includes('src="data:image'));
 S.data.loginSession = null;
 S.data.loginPlatforms = [{ id: 'x', name: '<img src=x onerror=alert(1)>', method: 'cookie',
   edition: '', hint: '<script>bad</script>', upstream: 'u' }];
-h = viewLogin();
+setAccTab('login'); h = viewAccount();
 ck('平台名被转义', !h.includes('<img src=x onerror') && h.includes('&lt;img'));
 ck('提示被转义', !h.includes('<script>bad'));
 

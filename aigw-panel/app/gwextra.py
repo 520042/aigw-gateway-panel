@@ -752,20 +752,29 @@ def probe_endpoints(accounts, platform, account_id=None, paths=None):
 
 def catalog_sources():
     """
-    列出所有「可拉取线上模型/倍率」的平台。
-    前端「拉取线上倍率」的下拉框以前是硬编码 4 个选项，
-    用户只能选到 4 个 —— 这里改成从 MODEL_CATALOGS 动态生成，
-    并标出哪些平台当前有可用凭据。
+    「模型来源」下拉框的数据源。
+
+    用户要的是「我登录了哪些平台，各有哪些模型」，
+    所以这里列**所有可登录的平台**，并逐个标注能力：
+      has_models  该平台有 models 接口，能直接列模型
+      has_catalog 该平台能拉线上倍率目录
+    两者都没有的标 can_list=False，前端会明确说「该平台不提供模型清单接口」，
+    而不是让人点了以后才报错。
     """
     from .gwlogin import PLATFORMS
-    acc = None
     out = []
-    for pid, urls in (MODEL_CATALOGS or {}).items():
-        spec = PLATFORMS.get(pid) or {}
+    for pid, spec in PLATFORMS.items():
+        m_act = action_spec(pid, "models")
+        c_urls = list((MODEL_CATALOGS or {}).get(pid) or [])
+        if not m_act and not c_urls:
+            continue                       # 既没 models 也没目录，别列出来凑数
         out.append({
             "platform": pid,
             "name": spec.get("name") or pid,
-            "urls": list(urls),
+            "has_models": bool(m_act),
+            "has_catalog": bool(c_urls),
+            "can_list": bool(m_act),
+            "urls": c_urls,
             "has_account": False,
         })
     return out
