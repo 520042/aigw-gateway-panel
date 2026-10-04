@@ -790,6 +790,39 @@ ck("cost=0 不算实测",
    merged3["models_enriched"][0]["rate_source"] == "未匹配",
    merged3["models_enriched"][0]["rate_source"])
 
+# 缺字段兜底（用户截图里出现过 "undefined / 0"）
+_mg = _merge_model_rates(
+    [{"id": "default"}], {"models": []}, None)["models_enriched"][0]
+ck("缺 availableAccounts 补 0", _mg.get("availableAccounts") == 0,
+   repr(_mg.get("availableAccounts")))
+ck("缺 cnAccounts/intlAccounts 补 0",
+   _mg.get("cnAccounts") == 0 and _mg.get("intlAccounts") == 0)
+ck("缺 cnFree 补 '-'", _mg.get("cnFree") == "-", repr(_mg.get("cnFree")))
+ck("缺 cost 补 '未观测'", _mg.get("cost") == "未观测", repr(_mg.get("cost")))
+_mg2 = _merge_model_rates(
+    [{"id": "x", "availableAccounts": "3", "cnAccounts": None}], {"models": []}, None)
+ck("字符串数字被转成 int", _mg2["models_enriched"][0]["availableAccounts"] == 3,
+   repr(_mg2["models_enriched"][0]["availableAccounts"]))
+_mg3 = _merge_model_rates(
+    [{"id": "x", "availableAccounts": "abc"}], {"models": []}, None)
+ck("非数字账号数不崩", _mg3["models_enriched"][0]["availableAccounts"] == 0)
+_allrows = _merge_model_rates(
+    [{"id": "a"}, {"id": "b", "cnFree": "免费"}], {"models": []}, None)["models_enriched"]
+ck("所有模型行都被兜底（不产生 undefined）",
+   all(isinstance(x.get("availableAccounts"), int) for x in _allrows))
+
+# ---- 倍率来源平台（前端下拉框原来硬编码 4 个，用户反馈选不到）
+_srcs = gwextra.catalog_sources()
+ck("倍率来源 ≥6 个（不再是硬编码 4 个）", len(_srcs) >= 6, str(len(_srcs)))
+ck("来源带平台键与名称",
+   all(x.get("platform") and x.get("name") for x in _srcs))
+ck("来源带端点列表", all(isinstance(x.get("urls"), list) and x["urls"] for x in _srcs))
+ck("来源默认 has_account=False",
+   all(x.get("has_account") is False for x in _srcs))
+_marked = gwextra.mark_catalog_accounts(_srcs, None)
+ck("mark_catalog_accounts 不崩",
+   isinstance(_marked, list) and len(_marked) == len(_srcs))
+
 
 # ================================================================ 汇总
 print()
