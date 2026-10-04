@@ -1,0 +1,53 @@
+*.pyc
+__pycache__/
+*.pyo
+
+# 打包产物（体积大，不入库）
+aigw-panel/build/
+aigw-panel/dist/
+aigw-panel/data/
+aigw-panel/__pycache__/
+**/__pycache__/
+
+# 凭据与本机数据 —— 绝不能提交
+data/
+*.token
+*.key
+*_token.tmp
+accounts.json
+settings.json
+checkins.json
+tasks.json
+notify.json
+sites.json
+model_rates.json
+autocheckin.json
+toolcall.json
+apikeys.json
+wb-models-cache.json
+workbuddy-settings.json
+workbuddy-status.json
+wb-request-log.jsonl
+*.log
+
+# 原始素材：体积大（APK 合计 >60MB）
+base.apk
+base(1).apk
+base(2).apk
+base(3).apk
+base(4).apk
+base(5).apk
+_probe/
+*.apk
+*.exe
+*.zip
+
+# 临时
+nohup.out
+*.tmp
+.DS_Store
+Thumbs.db
+
+# 会话密钥（凭据）
+.wb-session-key
+.wb-session-epoch
