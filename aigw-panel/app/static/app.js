@@ -769,15 +769,90 @@ function chart(pts){
 async function loadModels(){
   const r=await api('/api/models');
   S.data.models=r;
+  // 倍率来源清单（下拉框用），以前是硬编码 4 个选项
+  try{
+    const s=await api('/api/models?action=sources').catch(()=>({sources:[]}));
+    S.data.catalogSources=s.sources||[];
+  }catch(e){ S.data.catalogSources=[]; }
   render();
 }
+/* ---------------------------------------------------------------- 模型选择
+ * 用户反馈「模型清单里选不到我需要的模型」—— 原来这张表只能看，不能选。
+ * 现在每行一个勾选框，支持全选 / 复制 ID / 导出。
+ */
+const MODEL_SEL = new Set();
+
+function allModelIds(){
+  const r=S.data.models||{};
+  const enr=r.models_enriched||[];
+  const m=(r.admin&&r.admin.models)||[];
+  const rows=enr.length?enr:m;
+  return rows.map(x=>String(x.id));
+}
+function selOne(el,id){
+  if(el&&el.checked)MODEL_SEL.add(id); else MODEL_SEL.delete(id);
+  const c=$('#selCount');
+  if(c)c.textContent=MODEL_SEL.size;
+}
+function selAllModels(on){
+  const ids=allModelIds();
+  if(on)ids.forEach(i=>MODEL_SEL.add(i));
+  else MODEL_SEL.clear();
+  render();
+}
+function selClear(){
+  MODEL_SEL.clear();
+  render();
+}
+function selCopyIds(){
+  const ids=[...MODEL_SEL];
+  if(!ids.length){toast('先勾选要复制的模型','err');return;}
+  const txt=ids.join('\n');
+  const done=()=>toast('已复制 '+ids.length+' 个模型 ID','ok');
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(done).catch(()=>fallbackCopy(txt,done));
+  }else fallbackCopy(txt,done);
+}
+function fallbackCopy(txt,done){
+  const ta=document.createElement('textarea');
+  ta.value=txt; ta.style.position='fixed'; ta.style.opacity='0';
+  document.body.appendChild(ta); ta.select();
+  try{document.execCommand('copy');done();}
+  catch(e){toast('复制失败，请手动选择','err');}
+  ta.remove();
+}
+function selExport(){
+  const ids=[...MODEL_SEL];
+  if(!ids.length){toast('先勾选要导出的模型','err');return;}
+  const r=S.data.models||{};
+  const enr=r.models_enriched||[];
+  const byId={};
+  for(const x of enr)byId[String(x.id)]=x;
+  const out=ids.map(id=>{
+    const x=byId[id]||{id:id};
+    return {
+      id:id, credits:x.credits||null, rate_source:x.rate_source||'',
+      max_input_tokens:x.ctx||null, max_output_tokens:x.out||null,
+      tools:x.tools, vision:x.vision, reasoning:x.reasoning,
+      cn_free:x.cnFree||null, intl_free:x.intlFree||null,
+    };
+  });
+  const blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='aigw-models-'+ids.length+'.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+  toast('已导出 '+ids.length+' 个模型','ok');
+}
+
 async function fetchCatalog(){
   const sel=$('#catalogPlatform');
   const pid=sel?sel.value:'apk-codebuddy';
-  toast('正在用账号池凭据拉取线上模型倍率…');
+  toast('正在用账号池凭据拉取 '+pid+' 的线上模型倍率…');
   const r=await api('/api/models?action=catalog',{platform:pid}).catch(e=>({ok:false,message:e.message}));
-  if(r.ok===false){toast(r.message||'拉取失败','err');S.data.modelCatalog={error:r.message};}
-  else{S.data.modelCatalog=r.catalog;}
+  if(r.ok===false){toast(r.message||'拉取失败','err');S.data.modelCatalog={error:r.message,platform:pid};}
+  else{S.data.modelCatalog=r.catalog; if(r.sources)S.data.catalogSources=r.sources;}
   render();
 }
 
@@ -834,16 +909,37 @@ function viewModels(){
   <div class="card">
     <div class="flex" style="justify-content:space-between">
       <h2>模型清单（${rows.length||v1.length}）</h2>
-      <div class="row n" style="gap:8px">
-        <select id="catalogPlatform" class="n" style="padding:4px 8px;border:1px solid var(--line2);border-radius:7px">
-          <option value="apk-codebuddy">CodeBuddy 国际</option>
-          <option value="apk-trae">Trae / 国内站</option>
-          <option value="wb-gateway">网关国内凭据</option>
-          <option value="wb-gateway-intl">网关国际凭据</option>
+      <div class="btnrow">
+        <label class="faint" style="margin:0;white-space:nowrap" for="catalogPlatform"
+          title="选择「从哪个平台拉取线上模型与倍率」，与下面的模型清单不是一回事">
+          倍率来源
+        </label>
+        <select id="catalogPlatform" style="width:auto;min-width:210px">
+          ${(S.data.catalogSources||[]).length
+            ? (S.data.catalogSources||[]).map(x=>
+                '<option value="'+esc(x.platform)+'"'
+                +(x.has_account?' data-ok="1"':'')+'>'
+                +esc(x.name)+(x.has_account?' ✓已登录':' · 未登录')+'</option>').join('')
+            : '<option value="apk-codebuddy">CodeBuddy 国际</option>'}
         </select>
-        <button class="btn n" onclick="fetchCatalog()">拉取线上倍率</button>
-        <button class="btn n" onclick="probeModels()">探测免费/收费</button>
+        <button class="btn" onclick="fetchCatalog()">拉取线上倍率</button>
+        <button class="btn" onclick="probeModels()">探测免费/收费</button>
       </div>
+    </div>
+    <div class="muted" style="font-size:12px;margin:-4px 0 10px">
+      上面的下拉框选的是「从哪个平台拉倍率」；下面这张表是网关当前真实可用的模型清单。
+      勾选左侧方框可选择模型，用来复制 ID 或导出配置。
+    </div>
+    <div class="dtbar" style="border:1px solid var(--line);border-radius:var(--r);margin-bottom:0">
+      <label style="margin:0;display:flex;align-items:center;gap:6px;white-space:nowrap">
+        <input type="checkbox" style="width:auto" ${MODEL_SEL.size===rows.length&&rows.length?'checked':''}
+          onchange="selAllModels(this.checked)"> 全选
+      </label>
+      <span class="cnt" style="margin-left:0">已选 <b id="selCount">${MODEL_SEL.size}</b> / ${rows.length}</span>
+      <span class="sp"></span>
+      <button class="btn sm" onclick="selCopyIds()">复制选中 ID</button>
+      <button class="btn sm" onclick="selExport()">导出选中</button>
+      <button class="btn sm" onclick="selClear()">清空选择</button>
     </div>
     <div class="mt" id="modelTable">${dataTable({
       key:'models',
@@ -853,16 +949,25 @@ function viewModels(){
       searchHint:'搜索模型 ID / 倍率 / 来源…',
       searchKeys:['id','credits','rate_source','name'],
       cols:[
+        {k:'_sel', t:'', w:'34px', render:x=>
+          '<input type="checkbox" style="width:auto" '+(MODEL_SEL.has(x.id)?'checked':'')
+          +' onchange="selOne(this,\''+esc(x.id)+'\')">'},
         {k:'id', t:'模型 ID', cls:'mono', render:x=>'<span class="mono">'+esc(x.id)+'</span>'},
-        {k:'credits', t:'倍率', render:x=>tag(x.credits||'—',(x.credits&&x.credits!=='—')?'acc':'')},
+        {k:'credits', t:'倍率', render:x=>x.credits
+            ?tag(x.credits,'acc')
+            :'<span class="faint" title="公开接口里没查到该模型的倍率">未知</span>'},
         {k:'rate_source', t:'来源', render:x=>'<span class="faint" style="font-size:12px">'+esc(x.rate_source||'—')+'</span>'},
-        {k:'ctx', t:'上下文', num:true, render:x=>x.ctx?Number(x.ctx).toLocaleString():'—'},
-        {k:'out', t:'输出', num:true, render:x=>x.out?Number(x.out).toLocaleString():'—'},
-        {k:'cnFree', t:'国内站', render:x=>tag(x.cnFree||'-',x.cnFree==='免费'?'ok':'')},
-        {k:'intlFree', t:'国际站', render:x=>tag(x.intlFree||'-',x.intlFree==='免费'?'ok':'')},
-        {k:'cost', t:'实测成本'},
-        {k:'availableAccounts', t:'可用账号', num:true,
-         render:x=>x.availableAccounts+' / '+((x.cnAccounts||0)+(x.intlAccounts||0))},
+        {k:'ctx', t:'上下文', num:true, render:x=>x.ctx?Number(x.ctx).toLocaleString():'<span class="faint">—</span>'},
+        {k:'out', t:'输出', num:true, render:x=>x.out?Number(x.out).toLocaleString():'<span class="faint">—</span>'},
+        {k:'cnFree', t:'国内站', render:x=>x.cnFree&&x.cnFree!=='-'?tag(x.cnFree,'ok'):'<span class="faint">—</span>'},
+        {k:'intlFree', t:'国际站', render:x=>x.intlFree&&x.intlFree!=='-'?tag(x.intlFree,'ok'):'<span class="faint">—</span>'},
+        {k:'cost', t:'实测成本', render:x=>x.cost&&x.cost!=='未观测'
+            ?esc(x.cost):'<span class="faint" title="需要真实跑一次请求才会观测到">未观测</span>'},
+        {k:'availableAccounts', t:'可用账号', num:true, render:x=>{
+            const a=Number(x.availableAccounts||0), t=Number(x.cnAccounts||0)+Number(x.intlAccounts||0);
+            if(!a&&!t) return '<span class="faint">0</span>';
+            return a+' <span class="faint">/ '+t+'</span>';
+        }},
       ]})}</div>
     <div class="muted mt" style="font-size:12.5px">
       倍率按优先级取三源：① 网关实测 <code>cost</code>（跑过真实流量才有数值）
