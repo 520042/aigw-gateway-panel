@@ -372,6 +372,40 @@ def api_usage(rng="all"):
     return ok({"usage": u, "series": s})
 
 
+def api_tencent(action=None, body=None):
+    """
+    腾讯 CodeBuddy / WorkBuddy 直连（免 workbuddy-gateway 进程）
+      probe  探一遍所有端点，看哪些免登录可用、哪些只差凭据
+      rates  官方倍率（/v3/config）
+    """
+    from app.tencent import Tencent, probe_all, ENDPOINTS
+    b = body or {}
+    acc = APP.get("accounts")
+    token = b.get("token") or ""
+    acct_name = ""
+    if not token and acc:
+        for pid in ("wb-gateway", "wb-gateway-intl", "apk-codebuddy",
+                    "apk-codebuddy-cn"):
+            try:
+                a = acc.get(pid)
+            except Exception:
+                a = None
+            if a and a.get("secret"):
+                token = a["secret"]
+                acct_name = a.get("name") or pid
+                break
+    if action == "probe":
+        return ok({"probes": probe_all(token), "token": bool(token),
+                   "account": acct_name,
+                   "endpoints": {k: {"method": v[0], "path": v[1]}
+                                for k, v in ENDPOINTS.items()}})
+    tc = Tencent(token)
+    if action == "rates":
+        okk, d = tc.rates()
+        return ok(d) if okk else fail(str(d)[:300], code="rates_failed")
+    return ok({"endpoints": list(ENDPOINTS)})
+
+
 def api_autocheckin(action=None, body=None):
     """
     APP 平台定时自动签到
@@ -1345,6 +1379,7 @@ ROUTES = {
     "/api/logs": lambda q, b: api_logs(),
     "/api/toolcall": lambda q, b: api_toolcall(q.get("action", ["list"])[0], b),
     "/api/localproxy": lambda q, b: api_localproxy(q.get("action", ["status"])[0], b),
+    "/api/tencent": lambda q, b: api_tencent(q.get("action", ["probe"])[0], b),
     "/api/autocheckin": lambda q, b: api_autocheckin(q.get("action", ["status"])[0], b),
     "/api/catalog": lambda q, b: api_catalog(),
     "/api/upstreams": lambda q, b: api_upstreams(),

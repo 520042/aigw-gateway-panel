@@ -47,6 +47,7 @@ a = Analysis(
         'app.localproxy',     # 本机反代上游（CLIProxyAPI）管理
         'app.bundled_yuanbao', # 元宝内置模型清单（从 APK 提取）
         'app.sources',       # 接入源分类（本地AI / 平台API / 网页对话）
+        'app.tencent',       # 腾讯 CodeBuddy 直连（移植自 workbuddy-gateway 规格）
     ],
     hookspath=[],
     hooksconfig={},
