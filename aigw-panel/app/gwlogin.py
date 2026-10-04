@@ -88,7 +88,10 @@ PLATFORMS = {
         "login_url": "https://yuanbao.tencent.com/",
         "gateway": False,
         "upstream": "yuanbao.tencent.com",
-        "hint": "在打开的浏览器里登录元宝，面板自动取 Cookie",
+        "hint": "⚠ 2026-10-04 审计：/api/models 端点**确实存在**"
+                "（同站基准路径返回 404，它返回 401）。但元宝要的是 hy_token / hy_user / "
+                "uskey 这类 token，CDP 通常只扫到 qimei 开头的**设备 ID** —— "
+                "光有设备 ID 取不到数据。模型列表会自动退回 APK 内置的 12 个。",
         "verify": {"url": "https://yuanbao.tencent.com/api/getuserinfo",
                    "type": "cookie", "ok_keys": ["user", "data", "userId"]},
     },
@@ -149,14 +152,18 @@ PLATFORMS = {
     # ==================== 办公 AI / Agent 平台（2026-10-04 调研） ====================
     "apk-coze": {
         "name": "扣子 Coze（api.coze.cn 官方 API）",
-        "method": "cookie",
+        # ★ 2026-10-04 审计修正：官方 API 用的是**控制台签发的 PAT**（pat_ 开头），
+        #   不是浏览器 Cookie。之前配成 cookie 方式，扫出来的浏览器 Cookie 打过去
+        #   必然 401。PAT 在 https://www.coze.cn → 个人中心 → 访问令牌 生成。
+        "method": "file",
+        "type": "api_key",
+        "placeholder": "pat_xxxxxxxxxxxx",
         "hosts": ["coze.cn"],
         "login_url": "https://www.coze.cn/",
         "gateway": False,
         "upstream": "api.coze.cn",
-        "hint": "国内少数有完整开放 API 的 Agent 平台。凭据请在扣子控制台"
-                "「个人访问令牌」创建 PAT（pat_ 开头），不是网页 Cookie。"
-                "实测 v3/chat 已通（返回 4101 表示 token 无效而非接口不存在）",
+        "hint": "唯一有完整开放 API 的国内 Agent 平台。在扣子控制台「个人访问令牌」"
+                "生成 pat_ 开头的 PAT，粘到下面即可（浏览器 Cookie 会被 401 拒绝）",
         "verify": {"url": "https://api.coze.cn/v3/chat/retrieve",
                    "type": "bearer"},
     },

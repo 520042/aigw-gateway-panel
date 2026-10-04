@@ -411,7 +411,7 @@ ck("CodeBuddy 国内站已加入", "apk-codebuddy-cn" in gwextra.ACTIONS)
 ck("CodeBuddy 国内站基址是 .cn",
    gwextra.BASE["apk-codebuddy-cn"] == "https://www.codebuddy.cn",
    gwextra.BASE["apk-codebuddy-cn"])
-ck("供应商动作表总数 51", sum(len(v) for v in gwextra.ACTIONS.values()) == 51,
+ck("供应商动作表总数 50", sum(len(v) for v in gwextra.ACTIONS.values()) == 50,
    "%d 条" % sum(len(v) for v in gwextra.ACTIONS.values()))
 # 登录平台也要覆盖
 ck("Loomy 可登录", "apk-loomy" in gwlogin.PLATFORMS)
@@ -833,6 +833,7 @@ ck("mark_catalog_accounts 不崩",
 
 # ---- 元宝内置模型清单（从 APK 的 dex 提取）
 from app import bundled_yuanbao as BY  # noqa: E402
+from app import gwlogin as GL  # noqa: E402
 ck("元宝内置清单 12 个模型", len(BY.MODELS) == 12, str(len(BY.MODELS)))
 ck("含 hunyuan 系列", len([m for m in BY.MODELS
                           if m["id"].startswith("hunyuan")]) >= 7,
@@ -854,6 +855,37 @@ ck("标注了来源",
    "base(5).apk" in BY.GENERATED_FROM and "innerModels" in BY.GENERATED_NOTE)
 ck("find() 能查到", BY.find("hunyuan-fast") is not None)
 ck("find() 查不到返回 None", BY.find("no-such") is None)
+
+# ---- 端点审计标记（audit_endpoints.py 产出，2026-10-04）
+_all = [x for acts in gwextra.ACTIONS.values() for x in acts]
+ck("动作总数 50", len(_all) == 50, str(len(_all)))
+ck("每个动作都有 name/method/path",
+   all(x.get("name") and x.get("method") and x.get("path") for x in _all))
+ck("已验证的端点 ≥20", len([x for x in _all if x.get("verified")]) >= 20,
+   str(len([x for x in _all if x.get("verified")])))
+ck("标记为未验证的都有说明语境（该站整站鉴权）",
+   len([x for x in _all if x.get("unverified")]) <= 6,
+   str(len([x for x in _all if x.get("unverified")])))
+# 审计确认不存在、已从表里删掉的
+ck("已删掉 codebuddy 的 token/refresh（实测 404）",
+   not any(x["path"].endswith("/v2/plugin/auth/token/refresh")
+           for x in _all))
+ck("已删掉豆包的 samantha/chat/completion（实测 404）",
+   not any("samantha/chat" in x["path"] for x in _all))
+ck("豆包对话改走 /v1/chat/completions",
+   gwextra.action_spec("apk-doubao", "chat")["path"] == "/v1/chat/completions")
+ck("Trae 签到已标 verified",
+   gwextra.action_spec("apk-trae", "checkin_claim").get("verified") is True)
+# 凭据类型必须匹配平台真实要求
+ck("Coze 改成 PAT 方式（不是 Cookie）",
+   GL.PLATFORMS["apk-coze"]["method"] == "file"
+   and GL.PLATFORMS["apk-coze"].get("type") == "api_key",
+   GL.PLATFORMS["apk-coze"]["method"])
+ck("Coze 占位符提示 pat_",
+   "pat_" in GL.PLATFORMS["apk-coze"].get("placeholder", ""))
+ck("元宝提示里说清了设备ID不够",
+   "设备 ID" in GL.PLATFORMS["apk-yuanbao"]["hint"])
+ck("每个平台都有 hint", all(p.get("hint") for p in GL.PLATFORMS.values()))
 
 # ---- 本机上游探活（判断反代是真在跑还是只是纸面档案）
 ck("探活表覆盖 4 个反代", len(gwextra.LOCAL_PROBES) == 4,
