@@ -849,6 +849,66 @@ ck("CLIProxyAPI 登录项含 Kimi/Codex/Claude/Antigravity",
 ck("CLIProxyAPI 记录了 login_flags",
    isinstance(_cpa.get("login_flags"), list) and len(_cpa["login_flags"]) >= 6)
 
+# ---- 本地反代管理器（把 CLIProxyAPI 集成进 EXE）
+from app import localproxy as LP  # noqa: E402
+ck("管理器版本号已写死", LP.VERSION == "8.0.13", LP.VERSION)
+ck("9 个登录方式", len(LP.PROVIDERS) == 9, str(len(LP.PROVIDERS)))
+ck("登录项不含 CodeBuddy / Qoder",
+   not any("codebuddy" in p["flag"].lower() or "qoder" in p["flag"].lower()
+           for p in LP.PROVIDERS),
+   str([p["flag"] for p in LP.PROVIDERS]))
+ck("登录方式都有 flag/名称/说明",
+   all(p.get("flag") and p.get("name") and p.get("note") for p in LP.PROVIDERS))
+ck("每个 flag 形如 -xxx-login",
+   all(p["flag"].startswith("-") and p["flag"].endswith("-login")
+       for p in LP.PROVIDERS),
+   str([p["flag"] for p in LP.PROVIDERS]))
+ck("默认端口 8318（与网关 8317 错开）", LP.DEFAULT_PORT == 8318)
+ck("二进制名与 build.spec 一致",
+   LP.BUNDLE_NAME == "cliproxy/cli-proxy-api.exe", LP.BUNDLE_NAME)
+# 路径计算：data/cliproxy 必须在项目内或 EXE 同级
+ck("data_dir 落在 data/cliproxy", LP.data_dir().replace("\\", "/").endswith("data/cliproxy"),
+   LP.data_dir())
+ck("bin_dir 在 data/cliproxy/bin", LP.bin_dir().replace("\\", "/").endswith("data/cliproxy/bin"))
+ck("auth_dir 在 data/cliproxy/auths", LP.auth_dir().replace("\\", "/").endswith("data/cliproxy/auths"))
+# 端口探测
+ck("端口占用判断可用", isinstance(LP.port_busy(8318), bool))
+ck("pick_port 返回 int", isinstance(LP.pick_port(8900), int))
+# 配置读写
+_lpdir = _tf.mkdtemp(prefix="aigw_lp_")
+_saved_data = LP.data_dir
+LP.data_dir = lambda: _lpdir
+LP.bin_dir = lambda: os.path.join(_lpdir, "bin")
+LP.auth_dir = lambda: os.path.join(_lpdir, "auths")
+LP.config_path = lambda: os.path.join(_lpdir, "config.yaml")
+LP.log_path = lambda: os.path.join(_lpdir, "service.log")
+os.makedirs(LP.bin_dir(), exist_ok=True)
+os.makedirs(LP.auth_dir(), exist_ok=True)
+_ok, _msg = LP.write_config(port=9999, key="test-key", force=True)
+ck("能生成配置", _ok and os.path.exists(LP.config_path()), _msg)
+_cfg = LP.read_config()
+ck("配置端口读回正确", _cfg.get("port") == 9999, str(_cfg.get("port")))
+ck("配置 key 读回正确", "test-key" in (_cfg.get("keys") or []), str(_cfg.get("keys")))
+LP.write_config(port=8888, key="k2")
+ck("改端口生效", LP.read_config().get("port") == 8888, str(LP.read_config().get("port")))
+_st = LP.status()
+ck("status 字段齐全",
+   all(k in _st for k in ("installed", "online", "port", "api_key", "base_url",
+                          "providers", "auth_files", "note")))
+ck("status 在无服务时 online=False", _st["online"] is False)
+ck("status 带 9 个 providers", len(_st["providers"]) == 9)
+ck("status 能列出凭据文件", isinstance(_st["auth_files"], list))
+_st2 = LP.login_status()
+ck("login_status 字段齐全",
+   "running" in _st2 and "auth_files" in _st2)
+ck("tail_log 不抛异常（文件不存在时返回空）", LP.tail_log(10) == "")
+# 恢复
+LP.data_dir = _saved_data
+LP.bin_dir = lambda: os.path.join(_saved_data, "bin")
+LP.auth_dir = lambda: os.path.join(_saved_data, "auths")
+LP.config_path = lambda: os.path.join(_saved_data, "config.yaml")
+LP.log_path = lambda: os.path.join(_saved_data, "service.log")
+
 
 # ================================================================ 汇总
 print()

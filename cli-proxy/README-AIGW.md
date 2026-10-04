@@ -1,8 +1,42 @@
-# CLIProxyAPI 本机部署说明
+# CLIProxyAPI —— 已集成进面板 EXE
 
-> 面板已把它作为一个真实上游纳管。装在 `网关项目/cli-proxy/`。
+> **你不需要单独装这个服务了。** 面板 EXE 里已经内置了 `cli-proxy-api.exe`，
+> 装好面板后在「本地反代」页点一下「启动」就能用。
 
-## 一、现状
+## 零、集成后是什么样
+
+| 项 | 值 |
+|---|---|
+| 内置方式 | `build.spec` 的 `datas` 收进单 EXE（目录 `cliproxy/`） |
+| 面板 EXE 体积 | **31.9 MB**（不含内置是 10.35 MB；Go 二进制 68 MB 被压成 ~21 MB） |
+| 释放位置 | EXE 同级 `data/cliproxy/bin/cli-proxy-api.exe`（68 MB，只解一次） |
+| 记账方式 | `data/cliproxy/bin/.binary.stamp` 记 size，二次调用 0.003 秒返回，不重复拷 |
+| 配置 | `data/cliproxy/config.yaml`（面板自动生成，可手工编辑） |
+| 凭据 | `data/cliproxy/auths/` |
+| 日志 | `data/cliproxy/service.log` |
+| 端点 | `http://127.0.0.1:8318/v1`（和网关 8317 错开，占用时自动顺延） |
+| API Key | `aigw-local-key` |
+
+### 面板里的操作
+
+「**本地反代**」页（侧边栏 ⇄）：
+
+- 4 张 KPI 卡：服务状态 / 内置二进制 / 可用模型 / 端点
+- 启停按钮：启动 / 停止 / 重启 / 刷新状态 / 查看日志
+- 端口和 API Key 可改，改完「保存并重启」
+- 9 种 OAuth 登录，点「获取授权链接」→ 面板弹出链接 → 点开授权
+  → 凭据自动落 `auths/`，服务热加载**不用重启**
+- 已保存的凭据列表、可路由的模型列表、服务日志
+
+### 不想内置？做个轻量版
+
+`build.spec` 里把 `include_cliproxy = True` 改成 `False`，
+打包出来还是 10.35 MB，面板会提示「没有找到 cli-proxy-api.exe」，
+你把二进制手动放到 `网关项目/cli-proxy/` 或 `aigw-panel/data/cliproxy/bin/` 也能用。
+
+---
+
+## 一、现状（手工部署的记录，集成前的验证）
 
 | 项 | 值 |
 |---|---|
