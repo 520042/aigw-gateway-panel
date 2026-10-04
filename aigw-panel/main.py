@@ -512,6 +512,9 @@ def api_models(action=None, body=None):
         from app import gwextra
         b = body or {}
         platform = b.get("platform", "apk-codebuddy")
+        # 顺带返回「可拉取倍率的平台清单」，前端下拉框用，不再硬编码
+        sources = gwextra.mark_catalog_accounts(
+            gwextra.catalog_sources(), APP.get("accounts"))
         okk, data = gwextra.fetch_model_catalog(
             APP.get("accounts"), platform, b.get("account_id"))
         if okk:
@@ -524,9 +527,14 @@ def api_models(action=None, body=None):
                 APP["store"].put("model_rates", cache)
             except Exception:
                 pass
-        return ok({"ok": okk, "catalog": data}) if okk else fail(
+        return ok({"ok": okk, "catalog": data, "sources": sources}) if okk else fail(
             data if isinstance(data, str) else json.dumps(
                 data, ensure_ascii=False)[:500], code="catalog_failed")
+
+    if action == "sources":
+        from app import gwextra
+        return ok({"sources": gwextra.mark_catalog_accounts(
+            gwextra.catalog_sources(), APP.get("accounts"))})
 
     c = new_client()
     m, st = safe(lambda: c.models())
@@ -554,6 +562,18 @@ def _merge_model_rates(admin, m, v1):
 
     for item in rows:
         mid = str(item.get("id"))
+        # 网关只在部分情况返回账号计数字段，缺失时补 0 ——
+        # 否则前端会渲染出 "undefined / 0"（用户截图里就是这个）
+        for k in ("availableAccounts", "cnAccounts", "intlAccounts"):
+            try:
+                item[k] = int(item.get(k) or 0)
+            except (TypeError, ValueError):
+                item[k] = 0
+        for k in ("cnFree", "intlFree"):
+            if item.get(k) in (None, ""):
+                item[k] = "-"
+        if item.get("cost") in (None, ""):
+            item["cost"] = "未观测"
         # 1) 网关实测：只有真跑过流量才是数字，其余是「未观测」/「-」
         cost = item.get("cost")
         if isinstance(cost, (int, float)) and cost > 0:
