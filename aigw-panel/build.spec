@@ -45,6 +45,7 @@ a = Analysis(
         'app.tools',          # 工具调用（function calling）执行器
         'app.autocheckin',    # APP 平台定时自动签到
         'app.localproxy',     # 本机反代上游（CLIProxyAPI）管理
+        'app.bundled_yuanbao', # 元宝内置模型清单（从 APK 提取）
     ],
     hookspath=[],
     hooksconfig={},

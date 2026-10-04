@@ -558,6 +558,17 @@ def api_models(action=None, body=None):
         if not pid:
             return fail("platform 必填")
         acc = APP.get("accounts")
+
+        # 元宝没有模型列表接口（APK 里的 /v1/models 是它自己的本地网关端点），
+        # 模型清单硬编码在 dex 里，所以直接用内置清单。
+        if pid == "apk-yuanbao":
+            from app import bundled_yuanbao as BY
+            return ok({"platform": pid, "name": "元宝（内置清单）",
+                       "models": BY.MODELS,
+                       "note": "元宝不提供模型列表接口，这 %d 个来自 APK 内置"
+                               % len(BY.MODELS),
+                       "source": BY.GENERATED_NOTE})
+
         if pid == "gateway":
             rows = (m or {}).get("models") or []
             return ok({"platform": pid, "name": "本地网关（全部）",

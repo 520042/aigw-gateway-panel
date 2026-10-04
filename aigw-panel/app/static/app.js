@@ -616,13 +616,18 @@ async function loadSrcModels(pid){
   if(r.ok===false){box.innerHTML='<div class="note warn">'+esc(r.message||'取不到')+'</div>';return;}
   const ms=r.models||[];
   if(!ms.length){box.innerHTML=empty('该源返回空列表（可能还没登录）');return;}
+  const srcNote=(r.source||r.note)
+    ?'<div class="muted" style="font-size:12px;margin:6px 0 8px">'
+    +esc(r.source?('来源：'+r.source):'')+'　'+esc(r.note||'')+'</div>' : '';
   box.innerHTML='<h3 style="margin-top:12px">'+esc(r.name||pid)+' 的模型（'+ms.length+'）</h3>'
+    +srcNote
     +dataTable({
       key:'srcM_'+pid, rows:ms, size:15, sort:'id',
-      searchHint:'搜索模型…', searchKeys:['id','name'],
+      searchHint:'搜索模型…', searchKeys:['id','name','desc'],
       cols:[
         {k:'id',t:'模型 ID',render:x=>'<span class="mono">'+esc(x.id)+'</span>'},
         {k:'name',t:'显示名',render:x=>esc(x.name||'—')},
+        {k:'desc',t:'说明',render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.desc||'')+'</span>'},
         {k:'credits',t:'倍率',render:x=>x.credits?tag(String(x.credits),'acc'):'<span class="faint">—</span>'},
       ]});
 }

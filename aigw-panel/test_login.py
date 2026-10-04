@@ -831,6 +831,30 @@ _marked = gwextra.mark_catalog_accounts(_srcs, None)
 ck("mark_catalog_accounts 不崩",
    isinstance(_marked, list) and len(_marked) == len(_srcs))
 
+# ---- 元宝内置模型清单（从 APK 的 dex 提取）
+from app import bundled_yuanbao as BY  # noqa: E402
+ck("元宝内置清单 12 个模型", len(BY.MODELS) == 12, str(len(BY.MODELS)))
+ck("含 hunyuan 系列", len([m for m in BY.MODELS
+                          if m["id"].startswith("hunyuan")]) >= 7,
+   str([m["id"] for m in BY.MODELS if m["id"].startswith("hunyuan")]))
+ck("含 deepseek 系列", any(m["id"] == "deepseek" for m in BY.MODELS)
+   and any(m["id"] == "deepseek-thinking" for m in BY.MODELS))
+ck("含 hy92", any(m["id"] == "hy92" for m in BY.MODELS))
+ck("含 gpt_175B_0404", any(m["id"] == "gpt_175B_0404" for m in BY.MODELS))
+ck("每个模型有 id/name/desc",
+   all(m.get("id") and m.get("name") for m in BY.MODELS))
+ck("模型 id 无重复",
+   len(set(m["id"] for m in BY.MODELS)) == len(BY.MODELS))
+ck("转 OpenAI 格式正确",
+   BY.models_as_openai()["data"][0]["owned_by"] == "tencent-yuanbao")
+ck("记录了元宝端点", len(BY.ENDPOINTS) >= 3, str(len(BY.ENDPOINTS)))
+ck("端点含 api/chat", any("/api/chat" in x for x in BY.ENDPOINTS))
+ck("记录了鉴权字段", "hy_token" in BY.AUTH_FIELDS and "cookie" in BY.AUTH_FIELDS)
+ck("标注了来源",
+   "base(5).apk" in BY.GENERATED_FROM and "innerModels" in BY.GENERATED_NOTE)
+ck("find() 能查到", BY.find("hunyuan-fast") is not None)
+ck("find() 查不到返回 None", BY.find("no-such") is None)
+
 # ---- 本机上游探活（判断反代是真在跑还是只是纸面档案）
 ck("探活表覆盖 4 个反代", len(gwextra.LOCAL_PROBES) == 4,
    str(len(gwextra.LOCAL_PROBES)))
