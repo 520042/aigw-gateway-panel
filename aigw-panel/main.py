@@ -536,6 +536,16 @@ def api_models(action=None, body=None):
         return ok({"sources": gwextra.mark_catalog_accounts(
             gwextra.catalog_sources(), APP.get("accounts"))})
 
+    if action == "select":
+        # 持久化用户勾选的模型（前端用来生成客户端配置）
+        store = APP["store"]
+        if body is not None and body.get("models") is not None:
+            models = [str(x) for x in (body.get("models") or []) if str(x).strip()]
+            store.put("selected_models", sorted(set(models))[:500])
+            return ok({"saved": len(set(models))})
+        saved = store.get("selected_models") or []
+        return ok({"models": saved})
+
     c = new_client()
     m, st = safe(lambda: c.models())
     if st != 200:
@@ -1098,8 +1108,16 @@ def api_catalog():
 
 
 def api_upstreams():
-    """全量上游档案（7 本地网关 + 17 公益站 + 14 官方 + 12 Vibe Coding 反代）"""
+    """全量上游档案（7 本地网关 + 17 公益站 + 22 官方 + 12 Vibe Coding 反代）"""
     st = upstreams.stats()
+    # 本机部署的反代探活（哪些真在跑）
+    live = {}
+    try:
+        from app import gwextra
+        for it in gwextra.probe_local_upstreams():
+            live[it["id"]] = it
+    except Exception as e:
+        live = {"_error": str(e)}
     return ok({
         "stats": st,
         "gateways": upstreams.GATEWAYS,
@@ -1110,6 +1128,7 @@ def api_upstreams():
         "vibe_dead": upstreams.VIBE_DEAD,
         "codebuddy_models": upstreams.CODEBUDDY_MODELS,
         "flat": upstreams.all_upstreams(),
+        "local_probes": live,
         # 兼容旧字段
         "all": upstreams.all_upstreams(),
     })
