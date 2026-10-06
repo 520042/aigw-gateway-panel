@@ -43,6 +43,8 @@ class Store:
             "autocheckin": os.path.join(data_dir, "autocheckin.json"),
             # 工具调用（function calling）的执行选项
             "toolcall": os.path.join(data_dir, "toolcall.json"),
+            # 面板侧用量事件（原生中继/路由调用，保留 90 天）
+            "usage_events": os.path.join(data_dir, "usage_events.json"),
         }
         self.defaults = {
             "sites": [],
@@ -78,6 +80,7 @@ class Store:
             "selected_models": [],
             "autocheckin": {},   # 实际默认值在 app/autocheckin.DEFAULT_CFG
             "toolcall": {},
+            "usage_events": [],  # 面板侧用量事件（原生中继/路由调用，90 天剪枝）
         }
         self._cache = {}
         for k, p in self.paths.items():

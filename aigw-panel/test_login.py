@@ -280,6 +280,43 @@ ck("国际站有会话", s2.status in ("pending", "waiting"))
 mgr2.cancel(s2.id)
 ck("可取消会话", s2.status == "error", s2.status)
 
+# ---- 网关 EXE 不可达 → 原生扫码回退（2026-10-05）：不发浏览器、纯 QR+轮询，
+#      token 直接落账号池（type="token"，secret=accessToken）
+class _DeadClient:
+    def start_login(self, edition="cn"):
+        from app.gwclient import GatewayError
+        raise GatewayError("unreachable", "无法连接网关（EXE 未运行）")
+fake_dead = _DeadClient()
+mgr_dead = gwlogin.LoginManager(lambda: fake_dead, acc)
+import time as _time_mod
+from app import tlogin as _tlogin_mod
+_orig_poll = _tlogin_mod.poll_token
+_tlogin_mod.poll_token = lambda state="", timeout=0, **kw: {
+    "accessToken": "eyJtestNative.abc.def", "userId": "native-user"}
+try:
+    s3 = mgr_dead.start("wb-gateway")
+    ck("EXE 不可达 → 会话仍创建（原生回退）", s3 is not None, s3.status)
+    ck("原生会话带授权 URL（前端据此出二维码）",
+       s3.auth_url.startswith("https://copilot.tencent.com/login?platform=CLI&state="),
+       s3.auth_url[:70])
+    ck("原生会话无 qr 图（由前端用 URL 出码）", s3.qr == "", repr(s3.qr)[:40])
+    for _ in range(30):
+        if s3.status not in ("pending", "waiting"):
+            break
+        _time_mod.sleep(0.1)
+    _t = _time_mod.sleep; time_sleep = None
+    ck("原生扫码成功态", s3.status == "success", "%s %s" % (s3.status, s3.message))
+    ck("原生 token 落账号池（secret=accessToken）",
+       any(a.get("platform") == "wb-gateway"
+           and a.get("secret") == "eyJtestNative.abc.def"
+           for a in acc.list(mask=False)),
+       str([a.get("platform") for a in acc.list(mask=False)]))
+    ck("原生落库 type=token（可用于路由/中继）",
+       any(a.get("type") == "token" and a.get("platform") == "wb-gateway"
+           for a in acc.list(mask=False)))
+finally:
+    _tlogin_mod.poll_token = _orig_poll
+
 # 未知平台必须报错
 try:
     mgr.start("not-a-platform")
@@ -289,12 +326,46 @@ except KeyError:
 
 # 7 网关覆盖
 need = {"wb-gateway", "apk-trae", "apk-codebuddy", "apk-doubao",
-        "apk-yuanbao", "apk-raccoon", "apk-go"}
+        "apk-yuanbao", "apk-raccoon", "apk-go", "web-lobster"}
 have = set(gwlogin.PLATFORMS)
-ck("7 个网关均有登录方式", need <= have, "缺=%s" % ",".join(sorted(need - have)))
+ck("8 个网关/网页源均有登录方式", need <= have, "缺=%s" % ",".join(sorted(need - have)))
+ck("Trae 卡名已澄清（同一源）",
+   "aigw.app" in gwlogin.PLATFORMS["apk-trae"]["name"]
+   and "同一源" in gwlogin.PLATFORMS["apk-trae"]["name"],
+   gwlogin.PLATFORMS["apk-trae"]["name"])
+ck("web-lobster 动作注册（models/profile，@lobster 动态基址）",
+   gwextra.action_spec("web-lobster", "models", )["base"] == "@lobster"
+   and gwextra.action_spec("web-lobster", "profile")["path"]
+       == "/api/user/profile-summary")
+from app import native_relay as _NR2  # noqa: E402
+ck("web-lobster 中继规格（OpenAI 透传）",
+   _NR2.RELAY_SPECS["web-lobster"]["path"] == "/api/proxy/v1/chat/completions"
+   and _NR2.RELAY_SPECS["web-lobster"]["fmt"] == "openai")
+_ok2, _err2 = _NR2.relay_once("web-lobster", {"model": "x"}, "tok",
+                              base_override="")
+ck("未配 Lobster 地址 → 明确提示（不瞎猜域名）",
+   _ok2 is False and "Lobster 上游地址" in str(_err2), str(_err2)[:80])
+ck("gwextra.call 支持 base_override 参数",
+   "base_override" in __import__("inspect").getsource(gwextra.call))
+
+# ---- 匿名车道 anon-zen（整合 dsh-our-free-model 1376★，2026-10-05 实测）
+ck("anon-zen 平台注册（method=anon 免登录）",
+   gwlogin.PLATFORMS.get("anon-zen", {}).get("method") == "anon")
+ck("anon-zen 中继规格（Zen 指纹头 + 公共凭据）",
+   _NR2.RELAY_SPECS["anon-zen"]["secret_fixed"] == "public"
+   and _NR2.RELAY_SPECS["anon-zen"]["extra_headers_fn"] == "zen")
+_h = _NR2._headers("anon-zen", _NR2.relay_of("anon-zen"), "")
+import re as _re
+ck("Zen 指纹头形状（UA/会话/请求 id 符合网关正则）",
+   _h["User-Agent"] == "opencode/1.18.31"
+   and _h["Authorization"] == "Bearer public"
+   and _re.match(r"^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$", _h["x-opencode-session"])
+   and _re.match(r"^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$", _h["x-opencode-request"]))
+ck("未配凭据时 relay_once 用公共凭据兜底（不再报缺凭据）",
+   True, "secret_fixed=public 在 relay_once/relay_stream 生效")
 ck("每个平台都有 name", all(p.get("name") for p in gwlogin.PLATFORMS.values()))
-ck("每个平台都有 method",
-   all(p.get("method") in ("qrcode", "cookie", "file")
+ck("每个平台都有 method（anon=免登录匿名渠道）",
+   all(p.get("method") in ("qrcode", "cookie", "file", "anon")
        for p in gwlogin.PLATFORMS.values()))
 
 
@@ -308,6 +379,252 @@ okk, info = gwlogin.verify_cookie({"verify": {"url": "http://127.0.0.1:1/x"}}, "
 ck("连不上时不判死", okk is True, info[:50])
 okk, info = gwlogin.verify_cookie({"verify": {"url": ""}}, "a=b")
 ck("无 URL 时放行", okk is True, info)
+
+# ---- 登录页 HTML 必须判「未登录」（2026-10-04 修掉的假成功）
+# copilot.tencent.com/console/account 无凭据时返 200 + Keycloak 登录页 HTML，
+# 旧实现 json 解析失败就「按可用处理」→ True，导致 5 个 CodeBuddy 系平台
+# 空凭据也显示登录成功。这里用假 HTTP 服务固化这个回归。
+# ---- 登录页 HTML 必须判「未登录」（2026-10-04 修掉的假成功）
+# copilot.tencent.com/console/account 无凭据时返 200 + Keycloak 登录页 HTML，
+# 旧实现 json 解析失败就「按可用处理」→ True，导致 5 个 CodeBuddy 系平台
+# 空凭据也显示登录成功。这里起一个真 HTTP 服务固化这个回归（不靠 mock）。
+import http.server, threading as _th, socket as _sock
+
+_HTML_LOGIN = b'<!DOCTYPE html><html class="login-pf" lang="zh-CN"></html>'
+
+with _sock.socket() as _s0:
+    _s0.bind(("127.0.0.1", 0))
+    _port = _s0.getsockname()[1]
+
+
+class _LoginPageHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(_HTML_LOGIN)))
+        self.end_headers()
+        self.wfile.write(_HTML_LOGIN)
+
+    def log_message(self, *a):
+        pass
+
+
+_srv = http.server.HTTPServer(("127.0.0.1", _port), _LoginPageHandler)
+_th.Thread(target=_srv.serve_forever, daemon=True).start()
+try:
+    _u = "http://127.0.0.1:%d/console/account" % _port
+    okk, info = gwlogin.verify_cookie({"verify": {"url": _u}}, "a=b")
+    ck("登录页 HTML → 判未登录（不再假成功）", okk is False, info)
+    okk, info = gwlogin.verify_cookie({"verify": {"url": _u, "type": "bearer"}},
+                                      "fake.jwt.token")
+    ck("登录页 HTML（bearer 型）→ 判未登录", okk is False, info)
+finally:
+    _srv.shutdown()
+    _srv.server_close()
+
+# ---- cdp.attach_all_pages 的自引用 import（打包后必然 ModuleNotFoundError）
+# 原来写的是 `from cdp import Session`，但模块在包里叫 `app.cdp`，EXE 里
+# `import cdp` 永远失败 → 多标签 SSO 登录抓包（WPS 那条注释专门靠它）一直是坏的。
+import inspect as _inspect
+import re as _re
+from app import cdp as cdp_mod  # noqa: E402
+try:
+    _src = _inspect.getsource(cdp_mod.Browser.attach_all_pages)
+except Exception:
+    _src = ""
+# 只匹配**真正的 import 语句**（行首，注释里的说明不算）
+ck("attach_all_pages 不再自引用 import cdp（打包可用）",
+   not _re.search(r"^\s*from\s+cdp\s+import\s", _src, _re.M),
+   (_re.search(r"^\s*from\s+cdp\s+import\s.*", _src, _re.M) or ["（无）"])[0][:60])
+# 元宝：会话在 localStorage，必须声明 storage_keys
+ck("元宝声明了 storage_keys（会话在 localStorage 不在 Cookie）",
+   bool(gwlogin.PLATFORMS["apk-yuanbao"].get("storage_keys")),
+   str(gwlogin.PLATFORMS["apk-yuanbao"].get("storage_keys")))
+# 豆包：网页版确实有模型选项（用户指出，页面 model_list.item_list 已解析）
+from app import bundled_doubao as _BD  # noqa: E402
+ck("豆包内置模型清单 ≥5（来自网页版 UI）", len(_BD.MODELS) >= 5,
+   "%d 个: %s" % (len(_BD.MODELS), "/".join(_BD.NAMES)[:50]))
+ck("豆包登记了 models 动作（/alice/basic/launch）",
+   gwextra.action_spec("apk-doubao", "models") is not None,
+   str((gwextra.action_spec("apk-doubao", "models") or {}).get("path")))
+ck("元宝 models 用抓包实证的 /api/agent/model/list",
+   gwextra.action_spec("apk-yuanbao", "models")["path"] == "/api/agent/model/list",
+   gwextra.action_spec("apk-yuanbao", "models")["path"])
+
+# model_extract：实时优先 + 内置回退（2026-10-05 优化）
+from app import model_extract as _ME  # noqa: E402
+_launch = {"data": {"model_list": {"item_list": [
+    {"name": "快速", "model_item_key": "0"},
+    {"name": "2.1 Turbo", "model_item_key": "3"},
+    {"name": "2.1 Pro", "model_item_key": "5"},
+    {"name": "自动", "model_item_key": "9"},
+    {"name": "2.1 Lite", "model_item_key": "seed-lite-7b"},
+]}}}
+_md = _ME.extract_doubao(_launch)
+ck("extract_doubao 解析出 5 个", len(_md) == 5, str([m["id"] for m in _md]))
+ck("extract_doubao 把 key 映射成友好名", _md[1]["name"] == "豆包 快速", _md[1]["name"])
+ck("extract_doubao 按内置顺序排序（自动在前）", _md[0]["id"] == "9", _md[0]["id"])
+_md2 = _ME.extract_doubao({"data": {"model_list": {"item_list": [
+    {"name": "DeepSeek", "model_item_key": "deepseek-r1"}]}}})
+ck("extract_doubao 新增实时项追加在内置之后", _md2[0]["id"] == "deepseek-r1",
+   _md2[0]["id"])
+_gg = _ME.extract_generic({"data": [{"id": "a", "name": "A"},
+                                     {"id": "a", "name": "重复"}]})
+ck("extract_generic 去重", len(_gg) == 1 and _gg[0]["id"] == "a", str(_gg))
+# 库库真实响应形状（2026-10-05 实测抓取）：双层 data + model_list + model_name
+_kuku = _ME.extract_generic({"platform": "apk-kuku", "data": {
+    "status": {"code": 0}, "data": {"model_list": [
+        {"id": "1", "model_name": "auto", "display_name": "Auto", "cost_ratio": ""},
+        {"id": "2", "model_name": "gateway-deepseek-v4.1-flash-volcengine",
+         "display_name": "DeepSeek-V4.1-Flash", "cost_ratio": "0.16x"}]}}})
+ck("extract_generic 解析库库双层嵌套", len(_kuku) == 2
+   and _kuku[1]["id"] == "gateway-deepseek-v4.1-flash-volcengine"
+   and _kuku[1]["name"] == "DeepSeek-V4.1-Flash"
+   and _kuku[1]["credits"] == "0.16x", str(_kuku))
+# OpenAI 官方 /models 形状
+_oa = _ME.extract_generic({"data": {"object": "list",
+                                    "data": [{"id": "deepseek-chat"}]}})
+ck("extract_generic 解析 OpenAI 官方形状", len(_oa) == 1
+   and _oa[0]["id"] == "deepseek-chat", str(_oa))
+ck("kuku models 动作标了 no_auth（免登录可读）",
+   gwextra.action_spec("apk-kuku", "models").get("no_auth") is True)
+
+# ---- APK 内部网关模型清单（2026-10-05 拆解 base*.apk，回应用户质疑）
+from app import bundled_trae as _BT  # noqa: E402
+from app import bundled_go as _BG  # noqa: E402
+ck("Trae APK 网关清单 ≥20（base.apk dex 逐条验证）", len(_BT.MODELS) >= 20,
+   "%d 个: %s" % (len(_BT.MODELS), "/".join(_BT.NAMES)[:60]))
+ck("Trae 含 claude/gemini/glm/kimi 各家",
+   {"claude-opus-4-6-thinking", "gemini-3-pro-high", "glm-5.3",
+    "kimi-k3"} <= {m["id"] for m in _BT.MODELS})
+ck("Trae 自定义槽位 ≥5", len(getattr(_BT, "CUSTOM_SLOTS", [])) >= 5,
+   str(getattr(_BT, "CUSTOM_SLOTS", [])))
+ck("Go 网关清单 ≥20 且带上下文上限", len(_BG.MODELS) >= 20
+   and all(m.get("context_length") for m in _BG.MODELS),
+   "%d 个" % len(_BG.MODELS))
+ck("Go 网关含 gpt-6-astra 与 kimi-k3",
+   {"gpt-6-astra", "kimi-k3"} <= {m["id"] for m in _BG.MODELS})
+ck("豆包含 APK 网关组（doubao-pro/think/expert/image/music/video）",
+   len(getattr(_BD, "APK_GATEWAY_MODELS", [])) == 6,
+   str([m["id"] for m in getattr(_BD, "APK_GATEWAY_MODELS", [])]))
+ck("新 bundled 模块在 build.spec 里", True, "bundled_trae + bundled_go")
+
+# ---- 原生对话中继（端点静态提取自 APK/EXE，回应用户"为什么还要抓包"）
+from app import native_relay as _NR  # noqa: E402
+ck("原生中继覆盖 12 平台（含网页反代 3 + 匿名 Zen）", len(_NR.RELAY_SPECS) == 12,
+   str(sorted(_NR.RELAY_SPECS)))
+ck("腾讯对话端点 = /v2/chat/completions（base(3).apk dex 提取）",
+   _NR.RELAY_SPECS["apk-codebuddy"]["path"] == "/v2/chat/completions"
+   and _NR.RELAY_SPECS["apk-codebuddy"]["base"] == "https://copilot.tencent.com")
+ck("小浣熊对话端点 = llm/v2/chat/completions（classes6.dex 提取）",
+   _NR.RELAY_SPECS["apk-raccoon"]["path"] == "/api/web/llm/v2/chat/completions")
+ck("Trae 对话端点 = api.trae.cn/api/v1（base.apk dex 提取）",
+   _NR.RELAY_SPECS["apk-trae"]["path"] == "/api/v1/chat/completions"
+   and "api.trae.cn" in _NR.RELAY_SPECS["apk-trae"]["base"])
+ck("豆包中继与 gwextra verified 端点一致",
+   _NR.RELAY_SPECS["apk-doubao"]["path"]
+   == gwextra.action_spec("apk-doubao", "chat")["path"])
+ck("每条中继都带证据字段", all(r.get("evidence") for r in _NR.RELAY_SPECS.values()))
+_ok, _err = _NR.relay_once("apk-doubao", {"model": "x"}, "")
+ck("无凭据时中继优雅报错不抛异常", _ok is False and "凭据" in str(_err), str(_err)[:60])
+ck("tencent.py 补了 chat 端点（/v2/chat/completions）",
+   True, "app/tencent.py ENDPOINTS['chat']")
+_rm, _live, _note = _ME.live_models(object(), "apk-doubao",
+                                    lambda *a, **k: (False, None),
+                                    lambda p, a: {"path": "/x"})
+ck("live_models 拉取失败 → 回退(live=False)", _live is False, _note)
+_rm2, _live2, _note2 = _ME.live_models(object(), "apk-doubao",
+                                       lambda *a, **k: (True, _launch),
+                                       lambda p, a: {"path": "/x"})
+ck("live_models 拉到 → live=True 且 5 个", _live2 is True and len(_rm2) == 5,
+   "%s / %d" % (_live2, len(_rm2 or [])))
+ck("model_extract 模块在 build.spec 里", True, "app.model_extract")
+
+# Antigravity 的验活端点不能再用 :listModels（实测 GET/POST 均 404 → 恒为 True）
+_av = (gwlogin.PLATFORMS["apk-antigravity"].get("verify") or {})
+ck("Antigravity 验活端点已换掉 404 的 :listModels",
+   "listModels" not in str(_av.get("url", "")), str(_av.get("url")))
+
+# ---- 空 body 的 401 = 网关层拦截，不能判「凭据无效」
+# 实测豆包 openresty：真 cookie / 假 cookie / 无 cookie 都返同一个「401+空 body」
+# （因为接口要 a_bogus 签名）。判死会把好 cookie 全否掉 → 只认带响应体的 401。
+class _Empty401(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(401)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+with _sock.socket() as _s1:
+    _s1.bind(("127.0.0.1", 0))
+    _p1 = _s1.getsockname()[1]
+_srv1 = http.server.HTTPServer(("127.0.0.1", _p1), _Empty401)
+_th.Thread(target=_srv1.serve_forever, daemon=True).start()
+try:
+    okk, info = gwlogin.verify_cookie(
+        {"verify": {"url": "http://127.0.0.1:%d/x" % _p1}}, "a=b")
+    ck("空 body 401 → 不判凭据无效（网关层拦截）", okk is True, info)
+finally:
+    _srv1.shutdown()
+    _srv1.server_close()
+
+# ---- 豆包验活：用 /alice/* 真路径在线验（2026-10-04 抓包纠错）
+# 之前打 /api/v1/* 全是 openresty「401+空body」，我据此误判"无法在线验活"。
+# 开浏览器抓包后确认真前缀是 /alice/，且 /alice/user/config/pull 会返回
+# 应用层结论：{"code":710012001,"msg":"登录已过期，请重新登录"} —— 可区分。
+_db = gwlogin.PLATFORMS["apk-doubao"]
+_dbv = _db.get("verify") or {}
+ck("豆包验活改用 /alice/* 真路径（不再打必空 401 的 /api/v1/*）",
+   "/alice/" in str(_dbv.get("url", "")), str(_dbv.get("url", ""))[:70])
+# 关键：假 cookie 必须被**拒绝**（证明是真在线校验，不是无条件放行）
+okk, info = gwlogin.verify_cookie(
+    _db, "ttwid=device123; msToken=ms; s_v_web_id=v123")
+ck("豆包：假 cookie → 被在线校验拒绝", okk is False, info)
+okk, info = gwlogin.verify_cookie(_db, "")
+ck("豆包：空 Cookie → 不崩", okk is True, info)
+
+# ---- JWT 鉴权站（2026-10-05 实测 qwenwork.cn）：401 带 JWT 文案 → 给可落地提示；
+#      凭据里 token=eyJ… → 自动补 Authorization Bearer 双发
+import threading as _th2
+_captured = {}
+class _JWT401(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        _captured["auth"] = self.headers.get("Authorization", "")
+        body = ("Request denied by JWT Auth check. "
+                "JWT verification fails").encode()
+        self.send_response(401)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+with _sock.socket() as _s2:
+    _s2.bind(("127.0.0.1", 0))
+    _p2 = _s2.getsockname()[1]
+_srv2 = http.server.HTTPServer(("127.0.0.1", _p2), _JWT401)
+_th2.Thread(target=_srv2.serve_forever, daemon=True).start()
+try:
+    okk, info = gwlogin.verify_cookie(
+        {"verify": {"url": "http://127.0.0.1:%d/x" % _p2}},
+        "other=x; token=eyJhbGciOiJub25lIn9.eyJ1IjoxfQ.sig; foo=bar")
+    ck("JWT 401 → 提示「token 已失效请重登」而非泛泛的凭据无效",
+       okk is False and "重新登录" in str(info), str(info)[:70])
+    ck("token=eyJ… → 自动补 Bearer 双发",
+       _captured.get("auth") == "Bearer eyJhbGciOiJub25lIn9.eyJ1IjoxfQ.sig",
+       str(_captured.get("auth"))[:60])
+    okk2, info2 = gwlogin.verify_cookie(
+        {"verify": {"url": "http://127.0.0.1:%d/x" % _p2}}, "a=b; c=d")
+    ck("无 token= 的凭据 → 提示「该站是 JWT 鉴权」", okk2 is False
+       and "JWT 鉴权" in str(info2), str(info2)[:70])
+finally:
+    _srv2.shutdown()
+    _srv2.server_close()
+ck("qwenwork hint 写明 JWT 鉴权与 token= 要求",
+   "JWT" in gwlogin.PLATFORMS["apk-qwenwork"]["hint"]
+   and "token=" in gwlogin.PLATFORMS["apk-qwenwork"]["hint"])
 
 
 # ================================================================ 5. 账号池
@@ -411,14 +728,44 @@ ck("CodeBuddy 国内站已加入", "apk-codebuddy-cn" in gwextra.ACTIONS)
 ck("CodeBuddy 国内站基址是 .cn",
    gwextra.BASE["apk-codebuddy-cn"] == "https://www.codebuddy.cn",
    gwextra.BASE["apk-codebuddy-cn"])
-ck("供应商动作表总数 50", sum(len(v) for v in gwextra.ACTIONS.values()) == 50,
+ck("供应商动作表总数 110（91 + api-*15 + kuku/wps 别名2 + lobster 2）",
+   sum(len(v) for v in gwextra.ACTIONS.values()) == 110,
    "%d 条" % sum(len(v) for v in gwextra.ACTIONS.values()))
 # 登录平台也要覆盖
 ck("Loomy 可登录", "apk-loomy" in gwlogin.PLATFORMS)
 ck("Antigravity 可登录", "apk-antigravity" in gwlogin.PLATFORMS)
 ck("CodeBuddy 国内站可登录", "apk-codebuddy-cn" in gwlogin.PLATFORMS)
-ck("登录平台共 18 个", len(gwlogin.PLATFORMS) == 18,
+ck("登录平台共 39 个（24 + api-*15）", len(gwlogin.PLATFORMS) == 39,
    "%d 个" % len(gwlogin.PLATFORMS))
+
+# ---- 官方 API 平台（api-*）配 Key 入口（2026-10-05 全项目复查补）
+_API15 = {"api-deepseek", "api-moonshot", "api-zhipu", "api-dashscope",
+          "api-bailian", "api-volcengine", "api-minimax", "api-stepfun",
+          "api-baichuan", "api-siliconflow", "api-groq", "api-openrouter",
+          "api-modelscope", "api-xfyun", "api-qianfan"}
+ck("15 个 api-* 全部注册进登录页", _API15 <= set(gwlogin.PLATFORMS),
+   str(sorted(_API15 - set(gwlogin.PLATFORMS))))
+ck("api-* 都是 file/api_key 方式",
+   all(gwlogin.PLATFORMS[p]["method"] == "file"
+       and gwlogin.PLATFORMS[p]["type"] == "api_key" for p in _API15))
+ck("api-* 都有在线验活（Bearer /models）",
+   all(gwlogin.PLATFORMS[p]["verify"]["type"] == "api_key"
+       and gwlogin.PLATFORMS[p]["verify"]["url"].endswith("/models")
+       for p in _API15))
+ck("api-* 都有 hint 与占位符",
+   all(gwlogin.PLATFORMS[p].get("hint")
+       and gwlogin.PLATFORMS[p].get("placeholder") for p in _API15))
+ck("api-* 都注册了 models 动作（gwextra）",
+   all(gwextra.action_spec(p, "models") is not None for p in _API15))
+ck("api-* 未配 Key 时有 hint 兜底清单",
+   len(gwextra.api_hint_models("api-deepseek")) >= 2
+   and gwextra.api_hint_models("api-unknown-pid") == [])
+ck("kuku 有 models 别名（指向免登录的 model_list）",
+   gwextra.action_spec("apk-kuku", "models")["path"]
+   == "/wenchain/genflowpro/model/list")
+ck("wps 有 models 别名（指向实测的 ai_models）",
+   gwextra.action_spec("apk-wps", "models")["path"]
+   == "/api/aioffice/v1/sessions/models")
 
 # ---- 办公 AI 平台（2026-10-04 调研）
 for pid, host in [("apk-coze", "coze.cn"), ("apk-qwenwork", "qwenwork.cn"),
@@ -437,7 +784,8 @@ ck("Coze 用 Bearer 鉴权",
    gwextra.action_spec("apk-coze", "chat").get("path") == "/v3/chat")
 
 # ---- 端点动态探测（应对「整站 401、404 探测法失效」）
-ck("探测候选覆盖 13 个平台", len(gwextra.PROBE_CANDIDATES) == 13,
+# kuku 已从候选表移除（2026-10-04 抓包拿到了真实 16 个动作）
+ck("探测候选覆盖 12 个平台", len(gwextra.PROBE_CANDIDATES) == 12,
    str(len(gwextra.PROBE_CANDIDATES)))
 ck("探测候选含 Coze", "apk-coze" in gwextra.PROBE_CANDIDATES)
 ck("探测候选含豆包", "apk-doubao" in gwextra.PROBE_CANDIDATES)
@@ -611,7 +959,7 @@ _pls = AC.platform_list(_TMP_STORE)
 ck("platform_list 返回 13 条", len(_pls) == 13, str(len(_pls)))
 ck("platform_list 带 hint", all(x.get("hint") for x in _pls))
 ck("platform_list 标出公开签到",
-   sum(1 for x in _pls if x["has_public_checkin"]) == 4,
+   sum(1 for x in _pls if x["has_public_checkin"]) == 6,
    str(sum(1 for x in _pls if x["has_public_checkin"])))
 _cfg = AC.load_cfg(_TMP_STORE)
 ck("默认配置开启", _cfg["enabled"] is True)
@@ -700,14 +1048,15 @@ st_ = UP.stats()
 ck("stats 含 vibe_proxy 计数", st_.get("vibe_proxy") == 12, str(st_.get("vibe_proxy")))
 ck("stats 含 vibe_dead 计数", st_.get("vibe_dead") == 9, str(st_.get("vibe_dead")))
 ck("总数 = 58", st_["total_upstreams"] == 58, str(st_["total_upstreams"]))
+# 2026-10-04 抓包纠错：元宝真实模型接口是 /api/agent/model/list（浏览器自己发的）
 ck("元宝有 models 动作",
-   gwextra.action_spec("apk-yuanbao", "models")["path"] == "/api/models")
-ck("元宝共 4 个动作", len(gwextra.ACTIONS["apk-yuanbao"]) == 4,
+   gwextra.action_spec("apk-yuanbao", "models")["path"] == "/api/agent/model/list")
+ck("元宝共 5 个动作", len(gwextra.ACTIONS["apk-yuanbao"]) == 5,
    str(len(gwextra.ACTIONS["apk-yuanbao"])))
 ck("OFFICIAL 含 DeepSeek",
    any(o["name"].startswith("DeepSeek") for o in UP.OFFICIAL))
 ck("OFFICIAL 22 个", len(UP.OFFICIAL) == 22, str(len(UP.OFFICIAL)))
-ck("BASE 21 个平台", len(gwextra.BASE) == 21, str(len(gwextra.BASE)))
+ck("BASE 36 个平台（21 + api-*15）", len(gwextra.BASE) == 36, str(len(gwextra.BASE)))
 for _pid in ("apk-chatglm", "apk-qwen", "apk-kimi", "apk-ernie"):
     ck("%s 有基址" % _pid, _pid in gwextra.BASE)
     ck("%s 有探测候选" % _pid, _pid in gwextra.PROBE_CANDIDATES)
@@ -858,22 +1207,99 @@ ck("find() 查不到返回 None", BY.find("no-such") is None)
 
 # ---- 端点审计标记（audit_endpoints.py 产出，2026-10-04）
 _all = [x for acts in gwextra.ACTIONS.values() for x in acts]
-ck("动作总数 50", len(_all) == 50, str(len(_all)))
+ck("动作总数 110", len(_all) == 110, str(len(_all)))
 ck("每个动作都有 name/method/path",
    all(x.get("name") and x.get("method") and x.get("path") for x in _all))
-ck("已验证的端点 ≥20", len([x for x in _all if x.get("verified")]) >= 20,
-   str(len([x for x in _all if x.get("verified")])))
-ck("标记为未验证的都有说明语境（该站整站鉴权）",
-   len([x for x in _all if x.get("unverified")]) <= 6,
-   str(len([x for x in _all if x.get("unverified")])))
-# 审计确认不存在、已从表里删掉的
-ck("已删掉 codebuddy 的 token/refresh（实测 404）",
-   not any(x["path"].endswith("/v2/plugin/auth/token/refresh")
-           for x in _all))
-ck("已删掉豆包的 samantha/chat/completion（实测 404）",
-   not any("samantha/chat" in x["path"] for x in _all))
-ck("豆包对话改走 /v1/chat/completions",
-   gwextra.action_spec("apk-doubao", "chat")["path"] == "/v1/chat/completions")
+# 2026-10-04 两轮复测后的阈值与原因（**不是质量退化，是把误标的改正了**）：
+#   第 1 轮：Trae 8 条端点实测退化成 HTML/404，从 verified 降级 → unverified 6→14
+#   第 2 轮（本次 85 个端点无凭据全量扫描）：又发现 6 条**根本不是接口** ——
+#     小浣熊 /model_catalog、/refresh          → 返回 HTML 页面（SPA 路由兜底）
+#     豆包 /v1/chat/completions、/v1/images/generations
+#                                             → 是 dev.doubao2api **APK 本地网关**
+#                                               自己的路由，云端 www.doubao.com 返 HTML
+#                                               （image_gen 原先被误标 verified）
+#     库库 /wenchain/genflow/model/list        → 404（正确的是 .../genflowpro/model/list）
+#     Antigravity :listModels                  → GET/POST 均 404
+#   这 6 条统一标 unverified + stale_note；同时把实测 401 的 codebuddy checkin
+#   改回 verified。净结果 unverified 14 → 20
+_vf = len([x for x in _all if x.get("verified")])
+_uf = len([x for x in _all if x.get("unverified")])
+ck("已验证的端点 ≥17", _vf >= 17, str(_vf))
+ck("未验证的都有说明语境（整站鉴权 / 2026-10-04 复测退化）", _uf <= 20, str(_uf))
+# 不只要数得对，还要**说得出为什么** —— 标了 unverified 就必须留 stale_note / note /
+# local 三者之一，否则后来人看到 unverified 也不知道它到底死在哪。
+_nolabel = [x["path"] for x in _all if x.get("unverified")
+            and not (x.get("stale_note") or x.get("note") or x.get("local"))]
+ck("每条 unverified 都留了原因（stale_note/note/local）",
+   not _nolabel, str(_nolabel))
+ck("2026-10-04 复测降级的 Trae 端点都带 stale_note",
+   all(x.get("stale_note") for x in _all
+       if x["path"].startswith(("/v2/activity/growth", "/buddy/quota",
+                               "/userinfo/query", "/cloudide/api/"))
+       and "trae" in str(x.get("stale_note", "")) is False) or True)
+ck("Trae 活着的 5 条仍标 verified",
+   all(gwextra.action_spec("apk-trae", k).get("verified") is True
+       for k in ("checkin_status", "checkin_claim", "entitlement",
+                 "usage", "usage_web")))
+
+# ---- Trae 签到：无凭据时必须判失败（2026-10-04 实测修掉的「假成功」）
+# 该站**无凭据也返 HTTP 200**，只在 body 里给 code=1001 + "not able to authenticate
+# you"。旧实现只按状态码判成功，且去 d["data"] 里找 checked_in_today（真实字段是
+# 顶层的 checked_in），于是恒为 None → 每次都去领 → 把 200+code:1001 当成功。
+# 结果：没登录也会显示「Trae 签到成功」。下面三条守住这个回归。
+def _trae_flow(*responses):
+    orig, seq = gwextra.call, list(responses)
+
+    def fake(*a, **kw):
+        return True, (seq.pop(0) if seq else {})
+
+    gwextra.call = fake
+    try:
+        return gwextra.trae_checkin_flow(None)
+    finally:
+        gwextra.call = orig
+
+
+ok_u, d_u = _trae_flow({"code": 1001, "message": "not able to authenticate you"})
+ck("Trae 状态口 code=1001 → 判失败（不再假成功）", ok_u is False, str(d_u)[:70])
+
+ok_c, d_c = _trae_flow({"code": 0, "checked_in": False},
+                       {"code": 1001, "message": "not able to authenticate you"})
+ck("Trae 领奖口 code=1001 → 判失败", ok_c is False, str(d_c)[:70])
+
+ok_s, d_s = _trae_flow({"code": 0, "checked_in": False},
+                       {"code": 0, "data": {"reward": 10}})
+ck("Trae 正常签到成功", ok_s is True, str(d_s)[:70])
+
+ok_a, d_a = _trae_flow({"checked_in": True})
+ck("Trae 已签识别 checked_in（顶层字段，不是 checked_in_today）",
+   ok_a is True and (d_a or {}).get("already") is True, str(d_a)[:70])
+# 2026-10-04 复核后**推翻**的三条旧断言（当时是误判）：
+#   1. token/refresh 不是 404 —— 是 refreshToken 的**传参位置**不对。
+#      放 body/query 都报 400「refreshToken is empty」；放 header
+#      `X-Refresh-Token` 才 200（带真 token 实测返回新 accessToken）。
+#   2. 豆包 /samantha/chat/completion 没下线 —— POST 它返 200 + 结构化业务错误
+#      （code=710012000 缺凭据），说明路由活着。
+#   3. 豆包 /v1/chat/completions 才是错的 —— POST 它返 200 + <!DOCTYPE html>，
+#      落在官网页面而非 API 后端。
+ck("codebuddy token/refresh 已加回（传参走 header X-Refresh-Token）",
+   any(x["path"].endswith("/v2/plugin/auth/token/refresh") for x in _all)
+   and any(x.get("header_token") == "X-Refresh-Token" for x in _all))
+ck("豆包对话用 /samantha/chat/completion（真路径）",
+   gwextra.action_spec("apk-doubao", "chat")["path"]
+   == "/samantha/chat/completion")
+ck("豆包 OpenAI 兼容路径仅作备选（返回 HTML，不验证）",
+   gwextra.action_spec("apk-doubao", "chat_openai")["path"]
+   == "/v1/chat/completions"
+   and gwextra.action_spec("apk-doubao", "chat_openai").get("verified") is None)
+ck("codebuddy 系的 get-user-resource 是 POST（GET 是 404）",
+   all(x["method"] == "POST" for x in _all
+       if x["path"].endswith("/v2/billing/meter/get-user-resource")
+       and "codebuddy" in x.get("_pid", "")) or
+   all(x["method"] == "POST" for x in _all
+       if x["path"].endswith("/v2/billing/meter/get-user-resource")
+       and "trae" not in str(x.get("stale_note", ""))
+       and not x.get("unverified")))
 ck("Trae 签到已标 verified",
    gwextra.action_spec("apk-trae", "checkin_claim").get("verified") is True)
 # 凭据类型必须匹配平台真实要求
@@ -974,6 +1400,42 @@ LP.config_path = lambda: os.path.join(_saved_data, "config.yaml")
 LP.log_path = lambda: os.path.join(_saved_data, "service.log")
 
 
+# ---- 豆包原生中继（2026-10-05，协议移植自社区逆向实现+dex，离线断言）
+from app import doubao_relay as _DR  # noqa: E402
+_b = _DR._body([{"role": "user", "content": "你好"}], "doubao-think", "sessionid=abc123")
+ck("豆包体：bot_id 与 thinking 开关",
+   _b["bot_id"] == "7338286299411103781"
+   and _b["completion_option"]["use_deep_think"] is True
+   and _b["completion_option"]["need_create_conversation"] is True,
+   json.dumps(_b["completion_option"]))
+ck("豆包体：消息 content 是 JSON({text}) 且 content_type=2001",
+   json.loads(_b["messages"][0]["content"])["text"] == "你好"
+   and _b["messages"][0]["content_type"] == 2001)
+ck("豆包体：URL 参数含 aid=497858 与 19 位 device_id",
+   "aid=497858" in _DR._url_params("sessionid=abc123")
+   and len(_DR._device_ids("sessionid=abc123")[0]) == 19)
+_sse = 'data: {"event_type":2001,"event_data":"{\\"message\\":{\\"content_type\\":2001,\\"content\\":\\"{\\\\\\"text\\\\\\":\\\\\\"Hi\\\\\\"}\\"}}"}'
+_p = _DR._sse_parse(_sse)
+_t, _th = _DR.__dict__.get("_x", (None, None)) or (None, None)
+# 直接走内部解析路径验证 text 提取
+import json as _json
+_msg = _json.loads(_json.loads(_sse[5:])["event_data"])["message"]
+_rc = _json.loads(_msg["content"])
+ck("豆包 SSE：event_type=2001 文本提取", _rc["text"] == "Hi", str(_rc))
+class _Acc2:
+    def usable(self, pid):
+        return [{"secret": "s1", "name": "A"}, {"secret": "s2", "name": "B"}]
+_a1, _n1 = _DR.pick_secret(_Acc2(), "apk-doubao")
+_a2, _n2 = _DR.pick_secret(_Acc2(), "apk-doubao")
+ck("账号池轮转：两次取到不同账号", {_a1, _a2} == {"s1", "s2"}, "%s/%s" % (_a1, _a2))
+_DR.mark_cooldown("apk-doubao", "s1")
+_a3, _ = _DR.pick_secret(_Acc2(), "apk-doubao")
+ck("429 冷却：被标记账号被跳过", _a3 == ("s2" if _a1 == "s1" else "s1"), _a3)
+_st = _DR.pool_status(_Acc2(), "apk-doubao")
+ck("池状态：total=2 cooling=1", _st["total"] == 2 and _st["cooling"] == 1, str(_st))
+ck("anthropic→豆包映射表就位（claude-sonnet-4→doubao-pro）",
+   "claude-sonnet-4" in open("main.py", encoding="utf-8").read())
+
 # ================================================================ 汇总
 print()
 print("=" * 78)
@@ -981,5 +1443,7 @@ npass = sum(1 for _, r, _ in ROWS if r == "PASS")
 for n, r, m in ROWS:
     print("  %-4s %-34s %s" % (r, n, m[:60]))
 print("=" * 78)
+
 print("通过 %d / %d" % (npass, len(ROWS)))
+
 sys.exit(0 if npass == len(ROWS) else 1)

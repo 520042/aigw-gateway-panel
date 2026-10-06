@@ -86,9 +86,10 @@ GATEWAYS = [
         "size": 1411398,
         "sdk": "min24 / target34",
         "lang": "Kotlin + Jetpack Compose",
-        "endpoint": "http://127.0.0.1:<动态>/v1",
+        "endpoint": "http://<手机IP>:<App内查看端口>/v1",
         "protocol": "openai",
-        "auth": "oauth",
+        "auth": "bearer",  # ★ 实测 dex：Bearer + api_key（App 设置里可设）
+        "lan": True,  # 0.0.0.0 监听，手机与电脑同一 WiFi 即可反代接入
         "oauth_ports": [51120, 51121],
         "managed": False,          # 手机端运行，PC 侧通过局域网访问
         "upstream": ["api.trae.cn", "api.trae.com.cn", "www.codebuddy.cn",
@@ -157,9 +158,10 @@ GATEWAYS = [
         "size": 981416,
         "sdk": "min24 / target34",
         "lang": "Kotlin",
-        "endpoint": "http://127.0.0.1:<动态>/v1",
+        "endpoint": "http://<手机IP>:<App内查看端口>/v1",
         "protocol": "openai",
-        "auth": "cookie",
+        "auth": "bearer",  # ★ dex：Bearer + api_key
+        "lan": True,  # 0.0.0.0 监听，局域网反代接入
         "managed": False,
         "upstream": ["xiaohuanxiong.com"],
         "free": "登录即送积分，每日登录赠送",
@@ -186,9 +188,10 @@ GATEWAYS = [
         "size": 230364,
         "sdk": "min24 / target34",
         "lang": "Kotlin",
-        "endpoint": "http://127.0.0.1:<动态>/v1",
+        "endpoint": "http://<手机IP>:<App内查看端口>/v1",
         "protocol": "openai",
-        "auth": "cookie",
+        "auth": "bearer",  # ★ dex：Bearer + api_key（错填 cookie 曾致反代 401）
+        "lan": True,  # ★ dex：0.0.0.0 监听 → 手机与电脑同一 WiFi 即可反代
         "managed": False,
         "upstream": ["www.doubao.com"],
         "free": "豆包 APP 免费对话额度",
@@ -213,9 +216,10 @@ GATEWAYS = [
         "size": 167060,
         "sdk": "min24 / target34",
         "lang": "Kotlin",
-        "endpoint": "http://127.0.0.1:<动态>/v1",
+        "endpoint": "http://<手机IP>:<App内查看端口>/v1",
         "protocol": "openai",
-        "auth": "cookie",
+        "auth": "bearer",  # ★ dex：Bearer + api_key
+        "lan": True,  # 0.0.0.0 监听，局域网反代接入
         "managed": False,
         "upstream": ["yuanbao.tencent.com"],
         "free": "元宝对话额度（消费 APP 内置广告换额度）",
@@ -238,9 +242,10 @@ GATEWAYS = [
         "size": 52290540,
         "sdk": "min21 / target28",
         "lang": "Go (GoMobile)",
-        "endpoint": "http://127.0.0.1:<动态>",
+        "endpoint": "http://<手机IP>:<端口，UI 默认 :7863>/v1",
         "protocol": "openai",
-        "auth": "unknown",
+        "auth": "bearer",  # libgojni.so：apikeys.json 客户端密钥（Bearer）
+        "lan": True,  # GoMobile 监听 0.0.0.0，局域网反代接入
         "managed": False,
         "upstream": ["—"],
         "free": "—",

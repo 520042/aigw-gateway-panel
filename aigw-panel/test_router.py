@@ -209,7 +209,7 @@ def main():
 
     # ============ 12. model 名替换
     r.add_model("t-rename", [mk("realmodel", 1, 0, s1, p1)])
-    res5, _ = r.chat("t-rename", {"model": "auto-fast",
+    res5, _ = r.chat("t-rename", {"model": "auto",
                                   "messages": [{"role": "user", "content": "hi"}]})
     check("请求 model 被替换为上游真实模型",
           (res5.get("_route") or {}).get("upstream") == "realmodel",

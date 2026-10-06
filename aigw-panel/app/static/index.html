@@ -15,9 +15,16 @@
     <button class="navbtn on" data-v="sources"><span class="ic">◈</span>接入源</button>
     <button class="navbtn" data-v="route"><span class="ic">⇄</span>路由与模型</button>
 
-    <div class="navgrp">更多</div>
-    <button class="navbtn" data-v="tools"><span class="ic">⚒</span>工具与集成</button>
-    <button class="navbtn" data-v="settings"><span class="ic">⚙</span>设置与日志</button>
+    <div class="navgrp navgrp-toggle" id="advToggle" onclick="toggleAdv()" title="展开 / 收起高级功能">
+      <span>高级</span><span class="caret">▸</span>
+    </div>
+    <div class="navsub" id="advSub">
+      <button class="navbtn" data-v="tools"><span class="ic">⚒</span>工具与集成</button>
+      <button class="navbtn" data-v="settings"><span class="ic">⚙</span>设置与日志</button>
+      <button class="navbtn" data-v="checkin"><span class="ic">✓</span>签到记录</button>
+      <button class="navbtn" data-v="growth"><span class="ic">✦</span>成长任务</button>
+      <button class="navbtn" data-v="tasks"><span class="ic">☰</span>任务管理</button>
+    </div>
 
     <div style="flex:1"></div>
     <div class="faint" style="padding:8px 10px;font-size:11px;line-height:1.6">
@@ -44,6 +51,7 @@
     <div id="view"></div>
   </main>
 </div>
+<script src="/vendor/qrcode.min.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

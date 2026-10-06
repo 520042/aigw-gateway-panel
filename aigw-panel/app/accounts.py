@@ -46,6 +46,8 @@ class Accounts:
                     "edition": acct.get("edition", a.get("edition", "")),
                     "obtained_at": now,
                 })
+                if acct.get("uid"):
+                    a["uid"] = acct["uid"]
                 a.setdefault("enabled", True)
                 self._save(rows)
                 return a
@@ -64,6 +66,8 @@ class Accounts:
             "status": "unknown",
             "quota": "",
             "note": acct.get("note", ""),
+            # copilot 风控头需要：uid 与 token 必须同账号（native_relay._headers 注入）
+            "uid": acct.get("uid", ""),
         }
         rows.append(item)
         self._save(rows)

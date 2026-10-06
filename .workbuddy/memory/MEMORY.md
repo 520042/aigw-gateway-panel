@@ -1,226 +1,157 @@
 # 网关项目 · 项目长期记忆
 
-## 项目定位
-把工作区里 7 个「免费 AI 额度本地化」网关程序（1 个 Go EXE + 6 个 Android APK）
-和网上的公益中转站 / 官方免费额度平台，统一收进一个本地面板管理。
+## 定位
+把 7 个「免费 AI 额度 → 本地 OpenAI 端点」网关（1 个 Go EXE + 6 个 Android APK）和公益中转站 / 官方免费额度平台，统一收进一个本地面板管理。
+**核心诉求：只启动一个软件，面板自己干完所有事，不依赖 workbuddy-gateway 进程。**
+**网关 EXE 已彻底移除**（build26），面板纯原生模式，自身即本地网关（`/v1` 暴露 OpenAI 兼容端点：`/v1/chat/completions`、`/v1/models`、`/v1/messages` Anthropic 兼容）。
 
-## 目录约定
+## 路由现状（build36，auto + Free 两模型）
+- `auto`：strategy=fastest（优先响应最快的上游）
+- `Free`：strategy=free（优先免费模型：anon-zen / 豆包）
+- 两者各挂 `native:anon-zen`（OpenCode Zen 公共免费池，Bearer public，免登录）作**常驻兜底** +
+  `native:apk-doubao`（豆包原生中继，free=True）→ 豆包挂自动切 anon-zen，永不裸 503
+- `Target` 有 `free` 属性；`pick()` 支持 fastest/weight/priority/**free** 四策略；free 候选排前，非 free 兜底排后
+- 降级：429/5xx/超时 熔断+1 降级（最多 4）；4xx(除 429) 直接报错；连续 3 次→OPEN，60s 后可再选
+- 会话亲和：请求体 `aigw_session` 复用上游；`aigw_strategy` 单次覆盖
+- ⚠ 旧 EXE 不认新 `auto`/`Free` 模型 → 改完路由必须重打包+重启面板
 
-```
-网关项目/
-├── base*.apk                        原始素材（6 个网关 APK）
-├── workbuddy-gateway-windows-1.29.6.exe   网关主体（Go, x64, 默认 8317）
-├── workbuddy-gateway-x86-1.29.6.zip      已损坏（%TSD-Header-###% 代理注入）
-├── 工作区文件解析报告.md             APK/EXE 反解结果
-├── 测试报告.txt                     35/35 自测记录
-└── aigw-panel/                     面板源码 + dist/aigw-panel.exe
-```
+## 关键模块（职责）
+| 文件 | 职责 |
+|---|---|
+| `app/tlogin.py` | ★ 原生登录链路（state/URL/换 token/拉倍率），copilot 系 |
+| `app/gwlogin.py` | 登录驱动（5×二维码/11×Cookie/2×文件/anon）；`verify` 全部实测校准 |
+| `app/cdp.py` | WS+CDP+Browser；Cookie 取明文；`cookie_header` 双向域匹配 |
+| `app/gwextra.py` | ★ 33 平台动作注册表 / 108 动作；`_API_OFFICIAL`+`api_hint_models` |
+| `app/model_extract.py` | ★ 模型清单实时提取 + 内置回退（豆包/元宝/通用 5 种响应形状） |
+| `app/router.py` | 路由引擎（fastest/weight/priority/free + native 目标） |
+| `app/doubao_relay.py` | 豆包 samantha 原生中继（协议逆向） |
+| `app/native_relay.py` | 6 平台原生中继（含 anon-zen 指纹头）；`relay_once/relay_stream` |
+| `app/web_relays.py` | 网页版反代（web-glm/web-trae/web-deepseek，请求体推断待校准） |
+| `app/acct_pool.py` | 通用账号池（轮询/冷却 soft 60s·hard 12h/请求级换号 3 次） |
+| `app/accounts.py` | 账号池 `data/accounts.json` |
+| `app/tray.py` | 纯 ctypes 托盘 + 单实例 + 开机自启 |
+| `app/sources.py` | 分类 LOCAL(19)/API(15)/WEB(2) |
+| `app/autocheckin.py` | 13 平台定时签到 |
 
-## 关键事实（实测，别再重复踩）
+## 豆包原生中继（app/doubao_relay.py，最常用上游）
+- samantha：`POST /samantha/chat/completion?aid=497858&version_code=20800&device_id=<19位>`
+  Cookie sessionid 双写；体 bot_id=7338286299411103781 + completion_option
+  （use_deep_think/use_auto_cot 区分 pro/think/expert）+ messages[].content=JSON({text}) content_type=2001
+- SSE event_type=2001（content_type 10000/2001/2008/2071 → text/thinking）；验活
+  `/passport/account/info/v2` 返回 user_id 即有效
+- 账号池轮转 + 429 冷却 60s；会话续接 30min TTL
+- 用法：`/v1/chat/completions` model="doubao-pro"（裸名即走中继）；`/v1/messages`
+  claude-* 自动映射豆包模式（Anthropic 兼容）
+- EXE 四项已原生化：池轮询+冷却 / /v1/messages / 90天用量（store.usage_events + /api/usage）/ webhook（notify.py）
 
-### 网关鉴权
-- `POST /admin/api/setup {"username","password"}` → 首次初始化
-- `POST /admin/api/login/key {"username","password"}` → 登录（**字段是 password，用 key 报 invalid_password**）
-- 之后 `/admin/api/*` 带 Cookie；未登录 `login_required`，未初始化 `setup_required`
-- `/v1/*` 走 Bearer，key 默认 `admin`
-
-### 网关账号登录（二维码）—— 这才是"获取 token"的真正入口
-```
-POST /admin/api/login/start  {"edition":"cn"|"intl"}
-  → {id, edition, siteLabel, status, message,
-     qr:"data:image/png;base64,...",
-     authUrl, startedAt, expiresAt, secondsLeft}
-GET  /admin/api/login/poll?id=<id>   ← **仅 GET，POST 返回 405**
-  → 同上，status: pending → success
-```
-- cn → `copilot.tencent.com/login?platform=VSCode&state=`，有效期 300s
-- intl → `www.workbuddy.ai/login?platform=workbuddy-ai&state=`，有效期 900s
-- 面板已完整驱动该流程（二维码内嵌显示 + 授权链接 + 2s 轮询），不要再让用户去敲 `workbuddy-gateway login`
-
-### 网关内置调度
-签到 09:00 / 成长 10:00 / 凭据热加载 5s / 模型目录刷新 60min / 用量保留 90 天
-冷却：账号级 60s，模型级 600s。互斥体 `Local\WorkBuddyGatewayMutex`。
-
-### 网关程序启动
-```bash
-workbuddy-gateway-windows-1.29.6.exe serve -addr 127.0.0.1 -port 8317 -api-key admin
-workbuddy-gateway-windows-1.29.6.exe login          # 浏览器授权拿凭据
-workbuddy-gateway-windows-1.29.6.exe login -intl   # 国际站
-```
-
-### 6 个 APK 一览
-`aigw.app`(0.1.18, Trae, 功能最全) · `dev.doubao2api`(1.0.6, 豆包, 有文生图) ·
-`com.joy4fire.wb2apimobile`(Go) · `com.joy4fire.workbuddy2api`(1.1.0, CodeBuddy 国际) ·
-`dev.raccoon2api`(1.15, 小浣熊, 有登录送积分) · `dev.yuanbao2api`(1.2.0, 元宝)
-
-### NewAPI 系签到接口
-- `GET /api/user/checkin/status` → `data.stats.{checked_in_today,consecutive_days,total_days}`
-- `POST /api/user/checkin` → `data.{consecutive_days,reward}`
-- AnyRouter 路径不同：`/api/user/sign_in`
-- 认证：Token + `new-api-user` 头 ＞ Cookie ＞ 账密 `POST /api/user/login`
-- quota 换算：`500000 quota = $1`（按站点 `quota_per_unit`）
-
-## 本项目踩过的坑
-
-| 坑 | 现象 | 解法 |
-|---|---|---|
-| `os.path.abspath(__file__ + "/..")` | data 目录建错位置 | 必须先 `dirname(abspath(__file__))` |
-| `APP["sched"]` 命名 | 与 `threading.Thread` 属性打架 | 改 `APP["scheduler"]` |
-| `safe()` 忘了解包 tuple | `AttributeError: 'tuple' has no attribute 'get'` | 统一返回 `(body, status)`，另加 `safe_dict()` |
-| 用 body 有无 `ok` 判成败 | 网关成功响应无 `ok` 字段 → 误报 502 | 按 HTTP 状态码判 |
-| bash heredoc 放复杂正则 | `unterminated character set` | 写 `.py` 文件执行 |
-| `re.finditer()` 返回 Match | `.decode()` 报 AttributeError | 用 `.group().decode()` |
-| AXML 二进制 Manifest | 拿不到包名/组件 | 自写字符串池解析器（chunk 0x0001，UTF8 flag 分支） |
-| PyInstaller 静态资源 | 打包后 404 | 候选列表探测 `HERE/app/static` 与 `_MEIPASS/app/static` |
-| EXE 在 dist/ 找不到网关 | 显示「未找到」 | 向上 5 层 + 环境变量 `AIGW_GATEWAY_PATH` + 浅层 walk 三级搜索 |
-| 调度器启动即补跑签到 | 刚开面板就签 | 45 秒静默观察期 |
-| zip 首部 `%TSD-Header-###%` | BadZipFile | TSD 透明代理注入，用等价 exe |
-| **JS 箭头函数漏括号** | `const line=key,max=>…` 解析成三个 const 声明，浏览器**静默拒绝整个文件** | 写成 `const line=(key,max)=>…`；**必须 `node --check app.js` 验语法** |
-| 自测不查 JS 语法 | 页面卡在"正在加载"，接口全 200 也没发现 | `selftest.py` 已接入 `node --check` 作为第 40 项断言 |
-| `node --check` 定位语法错 | 只报"第几行"不给原因 | 比浏览器 `eval` 精确得多，优先用 |
-| `probe_target` 用 `self.endpoint` | Router 没有该属性，后台探测线程静默死掉 | 用 `t.endpoint`；且 worker 内必须 try/except |
-| `Target.__slots__` 挡动态属性 | 测试里加 `capabilities` 报 no `__dict__` | 补进 `__slots__` + `__init__` 参数 |
-| `probe_all` 按 endpoint 去重 | 只探第一个成员，其余 Target 永远无 EWMA | 分组探测后**回填指标给所有成员** |
-| `fastest` 把无延迟数据排最前 | 刚配置的上游抢跑 | 无 EWMA 排最后 |
-| 模块级代码顺序 | `NODE = … shutil_which_node()` 在函数定义前 → NameError | 函数先定义再调用 |
-| `guard.acquired()` | 写成读属性，`acquired` 是 bool 字段不是方法 | 属性名别和方法名撞车 |
-| **AES-GCM `_inc32` 掩码写窄** | 写成 `0xFFFFFFFF00000000`（64 位）会把 128 位计数器高 64 位清零 → 第 2 块起 keystream 全错 | 必须 96 位：`0xFFFFFFFFFFFFFFFFFFFFFFFF00000000` |
-| **AES-GCM keystream 起点** | 从 `J0` 开始（错），空明文侥幸能过，非空全错 | 明文用 **`inc32(J0)`**，只有算 Tag 才用 `J0` |
-| **`_gmul` 方向别乱改** | 曾误判成"位序错"改成左移版（R=0x87），**改反了** | 正确的是**右移版 R=0xE1<<120** 配 `int.from_bytes(big)`；aesgcm.py 里已加警告注释 |
-| **自洽测试发现不了规范错误** | 自己加密自己解密，计数器写错照样通过 | 用 **Windows BCrypt(CNG)**（`bcrypt_ref.py`）做黄金参考交叉验证 |
-| **凭记忆写测试向量** | 记错 NIST TC3 的 64 字节十六进制，误以为实现有 bug，白查很久 | 长向量别靠记忆；改用 OS 原生实现交叉验证 |
-| **Chrome v20 app-bound 加密** | 磁盘 Cookie 全解不开 | 无解，改走 CDP（`Network.getAllCookies`）或手动粘贴 |
-| **改控制台密码后登录静默失效** | `client_factory` 用启动时那份空密码 | 每次 `reconfigure()` 最新 settings（已修，改完无需重启） |
-| **前端自动轮询会清空输入** | `render()` 重绘把 textarea 内容冲掉 | Cookie 类只在点击时 poll；仅二维码类自动轮询 |
-| **ctypes 托盘六个坑** | 见下 | 纯 ctypes 实现，不用 pystray |
-
-## ctypes 托盘（app/tray.py）踩坑
-
-| 坑 | 现象 | 解法 |
-|---|---|---|
-| `ctypes.wintypes` 无 `WNDCLASSW` | AttributeError | 自己定义结构体 + `WNDPROC = WINFUNCTYPE(...)` |
-| 窗口过程回调被 GC | 赋完 `lpfnWndProc` 立即失效 | `proc = WNDPROC(self._wndproc); self._proc = proc` 存引用 |
-| `GetModuleHandleW` | user32 上找不到 | 在 **kernel32** |
-| `ExtractIconExW` | user32 上找不到 | 在 **shell32** |
-| `DefWindowProcW` 无 argtypes | `OverflowError: int too long` | `argtypes=[HWND,c_uint,WPARAM,LPARAM]`，restype `c_ssize_t` |
-| `CloseHandle` 无 argtypes | HANDLE 截断，互斥体释放不掉 | `argtypes=[HANDLE]`；且 acquire 失败要立刻关句柄 |
-| 气泡通知同步 sleep | 调用方阻塞 9 秒 | 立即返回，NID 数据函数返回前已拷走 |
-
-## 为什么无窗口的 exe 任务栏没图标
-
-`console=False` → PE Subsystem=2（GUI 子系统）→ **没有主窗口** →
-Windows 不分配任务栏位置。解法两条：
-1. `SetCurrentProcessExplicitAppUserModelID(APP_ID)` 让任务栏正确分组
-2. 自建消息窗口 + `Shell_NotifyIconW` 挂托盘，有了持续窗口图标就不消失
-
-## 倍率（credits）—— 权威来源与三源合并
-
-**别再去猜接口，倍率表在 APK 里**：
-`base(3).apk → assets/codebuddy-international-models.json`（18286 B），
-标注 `@tencent-ai/codebuddy-code@2.150.0` / `2026-09-13`，
-**36 个模型，35 个带 `credits`**，另有 `maxInputTokens` / `maxOutputTokens` /
-`supportsImages` / `supportsToolCall` / `supportsReasoning` / `vendor`。
-用 `gen_bundled_models.py` 生成 `app/bundled_models.py`（生成物，勿手改）。
-
-三源优先级（`main.py::_merge_model_rates`）：
-1. 网关实测 `cost` —— **只有数字才算**，`"未观测"` 和 `0` 都不算
-2. 在线目录（登录后拉）`/console/enterprises/personal/models`
-3. 内置倍率表（免登录，恒可用）
-
-两套 id 体系必须映射：内置表是 APP 槽位名（`default-model`），
-网关是上游真实名（`default`）。四级匹配 = 精确 → 别名(`_ALIASES`) → 归一化 → 同族前缀。
-实测 31 个网关模型命中 18 个；未命中的 13 个是国内站独有（`glm-4.7`/`hunyuan-chat`/`minimax-m2.5`…），
-内置表是国际站的覆盖不到，只能靠在线目录补。
+## 登录链路（关键坑）
+- **copilot 系原生扫码**（免 EXE 免跳页）：`_start_native_qrcode` 生成 state+auth_url →
+  前端 vendor/qrcode.min.js 现场出码 → `_poll_native` 轮询 `/v2/plugin/auth/token?state=`
+  → token 以 type="token" 落账号池（secret=accessToken，直接用于中继/倍率）
+- poll 竞态：无 gw_session 时静默等下一轮（勿误报「缺少登录会话 id」打终态）
+- Qoder 是桌面端应用：浏览器 Cookie 流程已删（method=file 手动粘贴）；CLIProxyAPI 无 -qoder-login
+- **本地网关 EXE ≠ WorkBuddy 账号**（用户反复强调）：EXE（:8317）外部可选、默认不启动；
+  WorkBuddy/CodeBuddy 国内/国际是**两套独立账号**（copilot.tencent.com 原生直连，不需要 EXE）
+- anon-zen：method=anon 免登录，点接入即落池 secret="public"
+- qwenwork.cn 是 JWT 鉴权：只认 `Authorization: Bearer` 或 cookie 名 `token=`（其它 cookie 一律 missing）
 
 ## 平台接口基址（实测，别再猜）
-
 | 平台 | 基址 | 备注 |
 |---|---|---|
-| apk-trae | `api.trae.cn` **和** `www.trae.com.cn` | **拆两台主机**！签到/权益/用量在 `api`（挂 `/trae` 前缀），积分/用户/配额/手机登录在 `www`。ACTIONS 用 `base` 字段做 per-action 覆盖 |
-| apk-codebuddy | `www.codebuddy.ai` | 登录轮询 `/v2/plugin/auth/token` 在 **`copilot.tencent.com`**；`auth/state` 已下线 404 |
-| apk-raccoon | `xiaohuanxiong.com` | `/api/web/points/v1/{balance,bills}`、`/api/web/auth/v1/entitlement_info`、`/api/web/office/v3/setting_info` |
-| apk-doubao | `www.doubao.com` | 有文生图 `/v1/images/generations`、对话 `/samantha/chat/completion` |
-| apk-yuanbao | `yuanbao.tencent.com` | 对话是 `/api/chat/completions`（**不是** `/api/chat`） |
-| apk-go | — | `copilot.tencent.com` 是官网，`/v1/*` 全 404，走本地网关无公开 REST |
+| apk-trae | `api.trae.cn` **和** `www.trae.com.cn` | 拆两台 |
+| apk-codebuddy | `www.codebuddy.ai` | 登录轮询在 `copilot.tencent.com` |
+| apk-raccoon | `xiaohuanxiong.com` | `/api/web/points/v1/{balance,bills}` |
+| apk-doubao | `www.doubao.com` | 真前缀 `/alice/*` + `/samantha/*`（aid=497858）；文生图 `/v1/images/generations` |
+| apk-yuanbao | `yuanbao.tencent.com` | 对话 `/api/chat/completions`（**非** `/api/chat`）；模型 `/api/agent/model/list` |
 
-Trae 的 `points/activation`、`redemption-codes/redeem`、`team-points/balance`
-是 **APP 本地网关路由**（公网连 `www.trae.ai` 也 404），标 `local: True` 前端灰掉。
+### 6 个 APK（= 6 个本地网关，内部模型清单已拆解，勿凭印象下结论）
+`aigw.app`(0.1.18,Trae) · `dev.doubao2api`(1.0.6,豆包) · `com.joy4fire.wb2apimobile`(Go) ·
+`com.joy4fire.workbuddy2api`(1.1.0,国际) · `dev.raccoon2api`(1.15,小浣熊) · `dev.yuanbao2api`(1.2.0,元宝)
 
-## 面板启动与测试的坑
+## 原生对话中继（端点来自字节码，先拆文件再谈抓包）
+- CodeBuddy/WorkBuddy：`copilot.tencent.com/v2/chat/completions` + X-Domain/X-Tenant-Id/X-User-Id 头组
+- Trae：`api.trae.cn/api/v1/chat/completions`（备选 /v2、/v1）
+- 小浣熊：`xiaohuanxiong.com/api/web/llm/v2/chat/completions`
+- 用法：对话 model 带 `@平台id` 后缀 → 原生中继（账号池凭据）；`/api/models?action=relays` 查清单
+- 待真凭据联调：请求体平台私有字段（腾讯 v2 business、元宝 hy 包装）—— 静态提取无法替代
 
+## 模型清单（豆包/元宝）
+- 豆包：网页版 `model_list.item_list` 解析进 `app/bundled_doubao.py`（6 个）
+- 元宝：SPA 动态加载 `/api/agent/model/list`，内置用 `app/bundled_yuanbao.py`（12 个，较旧）
+- 统一 `app/model_extract.py`：已登录优先拉云端，失败回退内置，响应带 `live` 标志
+
+## 官方 API 平台（api-*，15 家已注册）
+gwextra `_API_OFFICIAL` + `api_hint_models()`（未配 Key 回退官方提示，永不空表）；配 Key→Bearer 实时拉
+
+## 打包环境（重要）
+- venv：`C:\Users\liang.zhao\.workbuddy\binaries\python\envs\default`（PyInstaller 6.22.3）
+- Node（仅 JS 语法）：`C:\Users\liang.zhao\.workbuddy\binaries\node\versions\22.22.2-3\node.exe`
+- 命令：`python -m PyInstaller --clean --noconfirm build.spec`
+- **build.spec 绝不能 exclude `sqlite3`**（读本机浏览器 Cookie 依赖）
+- 新模块函数内动态导入 → 显式写进 `hiddenimports`；新增静态子目录必须写进 datas
+- 重打包前先杀面板进程（dist exe 被占用 PyInstaller 静默半失败），验 mtime
+- 验证打包：从 EXE 的 PYZ 抽模块确认逻辑进包
+
+## 本机浏览器 Cookie 现状
+Chrome/Default 604 条、Edge 1 条 —— 全 v20（app-bound 加密），磁盘直解无解，只能 CDP 或手动粘贴。
+
+## 踩坑精编（高频）
 | 坑 | 解法 |
 |---|---|
-| `--port 8801` **不被解析** | 端口只认环境变量 `AIGW_PANEL_PORT`；`--no-tray` 也不认（只认 `--tray`） |
-| bash 后台进程被回收 | 用 `run_panel_test.py` 里 subprocess 拉起 + 测完 terminate |
-| `tasklist` 输出是 **GBK** | `subprocess(text=True, encoding="gbk", errors="replace")`，否则正则匹配不上导致 taskkill 没执行 |
-| 网关限流 `too_many_attempts` | 网关登录失败计数是**内存态**，`taskkill` + 重启即清 |
-| EXE 残留锁单实例 | 测 EXE 前先 `taskkill /F /IM aigw-panel.exe` |
-| 自测顺序导致 502 | selftest 开头加「前置·拉起网关」 |
+| 改前端只 node --check | 必须跑 `node test_views.js`（运行时 ReferenceError 查不出） |
+| 改 JS 用 heredoc 内嵌 Python 写文件 | 转义链吃反斜杠连环伤 → 用 Edit 工具逐处改 |
+| ✏ JS 重名函数覆盖（loadRoute/acToggle 等） | 后者 hoist 覆盖前者 → 改完 `grep 函数名\|sort\|uniq -d` 验零重复 |
+| `_g("auto",…)` / 路由断言写旧模型名 | auto-fast/auto-weight/auto-priority 已废弃 → `auto` / `Free` |
+| EXE 关后 /api/models 探网关 6.8s/10.2s | `_gw_alive()` 返回 dict 永远真值 → 守卫必须 `.get("alive")`，且不能经 new_client()（递归爆栈） |
+| 单实例互斥体挡新 EXE | 测前 `taskkill /F /IM aigw-panel.exe` |
+| ★ 单实例互斥体"幽灵残留" | 反复强杀后面板报"另一个实例在运行"但**查无任何 aigw 进程**、端口无监听，等 45s+ 也不释放。仅影响我在沙箱反复强杀后的启动；**用户干净会话双击/开机自启不受影响**。验证时别反复强杀，起不来就让用户手动双击或重启 |
+| safe-delete shim 拦 rm/Remove-Item | `Stop-Process -Name aigw-panel -Force` 杀残留 → PowerShell Remove-Item 实际能删 |
+| 豆包真接口前缀 `/alice/`（非 `/api/v1/`） | 真验活 `GET /alice/user/config/pull` 未登录返 `code:710012001` |
+| APK `/v1/*` 是本地网关路由 | 云端 www.doubao.com 返 HTML，别混淆 |
+| 「200 + 业务码」假成功 | 先判业务码 / 判 HTML，不只看 HTTP 状态 |
+| relay_once 误传多余 kw（如 model=） | TypeError 直接 500/线程崩；签名不匹配先查传入参数 |
+| anon-zen 公共池偶发挂起 | 真实探活 GET `/zen/v1/models` + relay_once timeout=25，避免 180s 默认超时卡死 |
+| ★ 自动路由（auto/free）**流式**返回 JSON 而非 SSE | ZCode/Cherry 默认 stream:true，收不到 `data:` 帧 → 报 `empty_model_response`。router 分支曾漏 stream 处理（豆包/@pid/web_relay 分支都有），build39 补 `_sse_text_chunks` 回放。★改路由必须**同时验「非流式+流式」**，用 `curl -i` 看 Content-Type 是否 `text/event-stream` |
+| ★ `_sse_text_chunks` 用 uuid 但 main.py 未 import | 该路径长期无人走到（doubao/@pid 流式走 DR.chat_stream/relay_stream）→ NameError 藏死。补 `import uuid`。★ **py_compile 只查语法，查不出运行时 NameError**：后端改完必须起真实进程实测并看 EXE 的 stderr traceback |
+| ★ WorkBuddy（wb-gateway）前端看不到模型 | `platform_models` 里 copilot 系走「网关型分支」问已移除 EXE 的 /v1/models → 永远空表（第三处 EXE 遗留）。改原生直连 `tlogin.models_with_credits(token)`（/console/enterprises/personal/models，带倍率），失败回退 bundled_models 36 个。★ 排查"某平台没模型"先分清：**没凭据** 还是 **代码走了依赖 EXE 的死路** |
+| ★★ 两套模型接口**不共用**，改一处不够 | `platform_models`（接入源详情页）与 **`grouped`（模型总表，分组硬编码 ①~⑤）** 是两套独立逻辑。修了详情页 ≠ 总表有（用户因此二次反馈"还是看不到"）。★ 新增平台/修模型必须**两处都改**；排查用 `curl .../api/models?action=grouped` 看 pid 在不在分组列表 |
+| `platform_models` 的 platform 在 POST body | 放 query 会报 "platform 必填"（/api/* 的 action 才在 query） |
 
-## 关键文件（v1.2）
-| 文件 | 职责 |
-|---|---|
-| `app/tray.py` | 纯 ctypes 托盘 + 单实例 + 开机自启（HKCU Run） |
-| `make_icon.py` | 自绘 PNG → 自拼多尺寸 ICO（不用 Pillow） |
-| `test_tray.py` | 19 项托盘测试 |
-| `build.spec` | 含 `icon='app/static/aigw.ico'` |
+## 目录约定
+```
+网关项目/
+├── base*.apk                          原始素材（6 个网关 APK）
+├── workbuddy-gateway-windows-1.29.6.exe   网关主体（Go, x64, 默认 8317，已弃用）
+└── aigw-panel/                       面板源码 + dist/aigw-panel.exe（build36）
+```
 
-## 中转与路由（v1.1 新增）
-
-### 三个自动模型
-| 模型 | 策略 | 规则 |
+## ★★ WorkBuddy / CodeBuddy = 同一套接口，只分国内站 / 国际站（2026-10-06 搜索证实，勿再按"产品"拆）
+**曾误当成两个独立产品** → 用户纠正。外部一手证据（4 处一致）：
+- dsh-router-codebuddy：*"WorkBuddy 是腾讯的国际版 AI 办公工作台，与国内 CodeBuddy
+  **同族同契约**：同样的 OAuth 轮询登录、同样的 /v2/chat/completions 网关、
+  同样的 /billing/meter/* 签到积分，两者**共用同一份实现**，差异只落在 profile"*
+- workbuddy-gateway（Go）：*"两个上游站点走**同一套 /v2/plugin/* 协议**，凭据按站点隔离"*
+- readaitime：同属 Buddy AI 系列，**同一账号积分共享、无需分别订阅**
+- dsh-connect-workbuddy：国际版两个品牌域名 workbuddy.ai / codebuddy.ai **都属国际版**
+正确口径（面板命名必须用这个）：
+| 站点 | 上游 | 品牌名 |
 |---|---|---|
-| `auto-fast` | fastest | EWMA 最低优先，无延迟数据排最后 |
-| `auto-weight` | weight | 站点权重高优先，同权重比延迟 |
-| `auto-priority` | priority | 优先级数值升序，失败才降级 |
+| 国内站 | `copilot.tencent.com`（/www.codebuddy.cn） | WorkBuddy 国内 / CodeBuddy 国内 |
+| 国际站 | `www.workbuddy.ai`（含 codebuddy.ai） | WorkBuddy 国际 / CodeBuddy 国际 |
+- 凭据按站点隔离（edition），两站账号独立、积分共享
+- 模型目录两站**都读 /v3/config**，区别只在客户端 UA（国内用 CodeBuddy CLI UA、
+  国际用桌面端 UA）；国内取不到才退回 /v2/enterprises/personal/models
+- 面板分组命名：`wb-gateway`=「copilot 接口 · 国内站」、
+  `apk-codebuddy`=「copilot 接口 · 国际站」
 
-### 降级规则
-- 2xx → 记录延迟
-- **429 / 5xx / 超时** → 熔断计数 +1，自动降级下一个（最多 4 个）
-- **4xx（除 429）** → 直接报错不降级
-- 熔断：连续 3 次 → OPEN，60s 后可再选（懒判断，state 到下次成功/失败才改）
-
-### 会话亲和
-请求体带 `aigw_session` → 同 ID 复用上次上游，避免多轮对话上游乱跳。
-策略可单次覆盖：`aigw_strategy: fastest|weight|priority`。
-
-### 能力过滤
-请求带 `tools` → 排除 `capabilities.tools === false`；带图片 → 排除 `vision === false`。
-
-## 关键文件
-| 文件 | 职责 |
-|---|---|
-| `app/upstreams.py` | 38 个上游结构化档案（7 网关 + 17 公益站 + 14 官方 + 8 工具） |
-| `app/router.py` | 路由引擎：探测 / EWMA / 熔断 / 选路 / 降级 |
-| `app/catalog.py` | 面板导航用的展示数据 |
-| `app/gwlogin.py` | **8 个平台的账号登录驱动**（二维码 / Cookie / 文件），状态机 + LoginManager |
-| `app/accounts.py` | 账号池：落库 data/accounts.json，列表掩码 |
-| `app/gwextra.py` | 补齐 APP 网关内部能力（Trae 签到/任务/积分/兑换、小浣熊送积分等） |
-| `app/aesgcm.py` | **纯标准库 AES-GCM**（解 Chrome Cookie 用），22 项自检 |
-| `app/browser_cookie.py` | 本机 Chrome/Edge Cookie 读取（DPAPI + AES-GCM）+ diagnose() 诊断 |
-| `app/cdp.py` | 最小 WebSocket + CDP 客户端，绕过 Chrome v20 加密取明文 Cookie |
-| `bcrypt_ref.py` | **仅测试用**：Windows BCrypt 原生 AES-GCM，作交叉验证黄金参考 |
-| `test_router.py` | 路由引擎单元测试（21 项，起假上游） |
-| `test_login.py` | 登录模块单测（75 项，含 BCrypt 交叉验证、WS 帧编解码） |
-| `test_view.js` + `test_view_body.js` | 前端渲染测试（20 项，Node + DOM stub，含 XSS 转义） |
-| `selftest.py` | 接口回归（51 项，含 node --check JS 语法 + 登录全流程） |
-
-## 本机的浏览器 Cookie 现状（实测 2026-10-04）
-- Chrome/Default 604 条、Edge/Profile 3 1 条 —— **全部是 v20**（Chrome 127+ app-bound 加密）
-- v20 **无解**（密钥绑定系统级 DPAPI，官方刻意封死），只能走 CDP 或手动粘贴
-- 老版本 v10/v11 的磁盘直解代码保留着，换机器/旧浏览器时能用
-
-## 打包环境
-- venv：`C:\Users\liang.zhao\.workbuddy\binaries\python\envs\default`
-- PyInstaller 6.22.3 已装
-- Node（仅用于 JS 语法检查）：`C:\Users\liang.zhao\.workbuddy\binaries\node\versions\22.22.2-3\node.exe`
-- 打包命令：`python -m PyInstaller --clean --noconfirm build.spec`
-- 产物：约 10.3 MB 单文件 PE32+ x64（放开 sqlite3 + 新增 6 个模块后从 8.8MB 涨上来）
-- **`build.spec` 绝不能 exclude `sqlite3`** —— 读本机浏览器 Cookie 依赖它
-- 新模块多在函数内动态导入，已显式写进 `hiddenimports`
+## 面板端口与自启（build41 起）
+- **固定默认端口 8800**（`main.py::DEFAULT_PANEL_PORT`），`free_port(start=8800)`，
+  被占用才顺延；可用 `AIGW_PANEL_PORT` 环境变量覆盖。
+  → 客户端 base URL 配一次即可：`http://127.0.0.1:8800/v1`
+- **开机自启**：`app/tray.py::set_autostart()` 写 HKCU `Run\AigwPanel`
+  = `"<dist\aigw-panel.exe>" --tray`；托盘右键菜单也能开关。
+- ⚠ 改端口/自启后必须重打包，且自启值要指向**新 EXE 真实路径**（旧路径会启旧版）
 
 ## 面板设计原则
-- 纯标准库（无 Flask/requests），打包干净
-- 前端零框架零构建，SVG 手绘曲线
-- 凭据只存本机 `data/`，不外传
-- 调度错峰：网关自己 09:00 签到，面板 09:05 跑外部站点，不撞车
+纯标准库（无 Flask/requests），前端零框架。侧边栏常驻「接入源 / 路由与模型」；
+可折叠「高级」分组放 工具与集成 / 设置与日志 / 签到记录 / 成长任务 / 任务管理。

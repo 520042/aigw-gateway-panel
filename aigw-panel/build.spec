@@ -20,7 +20,12 @@ datas = [
     ('app/static/index.html', 'app/static'),
     ('app/static/style.css', 'app/static'),
     ('app/static/app.js', 'app/static'),
+    ('app/static/vendor/qrcode.min.js', 'app/static/vendor'),
     ('app/static/aigw.ico', 'app/static'),
+    # web-deepseek 的 POW 求解器：Node worker + sha3 wasm（app/web_relays.py
+    # 会释放到 _MEIPASS 供 node 读取；缺任一 POW 无法通过 DeepSeek 校验）
+    ('app/webpow/pow_worker.js', 'app/webpow'),
+    ('app/webpow/wasm/sha3_wasm_bg.wasm', 'app/webpow/wasm'),
 ]
 if include_cliproxy:
     datas.append((CLI_PROXY_EXE, 'cliproxy'))
@@ -36,7 +41,8 @@ a = Analysis(
     datas=datas,
     # 新模块多在函数内动态导入，显式声明避免 PyInstaller 静态分析漏掉
     hiddenimports=[
-        'app.gwlogin', 'app.accounts', 'app.gwextra',
+        'app.gwlogin', 'app.accounts', 'app.gwextra', 'app.web_relays',
+        'app.native_relay', 'app.doubao_relay', 'app.acct_pool', 'app.tlogin',
         'app.cdp', 'app.browser_cookie', 'app.aesgcm',
         'app.catalog', 'app.upstreams', 'app.router',
         'app.store', 'app.gwclient', 'app.sitecheck',
@@ -46,8 +52,15 @@ a = Analysis(
         'app.autocheckin',    # APP 平台定时自动签到
         'app.localproxy',     # 本机反代上游（CLIProxyAPI）管理
         'app.bundled_yuanbao', # 元宝内置模型清单（从 APK 提取）
+        'app.bundled_doubao',  # 豆包内置模型清单（从网页版 model_list 解析）
+        'app.bundled_trae',   # Trae aigw.app 网关模型清单（base.apk dex 提取）
+        'app.bundled_go',     # Go 网关模型能力表（libgojni.so 内嵌 JSON 提取）
+        'app.model_extract',  # 模型清单实时提取 + 内置回退
+        'app.native_relay',  # 原生对话中继（端点静态提取自 APK/EXE）
+        'app.doubao_relay',  # 豆包原生中继（samantha 协议 + 账号池轮转）
         'app.sources',       # 接入源分类（本地AI / 平台API / 网页对话）
         'app.tencent',       # 腾讯 CodeBuddy 直连（移植自 workbuddy-gateway 规格）
+        'app.tlogin',        # 原生登录链路（抓包实测：enterprise 端点发 token）
     ],
     hookspath=[],
     hooksconfig={},

@@ -74,9 +74,9 @@ CASES = [
     ("用量曲线",        "/api/usage?range=24h",              None),
     ("模型列表",        "/api/models",                       None),
     ("签到中心",        "/api/checkins",                     None),
-    ("成长任务",        "/api/growth",                       None),
+    # 「成长任务 /api/growth」「凭据文件 /api/credentials」是 EXE 时代的网关
+    # dev 基建（build26 后无 UI 触达、EXE 不在必 502）——不再进自测。
     ("任务中心",        "/api/tasks",                        None),
-    ("凭据文件",        "/api/credentials",                  None),
     ("登录平台列表",    "/api/login?action=platforms",       None),
     ("账号池列表",      "/api/accounts",                     None),
     ("平台能力表",      "/api/platform?action=actions",      None),
@@ -84,7 +84,7 @@ CASES = [
     ("免费资源导航",    "/api/catalog",                      None),
     ("上游档案",        "/api/upstreams",                    None),
     ("智能路由总览",    "/api/route",                        None),
-    ("路由选路测试",    "/api/route?action=pick",            {"model": "auto-fast"}),
+    ("路由选路测试",    "/api/route?action=pick",            {"model": "auto"}),
     ("通知中心",        "/api/notify",                       None),
     ("日志",            "/api/logs",                         None),
     ("设置",            "/api/settings",                     None),
@@ -105,7 +105,6 @@ CASES = [
     ("删除Webhook",     "/api/notify?action=delete",         {"index": 0}),
     ("保存通知开关",    "/api/notify?action=save_flags",     {"notify": {"notify_checkin": True, "notify_quota": True, "notify_error": True}}),
     ("保存设置",        "/api/settings?action=save",         {"refresh_interval": 15}),
-    ("停止网关",        "/api/settings?action=gateway_stop",  {}),
 ]
 
 rows = []
@@ -114,24 +113,11 @@ first_site = None
 # 期望 HTTP 非 200 但语义正确的用例（如 404）
 EXPECT_ERR = {"/api/nope": 404}
 
-# 网关必须先在线，否则下面所有网关相关用例都会 502（自测顺序问题，不是功能问题）
+# 前置：面板必须处于原生模式（build26 后 EXE 已彻底移除，overview 返回 native 块）
 r, code, dt = call("/api/overview")
-if not ((r.get("gateway") or {}).get("alive")):
-    rows.append(("自测前置·拉起网关", 0, "…", "网关未在线，发起拉起", 0.0))
-    r, code, dt = call("/api/settings?action=gateway_restart", {})
-    ok0 = r.get("ok")
-    for _ in range(45):
-        time.sleep(1)
-        r2, _, _ = call("/api/overview")
-        if ((r2.get("gateway") or {}).get("alive")):
-            break
-    alive0 = ((r2.get("gateway") or {}).get("alive")) if 'r2' in dir() else False
-    rows[-1] = ("自测前置·拉起网关", 200 if ok0 else 500,
-                "PASS" if alive0 else "FAIL",
-                "alive=%s models=%s" % (alive0,
-                                        (r2.get("gateway") or {}).get("models")), 0.0)
-else:
-    rows.append(("自测前置·网关在线", 200, "PASS", "已在运行", 0.0))
+nat = r.get("native") or {}
+rows.append(("自测前置·原生模式", code, "PASS" if nat.get("relays", 0) >= 7 else "FAIL",
+             "账号池=%s 中继=%s 平台" % (nat.get("accounts"), nat.get("relays")), 0.0))
 
 for name, path, body in CASES:
     b = dict(body) if body else None
@@ -157,18 +143,48 @@ for name, path, body in CASES:
             if x.get("name") == "自测站":
                 first_site = x["id"]
 
-# 停止网关后，重新拉起并验证
-r, code, dt = call("/api/settings?action=gateway_restart", {})
-rows.append(("重启网关", code, "PASS" if r.get("ok") else "FAIL", brief(r), dt))
-time.sleep(22)
-r, code, dt = call("/api/overview")
-alive = (r.get("gateway") or {}).get("alive")
-rows.append(("网关恢复在线", code, "PASS" if alive else "FAIL",
-             "alive=%s models=%s" % (alive, (r.get("gateway") or {}).get("models")), dt))
+# ---------------------------------------------------------------- 对外 /v1 端点
+# 这是 CodeDesk 等外部工具的接入面：models 必须能列，chat 空请求必须给
+# OpenAI 形状的结构化错误（而不是 HTML/连接拒绝）
+r, code, dt = call("/v1/models")
+_v1n = len((r.get("data") or []))
+rows.append(("/v1/models 可列出", code,
+             "PASS" if code == 200 and _v1n > 0 else "FAIL", "模型数=%d" % _v1n, dt))
+# 同模型跨源聚合：web-trae 的静态清单里 gpt-4o 是裸名注册的聚合模型
+# （owned_by=aigw-router、targets≥1）。没有它说明聚合路由没建起来。
+_merged = [m for m in (r.get("data") or [])
+           if m.get("owned_by") == "aigw-router"
+           and not str(m.get("id", "")).startswith(("auto", "free"))]
+_mg4o = next((m for m in _merged if m.get("id") == "gpt-4o"), None)
+rows.append(("同模型聚合路由已注册", code,
+             "PASS" if _mg4o and (_mg4o.get("aigw") or {}).get("targets", 0) >= 1
+             else "FAIL",
+             "聚合模型=%d gpt-4o=%s" % (len(_merged),
+                                       "targets=%d" % (_mg4o["aigw"]["targets"])
+                                       if _mg4o else "缺"), dt))
+r, code, dt = call("/v1/chat/completions", {"model": "selftest-no-such-model",
+                                            "messages": []})
+_is_json = isinstance(r, dict)
+rows.append(("/v1/chat 空请求结构化报错", code,
+             "PASS" if _is_json and code in (400, 404, 422, 500, 502) else "FAIL",
+             ("HTTP %s error=%s" % (code, (r.get("error") or {}).get("message", "")[:48])
+              if _is_json else "非 JSON 响应"), dt))
+# Anthropic 兼容端点（EXE 同名能力已原生化）
+r, code, dt = call("/v1/messages", {"model": "claude-sonnet-4", "max_tokens": 1,
+                                    "messages": [{"role": "user", "content": "hi"}]})
+_is_json = isinstance(r, dict)
+rows.append(("/v1/messages 端点活着", code,
+             "PASS" if _is_json and code != 404 else "FAIL",
+             ("HTTP %s" % code) if _is_json else "非 JSON 响应", dt))
 
 r, code, dt = call("/api/models")
-mc = len((r.get("admin") or {}).get("models") or [])
-rows.append(("模型清单(登录后)", code, "PASS" if mc > 0 else "FAIL", "模型数=%d" % mc, dt))
+_mc = len(r.get("models_enriched") or [])
+_bd = (r.get("bundled") or {}).get("total", 0)
+# EXE 移除后模型清单走降级表（内置倍率表 + rate_cache），admin.models 是
+# 网关基建（EXE 不在恒空）——断言对象改为 models_enriched/bundled
+rows.append(("模型清单(降级表)", code,
+             "PASS" if code == 200 and (_mc > 0 or _bd > 0) else "FAIL",
+             "enriched=%d 内置=%d" % (_mc, _bd), dt))
 
 # ---------------------------------------------------------------- 倍率信息
 # 用户的硬要求：「不仅要获取到模型，还要获取到倍率信息」
@@ -218,15 +234,27 @@ rows.append(("登录平台覆盖7网关", code, "PASS" if need <= ids else "FAIL
              "共%d个，缺=%s" % (len(pls), ",".join(sorted(need - ids)) or "无"), dt))
 
 # 2) 二维码登录：必须拿到二维码与授权链接，且轮询不报错
+#    ⚠ start 返回的是启动瞬间快照：面板在后台线程里调网关拿 QR（实测约 2s），
+#    所以这里要轮询等待，不能 start 后立刻断言（曾经因此误报 qr=0B）。
 qr_ok = False
 sess_id = ""
 try:
     r, code, dt = call("/api/login?action=start", {"platform": "wb-gateway", "edition": "cn"})
     s = r.get("session") or {}
     sess_id = s.get("id", "")
-    qr = s.get("qr") or ""
-    au = s.get("auth_url") or ""
-    qr_ok = bool(sess_id and qr.startswith("data:image/png;base64,") and au.startswith("http"))
+    qr, au = s.get("qr") or "", s.get("auth_url") or ""
+    for _ in range(6):                       # 最多等 ~6s 让后台线程拿到二维码
+        if qr.startswith("data:image/png;base64,") and au.startswith("http"):
+            break
+        time.sleep(1.0)
+        r, code, _ = call("/api/login?action=poll", {"id": sess_id})
+        s = r.get("session") or {}
+        qr, au = s.get("qr") or "", s.get("auth_url") or ""
+    # EXE 移除后（build19/26）：copilot 系扫码走面板原生回退——auth_url 由
+    # 前端 vendor/qrcode.min.js 现场出码，session.qr 为空串是**正常形态**；
+    # 只有网关 EXE 在跑时才回 data:image PNG。两种都算通过。
+    qr_ok = bool(sess_id and au.startswith("http")
+                 and (qr.startswith("data:image/png;base64,") or qr == ""))
     rows.append(("发起二维码登录", code, "PASS" if qr_ok else "FAIL",
                  "id=%s qr=%dB auth=%s" % (sess_id[:8], len(qr), au[:52]), dt))
     r2, code2, dt2 = call("/api/login?action=poll", {"id": sess_id})

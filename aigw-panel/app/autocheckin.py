@@ -53,10 +53,10 @@ PLATFORM_CHECKIN = {
     "apk-loomy": {"name": "Loomy 讯飞", "mode": "none", "hour": 9, "minute": 25},
     "apk-coze": {"name": "扣子 Coze", "mode": "none", "hour": 9, "minute": 30},
     "apk-qwenwork": {"name": "千问办公", "mode": "none", "hour": 9, "minute": 35},
-    "apk-kuku": {"name": "库库 AI", "mode": "none", "hour": 9, "minute": 40},
+    "apk-kuku": {"name": "库库 AI", "mode": "kuku", "hour": 9, "minute": 40},
     "apk-qoder": {"name": "Qoder", "mode": "none", "hour": 9, "minute": 45},
     "apk-doubao": {"name": "豆包", "mode": "none", "hour": 9, "minute": 50},
-    "apk-wps": {"name": "WPS AI", "mode": "none", "hour": 9, "minute": 55},
+    "apk-wps": {"name": "WPS AI", "mode": "wps", "hour": 9, "minute": 55},
     "apk-nano": {"name": "纳米 AI", "mode": "none", "hour": 10, "minute": 0},
     "apk-metaso": {"name": "秘塔 AI", "mode": "none", "hour": 10, "minute": 2},
 }
@@ -107,6 +107,8 @@ def platform_list(store):
                 "flow": "先查状态再领（Trae）",
                 "direct": "单接口直接领（CodeBuddy）",
                 "bonus": "登录即送积分（小浣熊）",
+                "kuku": "两段式：先取 bdstoken 会话参数再领积分",
+                "wps": "先查任务状态，未签则领（已签幂等）",
                 "none": "公开接口里没有签到端点，需先用「探测端点」扫出来",
             }[meta["mode"]],
         })
@@ -165,6 +167,10 @@ def run_platform(accounts, platform, mode, log=None, options=None):
             okk, data = gwextra.trae_checkin_flow(accounts)
         elif mode == "bonus":
             okk, data = gwextra.raccoon_login_bonus(accounts)
+        elif mode == "kuku":
+            okk, data = gwextra.kuku_checkin_flow(accounts)
+        elif mode == "wps":
+            okk, data = gwextra.wps_checkin_flow(accounts)
         elif mode == "direct":
             act = gwextra.action_spec(platform, "checkin")
             if not act:
@@ -188,11 +194,13 @@ def run_platform(accounts, platform, mode, log=None, options=None):
 
 def _brief(data):
     if isinstance(data, dict):
-        for k in ("summary", "message", "msg", "desc", "data", "already"):
+        # "error" 是各 flow 返回失败原因的键（如 Trae 的 code=1001 未认证），
+        # 不加进来就会把整个 dict 原样打印成一长串，看不出到底为什么失败
+        for k in ("summary", "message", "msg", "desc", "error", "data", "already"):
             if k in data and data[k] not in (None, ""):
                 v = data[k]
                 if isinstance(v, dict):
-                    for kk in ("message", "already", "checked_in_today"):
+                    for kk in ("message", "already", "checked_in", "checked_in_today"):
                         if kk in v:
                             return str(v[kk])
                     return str(list(v.keys())[:6])
@@ -202,9 +210,13 @@ def _brief(data):
 
 def _looks_like_auth_error(msg):
     m = str(msg).lower()
+    # "authenticate" 是 Trae 的实际措辞：
+    #   {"code":1001,"message":"...not able to authenticate you"}
+    # 只认 401/未登录 会把它当成真失败（其实是没登录，应算跳过而非失败）
     return any(k in m for k in (
         "401", "403", "未登录", "登录", "凭据", "cookie", "token", "账号",
         "unauthorized", "forbidden", "缺少", "no_credential", "无效",
+        "authenticate", "接口拒绝", "未认证", "1001",
     ))
 
 

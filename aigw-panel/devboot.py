@@ -54,10 +54,12 @@ PID_FILE = os.path.join(HERE, "data", "panel.pid")
 
 
 def kill_all():
-    """杀掉残留面板进程。
-    不用 wmic（Win11 已移除），改用 PID 文件 + 镜像名匹配。"""
+    """杀掉残留面板进程 + 残留网关进程。
+    不用 wmic（Win11 已移除），改用 PID 文件 + 镜像名匹配。
+    ⚠ 之前只杀面板不杀网关，测试一轮就把 workbuddy-gateway EXE
+    留在后台，用户看到「网关又被启动了」—— 其实是测试残留。"""
     killed = []
-    for img in ("aigw-panel.exe",):
+    for img in ("aigw-panel.exe", "workbuddy-gateway-windows-1.29.6.exe"):
         for p in _tasklist(img):
             subprocess.run(["taskkill", "/F", "/PID", p], capture_output=True)
             killed.append((img, p))
