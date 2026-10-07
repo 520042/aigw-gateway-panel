@@ -23,10 +23,12 @@ import base64
 import json
 import os
 import queue
+import re
 import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -625,12 +627,87 @@ def _pick(headers):
 class Browser:
     """一个带调试端口的浏览器实例"""
 
-    def __init__(self, port=9222, exe=None, user_data_dir=None, headless=False):
+    def __init__(self, port=9222, exe=None, user_data_dir=None, headless=False,
+                 width=1440, height=960, owner=""):
         self.port = port
         self.exe = exe
         self.user_data_dir = user_data_dir
         self.headless = headless
+        # ★ 2026-10-06：实例归属标记。用于识别「端口上那个浏览器是不是我的」。
+        #   修复的 bug：面板所有平台原先共用固定端口 9333，起第二个平台时
+        #   start() 看到端口已就绪就直接复用 → 连到**上一个平台的浏览器**上，
+        #   于是点「元宝」抓回来的是「豆包」的二维码（用户实测截图证实）。
+        #   现在把 owner 写进浏览器标题，复用前校验归属，不匹配就换端口。
+        self.owner = owner
+        self._owned_port = None
+        # 无头默认视口只有 780x437 → 站点走移动端布局 → 扫码组件常常不渲染。
+        # 桌面视口是抓登录页二维码的前提（本机有头模式忽略这两个值）。
+        self.width = width
+        self.height = height
         self.proc = None
+
+    # ------------------------------------------------- 端口归属 / 独占
+    def _profile_dir(self):
+        """本实例的 profile 目录（与 start() 用同一套命名规则）。"""
+        tag = self.owner or str(self.port)
+        return self.user_data_dir or os.path.join(
+            os.environ.get("TEMP") or tempfile.gettempdir(),
+            "aigw-cdp-profile-%s" % re.sub(r"[^A-Za-z0-9_.-]", "_", tag))
+
+    @staticmethod
+    def _marker_path(port):
+        """
+        端口占用标记文件路径。
+
+        ★ 单端口策略的关键洞察（2026-10-06）：
+          既然所有登录会话**共用同一个端口**，那么「这个端口现在归谁」
+          就是一个**唯一映射** —— 用一个 `aigw-owner-<port>` 文件记录即可，
+          不必去反查浏览器的 profile 路径（headless 下 /json/version 拿不到，
+          走 CDP Browser.getBrowserCommandLine 又要多一次握手，慢且脆）。
+          谁占端口谁写文件，谁关浏览器谁删文件 —— 简单、可观测、易诊断。
+        """
+        return os.path.join(
+            os.environ.get("TEMP") or tempfile.gettempdir(),
+            "aigw-owner-%d" % int(port))
+
+    def _owner_ok(self, port=None):
+        """
+        端口上跑的浏览器属不属于本次会话。
+
+        ★ 2026-10-06 两轮修正：
+          · 第一版认窗口标题 `aigw:<owner>` —— headless 下标题常为空、
+            且面板起实例必带 url（登录页）走不到写标题的分支 → 恒 False，
+            单端口策略形同虚设。实测踩到（owner_ok=False）。
+          · 第二版改读 profile 目录里的标记 —— 但那是**读自己的**目录，
+            端口被别人占时判不出「占着的是谁」。
+          · 现行版：读端口标记文件，直接回答「这个端口现在归谁」。
+        """
+        if not self.owner:
+            return True
+        try:
+            with open(self._marker_path(port or self.port), encoding="utf-8") as f:
+                return f.read().strip() == ("aigw:%s" % self.owner)
+        except Exception:
+            return False
+
+    @classmethod
+    def _claim_port(cls, port, owner):
+        """声明占用：写入端口标记（谁起浏览器谁写）"""
+        try:
+            with open(cls._marker_path(port), "w", encoding="utf-8") as f:
+                f.write("aigw:%s" % owner)
+        except OSError:
+            pass
+
+    @classmethod
+    def _release_port(cls, port):
+        """释放占用：删掉端口标记（谁关浏览器谁删）"""
+        try:
+            p = cls._marker_path(port)
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
 
     # ---------------------------------------------------------- 启动
     def start(self, url=None):
@@ -646,14 +723,52 @@ class Browser:
              → 现在 open_tab 失败会往 stderr 打原因。
         同一个 user_data_dir 复用时，登录态是持久的（实测 kuku/wps 登录后
         重开浏览器仍带 HMACCOUNT / XFT 等 Cookie）。
+
+        ⚠ 2026-10-06 修「串台」bug，分两轮：
+          第一轮（散列端口）：曾按 `hash(platform-sessid)` 把各平台散到
+            9333~9992，能防串台但纯属绕路 —— 端口占一堆、逻辑绕。
+          第二轮（用户点破后的正解，现行）：
+            **就一个固定端口**，靠 owner 归属校验保证不串台：
+              · 端口空闲            → 直接起，标上自己的 owner；
+              · 端口已被**自己**占用 → 复用（同一平台重复发起登录）；
+              · 端口被**别人**占用   → 不抢、不复用，报错让上层串行重试。
+            浏览器生命周期由调用方收口（前端点「返回源列表」即 cancel.close()），
+            另有空闲超时兜底 —— 见 watch 线程的 timeout。
         """
-        if self.is_up():
-            return True
         exe = self.exe or find_browser()
         if not exe:
             raise RuntimeError("未找到 Chrome / Edge 可执行文件")
+        if self.is_up():
+            if self._owner_ok():
+                # 是我自己的实例（同平台重复发起）→ 复用
+                self._owned_port = self.port
+                return True
+            # ★ 端口上是**别人**的浏览器 —— 绝不能复用（这正是「点元宝出豆包码」）。
+            #   不抢端口、不换端口，直接上报，由上层串行重试或提示用户先结束上一个。
+            raise RuntimeError("调试端口 %d 已被其它登录会话占用，请先结束上一个登录"
+                               % self.port)
+        # %TEMP% 只在 Windows 展开；Linux/macOS 用系统临时目录（2026-10-06 修正：
+        # 之前 Linux 上会得到一个名为 "%TEMP%/aigw-cdp-profile" 的相对路径）
+        # 目录名带 owner（而非端口）：单端口下多个 owner 轮流用时各用各的
+        # profile，互不踩 SingletonLock（同名 profile 并发会直接 Abort，实测踩过）。
+        tag = self.owner or str(self.port)
         udd = self.user_data_dir or os.path.join(
-            os.path.expandvars(r"%TEMP%"), "aigw-cdp-profile")
+            os.environ.get("TEMP") or tempfile.gettempdir(),
+            "aigw-cdp-profile-%s" % re.sub(r"[^A-Za-z0-9_.-]", "_", tag))
+        # 上次进程被强杀（kill -9 / 掉电）会留下 SingletonLock，
+        # 端口没人监听却起不来新实例 → 确认端口空闲后清掉残留锁。
+        # ★ 同理清掉**陈旧的端口归属标记**：浏览器进程死了但标记还在，
+        #   会让后续所有平台都以为端口被别人占着，永远起不来（僵尸标记）。
+        if not self.is_up():
+            self._release_port(self.port)
+        if not self.is_up():
+            for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                p = os.path.join(udd, lock)
+                if os.path.islink(p) or os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
         os.makedirs(udd, exist_ok=True)
         args = [
             exe,
@@ -665,16 +780,34 @@ class Browser:
         ]
         if self.headless:
             args.append("--headless=new")
+            # 服务端无头场景（Linux 容器 / root）必需的存活参数：
+            # root 下没有 --no-sandbox 会直接退出，表现为「调试端口 30 秒不就绪」
+            args += ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+            # ★★ 视口必须够大：Chrome --headless 默认 800x600 实际视口仅
+            #   780x437，很多站点据此走移动端布局 —— 实测豆包在这个尺寸下
+            #   登录弹窗**二维码根本不渲染**（qrcode 容器 0x0、svg 为空），
+            #   面板就永远抓不到码。锁一个桌面视口即可。
+            args.append("--window-size=%d,%d" % (self.width, self.height))
         if url:
             args.append(url)
+        elif self.owner:
+            # 无 url 时也要让窗口标题带上归属标记（有头模式便于人工辨认）
+            args += ["--app=data:text/html,<title>aigw:%s</title>"
+                     % self.owner]
         try:
             self.proc = subprocess.Popen(args, close_fds=True)
         except Exception as e:
             raise RuntimeError("启动浏览器失败：%s" % e)
+        if self.owner:
+            self._claim_port(self.port, self.owner)
         for _ in range(60):
             time.sleep(0.5)
             if self.is_up():
+                self._owned_port = self.port
                 return True
+        # 起不来就把标记撤掉，别让端口被一个死掉的标记永久占住
+        if self.owner:
+            self._release_port(self.port)
         raise RuntimeError("浏览器调试端口未在 30 秒内就绪")
 
     def close(self, timeout=8):
@@ -704,6 +837,9 @@ class Browser:
         t0 = time.time()
         while time.time() - t0 < 10 and self.is_up():
             time.sleep(0.5)
+        # ★ 释放端口归属标记：这是单端口策略能否连续工作的关键。
+        #   少了这一步，close() 后端口明明空着，下一个平台却仍被判「被占用」。
+        self._release_port(self.port)
 
     def is_up(self):
         try:
@@ -712,8 +848,9 @@ class Browser:
         except Exception:
             return False
 
-    def version(self):
-        return http_json("http://127.0.0.1:%d/json/version" % self.port, timeout=3)
+    def version(self, port=None):
+        return http_json("http://127.0.0.1:%d/json/version" % (port or self.port),
+                         timeout=3)
 
     def targets(self):
         try:
@@ -953,6 +1090,423 @@ class Browser:
         if not sel:
             return "", []
         return "; ".join("%s=%s" % (c["name"], c["value"]) for c in sel), sel
+
+    # ---------------------------------------------------------- 二维码截图
+    # ★ 2026-10-06 新增：把登录页的二维码抓回面板，让用户在面板里直接用手机扫，
+    #   不用去盯弹出的浏览器窗口。也用于「扫码登录」类平台的面板内二维码展示。
+
+    def _first_page_ws(self):
+        """挑一个 page 标签的 webSocketDebuggerUrl（没有返回 ""）。"""
+        for t in self.targets():
+            if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                return t["webSocketDebuggerUrl"]
+        return ""
+
+    def screenshot(self, tab_ws_url=None, clip=None, timeout=20):
+        """
+        对某个 page 标签截图，返回 base64 PNG 字符串（不含 data: 前缀）。
+        clip：{x,y,width,height,scale} 可选，只截该区域（用于只截二维码，
+        得到干净的小图而非整页大图）。
+        任何一步失败都返回 ""（绝不抛异常，扫码只是体验增强，不能因为它挂了
+        就把整个登录流程弄崩）。
+        """
+        tab_ws_url = tab_ws_url or self._first_page_ws()
+        if not tab_ws_url:
+            return ""
+        try:
+            ws = WS.connect(tab_ws_url, timeout=timeout)
+        except Exception:
+            return ""
+        try:
+            cdp = CDP(ws)
+            try:
+                cdp.call("Page.enable", {}, timeout=10)
+            except Exception:
+                pass
+            params = {"format": "png", "captureBeyondViewport": False,
+                      "fromSurface": True}
+            if clip:
+                c = dict(clip)
+                if "scale" not in c:
+                    c["scale"] = 2
+                params["clip"] = c
+            r = cdp.call("Page.captureScreenshot", params, timeout=timeout)
+            return (r.get("data") or "")
+        except Exception:
+            return ""
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def find_qr_rect(self, tab_ws_url=None):
+        """
+        在页面里找最可能是二维码的元素（img/canvas：方形 + id/class/src/alt
+        含 qr/scan/code/login 关键字），返回 {x,y,width,height} 或 None。
+        找不到返回 None（上层改截整页）。绝不抛异常。
+        """
+        tab_ws_url = tab_ws_url or self._first_page_ws()
+        if not tab_ws_url:
+            return None
+        expr = r"""
+        (function(){
+          function rectOf(el){
+            if(!el || !el.getBoundingClientRect) return null;
+            var r = el.getBoundingClientRect();
+            if(!r || r.width<24 || r.height<24) return null;
+            // ★ 2026-10-06：**视口内才算候选**。
+            //   实测小浣熊页面滚到页脚后，页脚协议区的 94x94 二维码被选中
+            //   （y=10367，远在视口外）——上层一看 rect 非空就停止点击登录，
+            //   于是永远卡在「有 rect 但截不到码」的死循环。
+            //   视口外的元素既截不到、也不是用户能扫的那个码，一律排除。
+            var vh = window.innerHeight || 800;
+            var vw = window.innerWidth || 1200;
+            if(r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw)
+              return null;
+            // 完全被视口裁掉一半以上的也不要（截图会缺一大块）
+            var visH = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+            var visW = Math.min(r.right, vw) - Math.max(r.left, 0);
+            if(visH < r.height*0.6 || visW < r.width*0.6) return null;
+            return {x:Math.round(r.left), y:Math.round(r.top),
+                    width:Math.round(r.width), height:Math.round(r.height)};
+          }
+          var cands = [];
+          // 页面出现「扫码登录 / 二维码」文案时，把尺寸门槛放宽：
+          // 不同站点码尺寸差异大（豆包 162、有的 120 甚至更小），
+          // 文案在場就是强信号，宁可多看几个候选也不要漏掉码。
+          var pageText = '';
+          try { pageText = (document.body.innerText || ''); } catch(e) {}
+          var hintQR = /扫码登录|二维码|扫码/.test(pageText)
+                     || /扫码/.test(pageText);
+          var minSide = hintQR ? 70 : 90;
+          var els = document.querySelectorAll('img');
+          for(var i=0;i<els.length;i++){
+            var im = els[i];
+            var key = (im.id+' '+im.className+' '+im.alt+' '+im.src).toLowerCase();
+            var rr = rectOf(im); if(!rr) continue;
+            var square = Math.abs(rr.width-rr.height) < Math.max(8, rr.width*0.25);
+            if(key.indexOf('qr')>=0 || key.indexOf('scan')>=0 ||
+               key.indexOf('qrcode')>=0 || key.indexOf('login-code')>=0){
+              cands.push({r:rr, score: square?100:50});
+            } else if(square && rr.width>=110 && rr.width<420){
+              // ★ 2026-10-06：纯方形大图只是「弱候选」——实测千问/360 页面
+              //   的方形插画会命中；真二维码几乎都带 qr/scan/code 语义。
+              cands.push({r:rr, score:8, weak:true});
+            }
+          }
+          var cvs = document.querySelectorAll('canvas');
+          for(var j=0;j<cvs.length;j++){
+            var cv = cvs[j];
+            var cr = rectOf(cv); if(!cr) continue;
+            var ckey=(cv.id+' '+cv.className).toLowerCase();
+            var sq=Math.abs(cr.width-cr.height)<Math.max(8,cr.width*0.25);
+            if(ckey.indexOf('qr')>=0||ckey.indexOf('scan')>=0){
+              cands.push({r:cr,score:sq?100:50});
+            }
+          }
+          // ★★ 2026-10-06 关键修正：**inline SVG 二维码**。
+          //   实测豆包网页版登录弹窗的码是 <svg width=162 height=162>，
+          //   外面套 <div class="qrcode-xxx">（关键线索就在 class 名里），
+          //   之前只扫 img/canvas 完全找不到它 → 只能截整页 → 用户看到的
+          //   是登录框而不是能扫的码。同理覆盖带 qrcode 命名的容器 div。
+          var svgs = document.querySelectorAll('svg');
+          for(var k2=0;k2<svgs.length;k2++){
+            var sv = svgs[k2];
+            var sr = rectOf(sv); if(!sr) continue;
+            var skey = (sv.id+' '+sv.className+' '+(sv.getAttribute('class')||'')).toLowerCase();
+            var ssq = Math.abs(sr.width-sr.height) < Math.max(8, sr.width*0.25);
+            // 叶子节点判定：svg 里没有嵌套 svg
+            var nested = sv.querySelector('svg') ? 1 : 0;
+            if(!nested && sr.width>=minSide && sr.width<=420 && ssq){
+              // ★ 2026-10-06 二次纠偏：纯「方形大图」不能再当码。
+              //   实测千问首页 3 张 185x185 邮票插画、360 页面 320x392 公告图
+              //   都会被纯方形规则误判。带 qr/scan/code 关键词才给高分，
+              //   纯方形只留 5 分垫底，且总命中数不足时不采用。
+              var sscore = (skey.indexOf('qr')>=0||skey.indexOf('scan')>=0||
+                            skey.indexOf('code')>=0) ? 120 : 5;
+              cands.push({r:sr, score:sscore, weak: sscore<50});
+            }
+          }
+          // 带 qrcode 命名的容器（qrcode-xxx / qrcode-wrapper …）
+          var divs = document.querySelectorAll('div,span');
+          for(var m=0;m<divs.length;m++){
+            var dv = divs[m];
+            var dr = rectOf(dv); if(!dr) continue;
+            var dkey = (dv.id+' '+(dv.className||'')).toLowerCase();
+            if(dkey.indexOf('qrcode')>=0 || dkey.indexOf('qr-code')>=0 ||
+               dkey.indexOf('qrcode-container')>=0){
+              var dsq = Math.abs(dr.width-dr.height) < Math.max(8, dr.width*0.25);
+              if(dsq && dr.width>=minSide && dr.width<=480){
+                cands.push({r:dr, score: dv.querySelector('svg,canvas,img')?90:60});
+              }
+            }
+          }
+          // ★ 2026-10-06：**iframe 里的码**（元宝实测）。
+          //   元宝登录弹窗的码来自跨域 iframe
+          //   open.weixin.qq.com/connect/qrconnect（同微信官方 qrconnect），
+          //   父页面 DOM 里根本没有这个元素，之前怎么扫都定位不到。
+          //   iframe 元素本身在父页面可测，按 src 语义打分即可。
+          var ifr = document.querySelectorAll('iframe');
+          for(var f2=0;f2<ifr.length;f2++){
+            var ife = ifr[f2];
+            var fr = rectOf(ife); if(!fr) continue;
+            var fkey = ((ife.getAttribute&&ife.getAttribute('src'))||''
+                        +' '+(ife.id||'')+' '+(ife.className||'')).toLowerCase();
+            var fhit = /qrconnect|qr_code|qrcode|scan|login|weixin|wechat/.test(fkey);
+            // 只认「宽大于高」或接近方形的框：微信 qrconnect iframe 常是
+            // 160x400 整条（码在其上半部分），取上半部分作为截图区
+            var fwide = fr.width > fr.height * 1.5;
+            if(fhit && (fr.width>=80 && fr.height>=80)){
+              cands.push({r:{x:fr.x, y:fr.y, width:fr.width,
+                              height: fwide ? Math.round(fr.height*0.62) : fr.height},
+                          score: fhit?130:40});
+            }
+          }
+          if(!cands.length) return null;
+          cands.sort(function(a,b){return b.score-a.score;});
+          // 只有弱候选（纯方形插画/公告图）时不返回：上层会退化成整页截图，
+          // 至少用户看到完整登录页，而不是一张错图当二维码去扫
+          if(cands[0].weak && cands[0].score<50) return null;
+          return cands[0].r;
+        })()
+        """
+        try:
+            ws = WS.connect(tab_ws_url, timeout=15)
+        except Exception:
+            return None
+        try:
+            cdp = CDP(ws)
+            try:
+                cdp.call("Runtime.enable", {}, timeout=10)
+            except Exception:
+                pass
+            r = cdp.call("Runtime.evaluate",
+                         {"expression": expr, "returnByValue": True}, timeout=15)
+            val = ((r or {}).get("result") or {}).get("value")
+            if isinstance(val, dict) and "width" in val and "height" in val:
+                return val
+            return None
+        except Exception:
+            return None
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def page_has_qr_hint(self, tab_ws_url=None):
+        """
+        页面是否出现「扫码登录 / 二维码」类文案。
+        用作抓码的准入判断：没有码元素**也没有**扫码文案时，说明登录弹窗
+        还没打开（实测豆包点完「登录」要等几秒才弹），此时不该把整页
+        截图当二维码发给用户。
+        """
+        tab_ws_url = tab_ws_url or self._first_page_ws()
+        if not tab_ws_url:
+            return False
+        expr = r"""
+        (function(){
+          try{
+            var t = (document.body && (document.body.innerText||'')) || '';
+            return /扫码|二维码|scan\s*login|qr\s*code/i.test(t);
+          }catch(e){ return false; }
+        })()
+        """
+        try:
+            ws = WS.connect(tab_ws_url, timeout=12)
+        except Exception:
+            return False
+        try:
+            cdp = CDP(ws)
+            r = cdp.call("Runtime.evaluate",
+                         {"expression": expr, "returnByValue": True}, timeout=12)
+            return bool(((r or {}).get("result") or {}).get("value"))
+        except Exception:
+            return False
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def dismiss_popups(self, tab_ws_url=None, timeout=10):
+        """
+        ★ 2026-10-06 新增：关掉登录页上的**推广/公告弹窗**，让登录入口露出来。
+        背景（豆包实测）：未登录也能进工作台，先弹「下载豆包电脑版」推广窗
+        把右上角「登录」按钮完全盖住 —— watch 线程找不到登录词、抓不到码，
+        白等 90 秒后误报「该平台无扫码入口」。小浣熊等多站同款套路。
+
+        动作（按序，都做，谁成功算谁）：
+          1) 发 ESC 键（多数弹窗都认）；
+          2) 点明确的关闭控件：aria-label/class 含 close|关闭 的可见小按钮；
+          3) 点遮罩层 [class*="mask"],[class*="overlay"] 的**右上限**空白区
+             （遮罩类弹窗点外面即关）。
+        全程静默失败 —— 这只是扫清路障，不能因它把登录流程弄崩。
+        """
+        tab_ws_url = tab_ws_url or self._first_page_ws()
+        if not tab_ws_url:
+            return False
+        js_click = r"""
+        (function(){
+          function visible(el){
+            var r=el.getBoundingClientRect();
+            if(!r||r.width<4||r.height<4) return false;
+            var st=getComputedStyle(el);
+            return st.display!=='none'&&st.visibility!=='hidden';
+          }
+          function fire(el){
+            var r=el.getBoundingClientRect();
+            return JSON.stringify({x:Math.round(r.left+r.width/2),
+                                   y:Math.round(r.top+r.height/2)});
+          }
+          // 1) 明确的关闭控件
+          var cands=document.querySelectorAll(
+            '[aria-label*="关闭"],[aria-label*="close" i],[class*="close" i]');
+          for(var i=0;i<cands.length;i++){
+            var e=cands[i];
+            if(e.tagName!=='BUTTON'&&!e.className.toString().match(/close/i))continue;
+            var r=e.getBoundingClientRect();
+            if(visible(e)&&r.width<80&&r.height<80&&r.top<500) return fire(e);
+          }
+          // 2) 遮罩层：点右上角空白（多数遮罩点外即关）
+          var masks=document.querySelectorAll('[class*="mask"],[class*="overlay" i]');
+          for(var j=0;j<masks.length;j++){
+            var m=masks[j], r=m.getBoundingClientRect();
+            if(visible(m)&&r.width>200&&r.height>200)
+              return JSON.stringify({x:Math.round(r.left+r.width-30),
+                                     y:Math.round(r.top+30)});
+          }
+          return null;
+        })()
+        """
+        try:
+            ws = WS.connect(tab_ws_url, timeout=timeout)
+        except Exception:
+            return False
+        try:
+            c = CDP(ws)
+            clicked = False
+            # 1) ESC
+            try:
+                for t in ("keyDown", "keyUp"):
+                    c.call("Input.dispatchKeyEvent",
+                           {"type": t, "key": "Escape", "code": "Escape",
+                            "windowsVirtualKeyCode": 27}, timeout=8)
+            except Exception:
+                pass
+            # 2/3) close 控件或遮罩
+            try:
+                r = c.call("Runtime.evaluate",
+                           {"expression": js_click, "returnByValue": True},
+                           timeout=timeout)
+                raw = ((r or {}).get("result") or {}).get("value")
+                if raw:
+                    import json as _j
+                    pt = _j.loads(raw)
+                    c.call("Input.dispatchMouseEvent",
+                           {"type": "mouseMoved", "x": pt["x"], "y": pt["y"]},
+                           timeout=8)
+                    for ev in ("mousePressed", "mouseReleased"):
+                        c.call("Input.dispatchMouseEvent",
+                               {"type": ev, "x": pt["x"], "y": pt["y"],
+                                "button": "left", "clickCount": 1}, timeout=8)
+                    clicked = True
+            except Exception:
+                pass
+            return clicked
+        except Exception:
+            return False
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def click_login(self, tab_ws_url=None, texts=("扫码登录", "登录"), timeout=12):
+        """
+        ★ 2026-10-06 新增：点页面里的「扫码登录 / 登录」按钮。
+        背景：元宝首页不直接出二维码，要点「登录」进登录面板才出码——
+        watch 线程抓不到码就卡死在"整页截图"上。按文本找可见可点的
+        button/a/div 点一下，任何一步失败都静默返回 False（体验增强，
+        不能因它挂了把登录流程弄崩）。
+
+        ★ 同日二次修正：**React/Vue 单页应用认不了 el.click()**（实测库库、
+        360 点了没反应）。改为「定位元素坐标 → CDP Input.dispatchMouseEvent
+        发真实鼠标事件」，React 系才真正触发弹窗；失败的站点回退 el.click()。
+        """
+        tab_ws_url = tab_ws_url or self._first_page_ws()
+        if not tab_ws_url:
+            return False
+        import json as _json
+        expr = r"""
+        (function(){
+          var words = %s;
+          function visible(el){
+            var r = el.getBoundingClientRect();
+            if(!r || r.width<10 || r.height<10) return false;
+            var st = getComputedStyle(el);
+            return st.display!=='none' && st.visibility!=='hidden'
+                   && st.pointerEvents!=='none';
+          }
+          var sel = 'button, a, div[role*="button"], span[role*="button"], .btn, [class*="login"]';
+          var els = document.querySelectorAll(sel);
+          for(var w=0; w<words.length; w++){
+            for(var i=0;i<els.length;i++){
+              var el = els[i];
+              if(!visible(el)) continue;
+              var t = (el.innerText||el.textContent||'').trim();
+              if(!t || t.length>10) continue;
+              if(t.indexOf(words[w])>=0){
+                var r = el.getBoundingClientRect();
+                return JSON.stringify({x:Math.round(r.left+r.width/2),
+                                       y:Math.round(r.top+r.height/2), t:t});
+              }
+            }
+          }
+          return null;
+        })()
+        """ % _json.dumps(list(texts), ensure_ascii=False)
+        try:
+            ws = WS.connect(tab_ws_url, timeout=timeout)
+        except Exception:
+            return False
+        try:
+            cdp = CDP(ws)
+            r = cdp.call("Runtime.evaluate",
+                         {"expression": expr, "returnByValue": True}, timeout=timeout)
+            raw = ((r or {}).get("result") or {}).get("value")
+            if not raw:
+                return False
+            pt = _json.loads(raw)
+            # 真实鼠标事件（React 应用必需）：先移到目标 → 按下 → 抬起
+            try:
+                cdp.call("Input.dispatchMouseEvent",
+                         {"type": "mouseMoved", "x": pt["x"], "y": pt["y"]}, timeout=10)
+                for ev in ("mousePressed", "mouseReleased"):
+                    cdp.call("Input.dispatchMouseEvent",
+                             {"type": ev, "x": pt["x"], "y": pt["y"],
+                              "button": "left", "clickCount": 1}, timeout=10)
+                return True
+            except Exception:
+                # 兜底：退回 DOM 原生 click（部分老站点只认这个）
+                try:
+                    cdp.call("Runtime.evaluate",
+                             {"expression": "(function(){var e=[...document.querySelectorAll"
+                              "('button,a,div,span')].find(x=>(x.innerText||'').trim()==%s);"
+                              "if(e){e.click();return true;}return false;})()"
+                              % _json.dumps(texts[0] if texts else "登录", ensure_ascii=False),
+                              "returnByValue": True}, timeout=10)
+                    return True
+                except Exception:
+                    return False
+        except Exception:
+            return False
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
 # ------------------------------------------------------------------ 找浏览器
 

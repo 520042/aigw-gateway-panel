@@ -28,6 +28,10 @@ import sys
 import threading
 import webbrowser
 
+# 顶层常量：SingleInstance 的默认互斥名在类定义时即求值，
+# 必须跨平台可见，否则非 Windows 启动直接 NameError。
+APP_ID = "AigwPanel.AIResourceHub"
+
 IS_WINDOWS = sys.platform == "win32"
 
 if IS_WINDOWS:
@@ -175,7 +179,6 @@ if IS_WINDOWS:
     ID_TRAY = 1
 
     RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    APP_ID = "AigwPanel.AIResourceHub"
 
 
 def set_taskbar_appid():

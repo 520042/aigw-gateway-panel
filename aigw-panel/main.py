@@ -168,6 +168,12 @@ def init_app():
         log("自动签到线程启动失败：%s" % e)
 
     # ---- copilot token 保活（对齐社区 2api 标配：到期前主动刷新）----
+    # ★ 2026-10-06 扩展：原仅覆盖 wb-gateway/wb-gateway-intl，导致 CodeBuddy
+    #   国内·国际版、Trae 的 accessToken 过期后静默 401、必须重扫。
+    #   现把整个 copilot 家族 + Trae 一并纳入（同一套腾讯接口、同一 refresh 机制）。
+    KEEPALIVE_PLATFORMS = ("wb-gateway", "wb-gateway-intl",
+                           "apk-codebuddy", "apk-codebuddy-cn", "apk-trae")
+
     def _copilot_keepalive():
         import base64
         while True:
@@ -176,7 +182,7 @@ def init_app():
                 accs = store.get("accounts") or []
                 changed = False
                 for a in accs:
-                    if a.get("platform") not in ("wb-gateway", "wb-gateway-intl"):
+                    if a.get("platform") not in KEEPALIVE_PLATFORMS:
                         continue
                     rt = a.get("refresh_token") or ""
                     sec = a.get("secret") or ""
@@ -748,6 +754,33 @@ def api_tencent(action=None, body=None):
         already = "已签到" in msg
         return ok({"checkedIn": bool(okk) or already, "already": already,
                    "code": code, "msg": msg or ("签到成功" if okk else "失败")})
+
+    if action == "trae_local":
+        # ★ 2026-10-06 新增：自动读取**本机**已登录 Trae 的 token，落库为 web-trae
+        #   账号，解决 web-trae「手动从 leveldb / LocalStorage 抠 x-ide-token」的痛点
+        #   （对齐 trae-minimax-client / Trae-Account-Manager 的本地登录态提取思路）。
+        #   仅在运行面板的那台电脑上有效（Trae 必须本机装过并登录过）。
+        from app import trae_local as _TL
+        okk, info = _TL.read_trae_token()
+        if not okk:
+            return ok({"found": False, "candidates": info.get("candidates", []),
+                       "error": info.get("error", ""),
+                       "hint": info.get("hint", "")})
+        secret = info.get("token") or ""
+        if not secret or len(secret) < 16:
+            return fail("读到的 token 异常（长度不足）", code="bad_token")
+        name = info.get("account") or "Trae 本机登录态"
+        try:
+            if acc:
+                acc.add({"platform": "web-trae", "name": name, "type": "token",
+                         "secret": secret,
+                         "source": info.get("source", "本机 Trae"), "edition": "cn"})
+                return ok({"found": True, "account": name,
+                           "source": info.get("source"),
+                           "note": "已写入 web-trae 账号，刷新账号页即可见"})
+        except Exception as e:
+            return fail("落库失败：%s" % e, code="save_failed")
+        return fail("账号池不可用，无法落库", code="no_accounts")
 
     tc = Tencent(token)
     if action == "rates":
@@ -1811,6 +1844,20 @@ def api_login(action=None, body=None):
             return fail("启动登录失败：%s" % e, code="start_failed")
         return ok({"session": sess.to_dict()})
 
+    if action == "qrscan":
+        """服务端远程扫码：直接打平台 Web 二维码接口，无需本机浏览器。"""
+        b = body or {}
+        pid = b.get("platform")
+        if not pid:
+            return fail("platform 必填")
+        if pid not in PLATFORMS:
+            return fail("未知平台：%s" % pid)
+        try:
+            sess = mgr.start_remote_qr(pid)
+        except Exception as e:
+            return fail("发起远程扫码失败：%s" % e, code="qrscan_failed")
+        return ok({"session": sess.to_dict()})
+
     if action == "poll":
         b = body or {}
         sid = b.get("id") or b.get("session_id")
@@ -2744,11 +2791,12 @@ def main():
         port = int(os.environ.get("AIGW_PANEL_PORT") or DEFAULT_PANEL_PORT)
     except ValueError:
         port = DEFAULT_PANEL_PORT
-    if not _bind_port_or_die(port):
+    bind_host = _bind_host()
+    if not _bind_port_or_die(port, bind_host):
         sys.exit(1)
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    srv = ThreadingHTTPServer((bind_host, port), Handler)
     APP["server"] = srv
-    url = "http://127.0.0.1:%d/" % port
+    url = "http://%s:%d/" % (bind_host if bind_host != "0.0.0.0" else "127.0.0.1", port)
     APP["url"] = url
     _save_url(port)
 
@@ -2830,12 +2878,19 @@ def _shutdown(srv, quiet=False):
         print("已退出")
 
 
-def _bind_port_or_die(port):
+def _bind_host():
+    """监听地址：默认 127.0.0.1（只本机）；部署对外时设 AIGW_PANEL_HOST=0.0.0.0。"""
+    return os.environ.get("AIGW_PANEL_HOST") or "127.0.0.1"
+
+
+def _bind_port_or_die(port, host=None):
     """固定端口策略：端口被占就日志 + 弹窗后退出（不静默顺延，
     避免客户端写死的地址悄悄失联）。返回 True 表示可继续启动。"""
+    if host is None:
+        host = _bind_host()
     s = socket.socket()
     try:
-        s.bind(("127.0.0.1", port))
+        s.bind((host, port))
         return True
     except OSError:
         pass
@@ -2856,10 +2911,12 @@ def _bind_port_or_die(port):
 
 
 def _save_url(port):
+    host = _bind_host()
+    disp = "127.0.0.1" if host == "0.0.0.0" else host
     try:
         with open(os.path.join(APP["data_dir"], "panel.url"), "w",
                   encoding="utf-8") as f:
-            f.write("http://127.0.0.1:%d/" % port)
+            f.write("http://%s:%d/" % (disp, port))
     except Exception:
         pass
 

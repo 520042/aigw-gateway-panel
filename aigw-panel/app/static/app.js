@@ -259,6 +259,8 @@ function render(){
   if(S.v==='sources'||S.v==='tools')paintLoginSession();
 }
 async function switchView(v,force){
+  // 切走视图 = 离开当前登录界面 → 停掉没成功的登录会话，浏览器立即释放
+  if(v!==S.v)leaveLoginView();
   S.v=v;
   location.hash=v;
   $('#ttl').textContent=TITLES[v]||v;
@@ -530,97 +532,134 @@ function srcGroups(){
   return out;
 }
 
+/* ★ 2026-10-07 用户反馈「接入源那块排布很不整齐，介绍部分太多」——重写：
+ *   1) 顶部 4 张 KPI 卡 + 一整段三步说明 → 压成「一条状态条 + 默认折叠的用法」
+ *      （原来那 4 张卡里有硬编码的假数据：『③自动路由 3』『已启用』『relays||9』，
+ *        现在全部换成真实统计）
+ *   2) 卡片改等高：说明固定 2 行截断、tag 行定高、按钮贴底
+ *      （原来 desc 用 min-height:48px，LAN_APK 那种长说明能撑到 6 行，
+ *        copilot 卡还内嵌 4 条子账号列表 → 整片卡片高矮不一）
+ *   3) 补搜索 + 已接入/未接入筛选（参考 new-api 渠道列表的做法） */
+let SRC_HELP = false;          // 「怎么用」是否展开
+let SRC_F = 'all';             // 筛选：all | on | off | proxy
+let SRC_Q = '';                // 搜索关键词
+
+function srcFilter(list){
+  const q=(SRC_Q||'').trim().toLowerCase();
+  return list.filter(s=>{
+    if(SRC_F==='on' && !s.logged) return false;
+    if(SRC_F==='off' && s.logged) return false;
+    if(SRC_F==='proxy' && s.kind!=='本地反代') return false;
+    if(!q) return true;
+    return ((s.name||'')+' '+(s.endpoint||'')+' '+(s.desc||'')+' '+(s.key||''))
+             .toLowerCase().indexOf(q) >= 0;
+  });
+}
+
+/** 渲染卡片网格（纯函数，供首次渲染与搜索/筛选局部重绘共用） */
+function srcCards(items){
+  if(!items.length)
+    return '<div class="empty">没有匹配的源，换个关键词或点「全部」</div>';
+  let h='';
+  for(const s of items){
+    const on=!!s.logged;
+    const fact=(((S.data.srcKinds||{})[s.key])||{}).facts||{};
+    const marks=((fact.desktop?'桌':'')+(fact.web?'网':'')+(fact.api?'API':''))||'';
+    // copilot 那张合并卡：不再内嵌 4 条子账号列表，改成一个「n/4 账号」小标签
+    const sub=s.variants
+      ? (s.variants.filter(v=>v.logged).length+'/'+s.variants.length+' 账号') : '';
+    h+='<div class="card sc'+(on?' on':'')+'" onclick="openSrc(\''+esc(s.key)+'\')">'
+      +'<div class="sc-h">'
+      +'<span class="sdot'+(on?' ok':'')+'" title="'+(on?'已接入':'未接入')+'"></span>'
+      +'<span class="sc-n" title="'+esc(s.name)+'">'+esc(s.name)+'</span>'
+      +'<span class="tag '+(on?'ok':'')+'" style="margin-left:auto;flex:0 0 auto">'
+        +(on?'已接入':'未接入')+'</span>'
+      +'</div>'
+      +'<div class="sc-d" title="'+esc(s.desc||'')+'">'+esc(s.desc||'—')+'</div>'
+      +'<div class="sc-t">'
+      +'<span class="tag info">'+esc(s.kind)+'</span>'
+      +(sub?'<span class="tag acc">'+esc(sub)+'</span>':'')
+      +(marks?'<span class="tag" title="桌=有桌面客户端 网=有网页版 API=开放接口">'
+         +esc(marks)+'</span>':'')
+      +(s.checkin?'<span class="tag" title="每日 '+(s.at||'')+' 自动签到">签到'
+         +(s.done?' ✓':'')+'</span>':'')
+      +(s.models?'<span class="tag">'+s.models+' 模型</span>':'')
+      +'</div>'
+      +'<div class="sc-f">'
+      +'<span class="sc-ep" title="'+esc(s.endpoint||'')+'">'+esc(s.endpoint||'—')+'</span>'
+      +'<button class="btn sm'+(on?'':' pri')+'" style="flex:0 0 auto" '
+        +'onclick="event.stopPropagation();openSrc(\''+esc(s.key)+'\')">'
+        +(on?'详情':'接入')+'</button>'
+      +'</div>'
+      +'</div>';
+  }
+  return h;
+}
+
+function srcSegHtml(){
+  const all=sourceList();
+  const on=all.filter(i=>i.logged).length;
+  return [['all','全部 '+all.length],
+          ['on','已接入 '+on],
+          ['off','未接入 '+(all.length-on)],
+          ['proxy','本地反代']]
+    .map(x=>'<button class="'+(SRC_F===x[0]?'on':'')+'" '
+      +'onclick="SRC_F=\''+x[0]+'\';srcRenderGrid()">'+x[1]+'</button>').join('');
+}
+
+/** 只重绘网格 + 筛选条：整页 render() 会让搜索框失焦，所以这里局部更新 */
+function srcRenderGrid(){
+  const g=document.getElementById('srcGrid');
+  if(!g) return;
+  const items=srcFilter(sourceList());
+  g.innerHTML=srcCards(items);
+  const seg=document.getElementById('srcSeg');
+  if(seg) seg.innerHTML=srcSegHtml();
+  const cnt=document.getElementById('srcCnt');
+  if(cnt) cnt.textContent='显示 '+items.length+' 个';
+}
+
 function viewSources(){
   if(SRC_VIEW==='detail'&&S.data.srcDetail){
     return srcDetail();
   }
-  const groups=srcGroups();
-  const cats=S.data.srcCats||[];
-  const o=S.data.overview||{};
-  const g=o.gateway||{};
-  const allN=Object.values(groups).reduce((n,x)=>n+x.items.length,0);
-  const loggedAll=Object.values(groups).reduce(
-    (n,x)=>n+x.items.filter(i=>i.logged).length,0);
-  // 分类统计前端现算（后端已不再下发 summary）
-  const srcItems=Object.values(groups).flatMap(x=>x.items);
-  const nAcc=srcItems.filter(i=>i.kind==='账号接入').length;
-  const nLp=srcItems.filter(i=>i.kind==='本地反代').length;
+  const items=sourceList();
+  const poolN=(S.data.accountStats&&S.data.accountStats.total)||0;
+  const rows=(S.data.models||{}).models_enriched||[];
+  const loggedN=items.filter(i=>i.logged).length;
+  const shown=srcFilter(items);
 
   let h='';
-  // ---- 顶部：链路状态，一眼看清「接入 → 反代 → 路由」三个环节
-  h+='<div class="grid g4 mb">'
-    +'<div class="kpi"><div class="lb">① 接入源</div>'
-    +'<div class="vl">'+loggedAll+' <span class="faint" style="font-size:14px">/ '+allN+'</span></div>'
-    +'<div class="ex">已接入 / 可接入</div></div>'
-    +'<div class="kpi"><div class="lb">② 原生直连</div>'
-    +'<div class="vl" style="color:var(--ok)">已启用</div>'
-    +'<div class="ex">账号池 '+(S.data.accountStats&&S.data.accountStats.total||0)
-      +' · 原生中继 '+((S.data.overview.native||{}).relays||9)+' 平台 · 免 EXE</div></div>'
-    +'<div class="kpi"><div class="lb">③ 自动路由</div>'
-    +'<div class="vl">3</div>'
-    +'<div class="ex">auto / weight / priority</div></div>'
-    +'<div class="kpi"><div class="lb">分类</div>'
-    +'<div class="vl" style="font-size:16px">'
-    +'本'+nAcc+' · 反代'+nLp+'</div>'
-    +'<div class="ex">有桌面客户端的算「本地 AI」</div></div>'
+  // ---- 一行状态条（真实数据，不再有硬编码）
+  h+='<div class="srcbar">'
+    +'<div class="srcbar-i"><i>已接入</i><b>'+loggedN
+      +'<span class="faint"> / '+items.length+'</span></b></div>'
+    +'<div class="srcbar-i"><i>账号凭据</i><b>'+poolN+'</b></div>'
+    +'<div class="srcbar-i"><i>收录模型</i><b>'+rows.length+'</b></div>'
+    +'<button class="btn sm gh" style="margin-left:auto" '
+      +'onclick="SRC_HELP=!SRC_HELP;render()" '
+      +'title="展开/收起接入用法说明">怎么用 '+(SRC_HELP?'▴':'▾')+'</button>'
     +'</div>';
-
-  // ---- 怎么用
-  h+='<div class="note">'
-    +'<b>用法就三步</b>：① 下面按类选源接入（扫码 / Cookie / 填 Key）'
-    +'② 所有源都汇到面板这个 OpenAI 兼容端点：<code>'+esc(panelBaseUrl())+'</code>，'
-    +'api_key 用 <code>admin</code> ③ 客户端里把 model 填成 <code>auto</code>，'
-    +'面板按实测延迟自动挑最快的源。<br>'
-    +'<span class="faint">分类规则：<b>有桌面客户端的一律算「本地 AI」</b>，'
-    +'哪怕它同时有网页版。签到、任务、工具调用都是可选增强，不配置也不影响主流程。</span>'
-    +'</div>';
-
-  // ★ 不再区分 本地AI/平台API/网页对话——全部合并为一屏「本地 AI」
-  const items=sourceList();
-  h+='<div class="muted" style="font-size:12.5px;margin:-4px 0 12px">本地 AI 一览：'
-    +'已接入 '+items.filter(i=>i.logged).length+' / '+items.length+'</div>';
-
-  h+='<div class="grid g3">';
-  for(const s of items){
-    const badge=s.logged
-      ?'<span class="tag ok">已接入</span>'
-      :'<span class="tag">未接入</span>';
-    const chk=s.checkin
-      ?'<span class="tag acc" title="每日 '+esc(s.at||'')+' 自动签到">签到 '+(s.done?'✓':'')+'</span>'
-      :'';
-    const kindTag=(S.data.srcKinds||{})[s.key];
-    const fact=kindTag&&kindTag.facts?kindTag.facts:{};
-    const marks=((fact.desktop?'桌':'')+(fact.web?'网':'')+(fact.api?'API':''))||'';
-    const act=s.logged
-      ?'<button class="btn sm" onclick="event.stopPropagation();openSrc(\''+esc(s.key)+'\')">详情</button>'
-      :'<button class="btn sm pri" onclick="event.stopPropagation();openSrc(\''+esc(s.key)+'\')">接入</button>';
-    h+='<div class="card" style="margin:0;cursor:pointer" '
-      +'onclick="openSrc(\''+esc(s.key)+'\')">'
-      +'<div class="flex" style="justify-content:space-between;margin-bottom:8px">'
-      +'<b style="font-size:14px">'+esc(s.name)+'</b>'+badge+'</div>'
-      +'<div class="faint" style="font-size:11.5px;line-height:1.5;min-height:48px">'
-      +esc(s.desc||'')+'</div>'
-      +'<div class="flex" style="margin-top:8px;gap:5px">'
-      +'<span class="tag info">'+esc(s.kind)+'</span>'
-      +(marks?'<span class="tag">'+esc(marks)+'</span>':'')
-      +chk
-      +(s.models?'<span class="tag acc">'+s.models+' 模型</span>':'')
-      +'</div>'
-      +'<div class="faint mono" style="font-size:10.5px;margin-top:7px;word-break:break-all">'
-      +esc(s.endpoint||'—')+'</div>'
-      +(s.variants
-        ?('<div style="margin-top:8px">'+s.variants.map(v=>
-            '<div class="flex" style="justify-content:space-between;align-items:center;'
-            +'padding:5px 0;border-top:1px solid var(--line2)">'
-            +'<span class="faint" style="font-size:12px">'+esc(v.label)+'</span>'
-            +(v.logged?'<span class="tag ok">已登录</span>'
-              :'<button class="btn sm pri" onclick="event.stopPropagation();'
-                +'srcLogin(\''+esc(v.pid)+'\')">扫码接入</button>')
-            +'</div>').join('')+'</div>')
-        :('<div style="margin-top:9px">'+act+'</div>'))
+  if(SRC_HELP){
+    h+='<div class="note">'
+      +'<b>就三步</b>：① 下面点一个源，扫码 / 粘 Cookie / 填 Key 完成接入 '
+      +'② 客户端 base_url 填 <code>'+esc(panelBaseUrl())+'</code>、'
+      +'api_key 填 <code>admin</code> '
+      +'③ model 填 <code>auto</code>，面板按实测延迟自动挑最快的源。'
       +'</div>';
   }
-  h+='</div>';
+
+  // ---- 搜索 + 筛选
+  h+='<div class="srcbar2">'
+    +'<input class="q" placeholder="搜索名称 / 端点…" value="'+esc(SRC_Q)+'" '
+      +'oninput="SRC_Q=this.value;srcRenderGrid()" '
+      +'onkeydown="if(event.key===\'Escape\'){SRC_Q=\'\';this.value=\'\';srcRenderGrid()}">'
+    +'<div class="srcseg" id="srcSeg">'+srcSegHtml()+'</div>'
+    +'<span class="faint" style="font-size:11.5px" id="srcCnt">显示 '
+      +shown.length+' 个</span>'
+    +'</div>';
+
+  h+='<div class="grid g3 srcgrid" id="srcGrid">'+srcCards(shown)+'</div>';
   return h;
 }
 
@@ -631,7 +670,31 @@ function openSrc(key){
   SRC_VIEW='detail';
   render();
 }
-function closeSrc(){ S.data.srcDetail=null; SRC_VIEW='card'; render(); }
+/* 返回源列表：顺手把「正在等扫码、但还没登录成功」的会话停掉。
+ *
+ * ★ 2026-10-06 用户点破的简化思路：
+ *   「设个超时机制不就好了吗？或者检测到前端点击返回源列表就停掉浏览器啊」
+ *   —— 对，所以现在服务端只用一个固定端口 + owner 归属校验（不再散列端口），
+ *   浏览器实例的**生命周期由前端这一下点击来收口**：
+ *     离开 = 用户不扫了 → 停浏览器、放端口，别人立刻能用。
+ *   仍在 waits 的会话不会一直挂着占资源（服务端另有超时兜底）。
+ */
+function closeSrc(){
+  leaveLoginView();
+  S.data.srcDetail=null; SRC_VIEW='card'; render();
+}
+
+/** 离开任何「带登录会话」的界面（返回源列表 / 切走视图）时统一调用。
+ *  justPassive：不动会话，只清理前端轮询（用于已成功的会话）。 */
+function leaveLoginView(){
+  stopLoginPoll();
+  const s=S.data.loginSession;
+  if(s&&(s.status==='pending'||s.status==='waiting')){
+    // 不等后端返回，先把本地状态收掉，避免下次进来又被这张旧卡挡住
+    S.data.loginSession=null;
+    api('/api/login?action=cancel',{id:s.id}).catch(()=>null);
+  }
+}
 
 // ══════════════════════════════════════════════════════════════
 // 腾讯 / CodeBuddy 原生登录（2026-10-04 抓包逆向）
@@ -771,6 +834,19 @@ async function tencentModels(){
   toast('在线模型 '+S.data.tcModels.length+' 个（含倍率）');
 }
 
+/** 子页面 sticky 返回栏：滚到哪都吸顶可见，手机端点击区也大（样式见 .backbar） */
+function backbar(name){
+  const s=S.data.loginSession;
+  // 有「等扫码中」的会话时，返回按钮旁多给一个明确的「结束登录」出口 ——
+  // 否则用户只能点「取消」，且不知道浏览器还在服务器上开着。
+  const kill=(s&&(s.status==='pending'||s.status==='waiting'))
+    ?'<button class="btn dgr" onclick="cancelLogin()" title="停掉服务端浏览器，释放资源">结束登录</button>'
+    :'';
+  return '<div class="backbar">'
+    +'<button class="btn pri" onclick="closeSrc()">← 返回源列表</button>'
+    +'<b>'+esc(name||'')+'</b>'+kill+'</div>';
+}
+
 /** 点开某个源：登录 / 看模型 / 签到 / 探测，都在这一层完成 */
 function srcDetail(){
   const s=sourceList().find(x=>x.key===S.data.srcDetail);
@@ -781,13 +857,13 @@ function srcDetail(){
     return viewSources();
   }
   if(s.view==='localproxy'){
-    return '<div class="card"><div class="ch"><b>'+esc(s.name)+'</b>'
+    return backbar(s.name)+'<div class="card"><div class="ch"><b>'+esc(s.name)+'</b>'
       +'<button class="btn sm" onclick="closeSrc()">← 返回源列表</button></div>'
       +'<div class="cb">'+viewLocalproxy()+'</div></div>';
   }
   const acc=(S.data.accounts||[]).find(a=>a.platform===s.key)
     ||(s.variants?(S.data.accounts||[]).find(a=>s.variants.some(v=>v.pid===a.platform)):null);
-  let h='<div class="card"><div class="ch"><b>'+esc(s.name)+'</b>'
+  let h=backbar(s.name)+'<div class="card"><div class="ch"><b>'+esc(s.name)+'</b>'
     +'<button class="btn sm" onclick="closeSrc()">← 返回源列表</button></div><div class="cb">';
   h+='<div class="flex mb">'
     +'<span class="tag '+(s.logged?'ok':'')+'">'+(s.logged?'已接入':'未接入')+'</span>'
@@ -828,6 +904,10 @@ function srcDetail(){
       +'<button class="btn pri" onclick="srcLogin(\''+esc(s.key)+'\')">'
       +(s.method==='qrcode'?'扫码接入':s.method==='cookie'?'用浏览器 Cookie 接入':'填 API Key 接入')
       +'</button>'
+      +(s.method==='cookie'
+        ?'<button class="btn" title="无需本机浏览器：服务器起无头 Chromium 打开登录页，'
+          +'二维码抓回面板用手机扫，登录后 Cookie 自动入库" '
+          +'onclick="startLogin(\''+esc(s.key)+'\',\'\',1)">🌐 远程在线登录</button>':'')
       +'<button class="btn" onclick="platformProbe(\''+esc(s.key)+'\')">先探测端点</button>'
       +'</div>';
     h+=viewLoginSession(s.key);
@@ -2298,16 +2378,32 @@ async function loadLogin(){
   render();
 }
 
-async function startLogin(pid,edition){
-  toast('正在发起登录…');
+async function startLogin(pid,edition,headless){
+  // headless=1：不依赖你本机 Chrome/Edge，由服务器起无头浏览器打开登录页，
+  // 二维码抓回面板里用手机扫，登录后 Cookie 自动捕捉入库（远程部署也全流程可用）
+  toast(headless?'正在启动服务端无头浏览器…':'正在发起登录…');
   const body={platform:pid};
   if(edition)body.edition=edition;
+  if(headless)body.headless=1;
   const r=await api('/api/login?action=start',body).catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'发起登录失败','err');return;}
   S.data.loginSession=r.session||null;
   render();
   const s=S.data.loginSession;
-  if(s&&s.method==='qrcode'&&(s.status==='pending'||s.status==='waiting'))startLoginPoll();
+  // cookie 会话（尤其服务端无头模式）也轮询：看守线程自动捕捉到 Cookie 能即时反馈到 UI
+  if(s&&(s.method==='qrcode'||s.method==='remotescan'||s.method==='cookie')
+     &&(s.status==='pending'||s.status==='waiting'))startLoginPoll();
+}
+
+// 服务端远程扫码（无需本机浏览器）：直接打平台 Web 二维码接口
+async function startQrScan(pid){
+  toast('正在生成远程二维码…');
+  const r=await api('/api/login?action=qrscan',{platform:pid}).catch(e=>({ok:false,message:e.message}));
+  if(r.ok===false){toast(r.message||'发起远程扫码失败','err');return;}
+  S.data.loginSession=r.session||null;
+  render();
+  const s=S.data.loginSession;
+  if(s&&s.method==='remotescan'&&(s.status==='pending'||s.status==='waiting'))startLoginPoll();
 }
 
 function startLoginPoll(){
@@ -2341,8 +2437,21 @@ function qrDataURL(text){
 }
 
 function qrOrLinkHTML(sess){
-  // 网关给过 qr 图就直接用；原生直连没有图时，用授权 URL 现场出码 —— 不用跳网页
-  if(sess.qr)return '<img src="'+sess.qr+'" alt="登录二维码" style="width:196px;height:196px;border-radius:10px;border:1px solid var(--line)">';
+  // 网关给过 qr 图就直接用；原生直连没有图时，用授权 URL / 远程扫码文本现场出码
+  if(sess.qr){
+    // 远程扫码（remotescan）/ cookie 类平台抓回的是登录页二维码截图：提示用手机扫
+    const cap = (sess.method==='remotescan'||sess.method==='cookie')
+      ? '<div class="faint" style="margin-top:6px;max-width:196px">↑ 用手机扫此二维码，'
+        +'登录成功后 Cookie 自动获取入库</div>'
+      : '';
+    return '<img src="'+sess.qr+'" alt="登录二维码" style="width:196px;height:196px;border-radius:10px;border:1px solid var(--line)">'+cap;
+  }
+  if(sess.qr_text){
+    const d=qrDataURL(sess.qr_text);
+    if(d)return '<img src="'+d+'" alt="远程扫码二维码" style="width:196px;height:196px;border-radius:10px;border:1px solid var(--line)">'
+      +'<div class="faint" style="margin-top:6px;max-width:220px">↑ 用手机相机 / 微信扫此码，'
+        +'在打开的页面输入验证码完成登录（无需本机浏览器）</div>';
+  }
   if(sess.auth_url){
     const d=qrDataURL(sess.auth_url);
     if(d)return '<img src="'+d+'" alt="登录二维码（由授权链接生成）" style="width:196px;height:196px;border-radius:10px;border:1px solid var(--line)">'
@@ -2728,7 +2837,11 @@ function viewAccount(){
           {qrcode:'ok',cookie:'acc',file:''}[x.method]||'acc')},
         {k:'_in',t:'登录态',render:x=>logged.has(x.id)
           ?'<span class="tag ok">已登录</span>'
-          :'<button class="btn sm" onclick="setAccTab(\'login\');startLogin(\''+esc(x.id)+'\',\''+esc(x.edition||'')+'\')">去登录</button>'},
+          :'<button class="btn sm pri" onclick="setAccTab(\'login\');startLogin(\''+esc(x.id)+'\',\''+esc(x.edition||'')+'\')">去登录</button>'
+           +(x.method==='cookie'
+             ?' <button class="btn sm" title="无需本机浏览器：服务器起无头 Chromium 打开登录页，二维码抓回面板用手机扫，登录后 Cookie 自动入库" '
+              +'onclick="startLogin(\''+esc(x.id)+'\',\''+esc(x.edition||'')+'\',1)">🌐 远程登录</button>'
+             :'+')},
         {k:'upstream',t:'上游',render:x=>'<span class="mono faint" style="font-size:11.5px">'+esc(x.upstream||'—')+'</span>'},
         {k:'hint',t:'说明',render:x=>'<span class="faint" style="font-size:11.5px;min-width:220px;display:block">'+esc(x.hint||'')+'</span>'},
       ]});
@@ -3307,6 +3420,14 @@ function viewLogin(){
     if(p.upstream)h+='<div class="faint" style="font-size:11.5px">上游 '+esc(p.upstream)+'</div>';
     h+='<button class="btn pri sm" style="margin-top:8px;width:100%" onclick="startLogin(\''+esc(p.id)+'\',\''+esc(p.edition||'')+'\')">'
       +(p.method==='file'?'填写凭据':'开始登录')+'</button>';
+    if(p.method==='cookie'){
+      h+='<button class="btn sm" style="margin-top:6px;width:100%" onclick="startLogin(\''+esc(p.id)+'\',\''+esc(p.edition||'')+'\',1)">'
+        +'🌐 远程在线登录（服务端无头）</button>';
+    }
+    if(p.qr){
+      h+='<button class="btn sm" style="margin-top:6px;width:100%" onclick="startQrScan(\''+esc(p.id)+'\')">'
+        +'远程扫码（无需本机浏览器）</button>';
+    }
     h+='</div>';
   }
   h+='</div></div></div>';
