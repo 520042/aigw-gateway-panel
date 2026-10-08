@@ -1,0 +1,148 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build-windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        working-directory: aigw-panel
+        run: pyinstaller build.spec --clean --noconfirm
+
+      - name: Rename artifact
+        working-directory: aigw-panel/dist
+        run: |
+          if (Test-Path "aigw-panel.exe") {
+            Rename-Item "aigw-panel.exe" "aigw-panel-windows-x64.exe"
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aigw-panel-windows-x64
+          path: aigw-panel/dist/*.exe
+
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        working-directory: aigw-panel
+        run: pyinstaller build.spec --clean --noconfirm
+
+      - name: Rename artifact
+        working-directory: aigw-panel/dist
+        run: |
+          if [ -f "aigw-panel" ]; then
+            mv aigw-panel aigw-panel-linux-x64
+          fi
+          chmod +x aigw-panel-linux-x64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aigw-panel-linux-x64
+          path: aigw-panel/dist/aigw-panel-linux-x64
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        working-directory: aigw-panel
+        run: pyinstaller build.spec --clean --noconfirm
+
+      - name: Rename artifact
+        working-directory: aigw-panel/dist
+        run: |
+          if [ -f "aigw-panel" ]; then
+            mv aigw-panel aigw-panel-macos-universal
+          fi
+          chmod +x aigw-panel-macos-universal
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aigw-panel-macos-universal
+          path: aigw-panel/dist/aigw-panel-macos-universal
+
+  release:
+    name: Create Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: ls -R artifacts/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/aigw-panel-windows-x64/*.exe
+            artifacts/aigw-panel-linux-x64/*
+            artifacts/aigw-panel-macos-universal/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
