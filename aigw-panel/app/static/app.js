@@ -1161,10 +1161,14 @@ function viewCheckin(){
   </div>
 
   <div class="card">
-    <h2>今日记录</h2>
+    <h2>今日记录 <span class="faint" style="font-size:11.5px;font-weight:normal">（仅显示支持签到的平台）</span></h2>
     <div class="scroll sm">
       <table><thead><tr><th>时间</th><th>站点</th><th>结果</th><th>连续</th><th>说明</th></tr></thead><tbody>
-      ${today.length?today.map(x=>`<tr>
+      ${today.length?today.filter(x=>{
+          // 只显示真正支持签到的站点（过滤掉不支持签到但被瞎跑的）
+          const site=sites.find(s=>s.id===x.site||s.name===x.name||s.name===x.site);
+          return site&&site.checkin;
+        }).map(x=>`<tr>
         <td class="mono nowrap">${esc((x.at||'').slice(11))}</td>
         <td>${esc(x.name||x.site)}</td>
         <td>${tag(x.ok?'成功':'失败',x.ok?'ok':'err')}</td>
@@ -1214,49 +1218,75 @@ async function loadGrowth(){
 function viewGrowth(){
   const g=(S.data.growth&&S.data.growth.growth)||{};
   const enabled=g.enabled;
-  return `
-  <div class="grid g2">
-    <div class="card">
-      <h2>成长任务体系</h2>
-      <div class="note ${enabled?'':'warn'}">
-        网关成长任务当前${enabled?'已启用':'未启用'}，每日 ${g.hour||10}:00 自动执行，共处理 ${g.scopeAccountNum||0} 个账号，
-        上报前 ${g.reportCount||5} 条结果。
-      </div>
-      <table><tbody>
-        <tr><td>领取成长奖励</td><td class="right mono">/admin/api/growth/bonus</td></tr>
-        <tr><td>补签</td><td class="right mono">/admin/api/growth/makeup</td></tr>
-        <tr><td>抽奖</td><td class="right mono">/admin/api/growth/lottery</td></tr>
-        <tr><td>旅行</td><td class="right mono">/admin/api/growth/travel</td></tr>
-        <tr><td>上报结果</td><td class="right mono">/admin/api/growth/report</td></tr>
-        <tr><td>历史记录</td><td class="right">${g.total||0} 条</td></tr>
-      </tbody></table>
-      <div class="flex mt">
-        <button class="btn pri" onclick="runGrowth()">立即执行全部成长任务</button>
-        <button class="btn" onclick="loadGrowth()">刷新</button>
-      </div>
-    </div>
+  const sites=S.data.sites||[];
 
-    <div class="card">
-      <h2>上游成长接口</h2>
-      <div class="muted" style="font-size:12.5px;margin-bottom:10px">
-        网关对接的腾讯侧成长体系端点（反解自 base.apk 与 gateway 1.29.6）：
-      </div>
-      <pre>${esc([
-'/activity/growth/buddy/first',
-'/activity/growth/buddy/info',
-'/activity/growth/buddy/travel/status',
-'/activity/growth/buddy/travel/depart',
-'/activity/growth/lottery/chances',
-'/activity/growth/lottery/draw',
-'/activity/growth/heatmap',
-'/activity/growth/makeup',
-'/activity/growth/streak',
-'/activity/growth/redeem',
-'/billing/meter/claim',
-'/balance/activity/growth/buddy/travel/claim',
-'/v2/billing/meter/daily-checkin',
-'/v2/billing/meter/get-user-resource'
-].join('\n'))}</pre>
+  // 按平台分类展示签到/积分任务
+  const platforms=[
+    {
+      id:'web-glm', name:'智谱清言',
+      features:[
+        {name:'每日登录领积分', action:'web-glm:daily_login_score'},
+        {name:'积分余额查询', action:'web-glm:score'},
+        {name:'积分活动领奖', action:'web-glm:score_activity_draw'},
+        {name:'积分流水', action:'web-glm:score_record'},
+      ]
+    },
+    {
+      id:'wb-gateway', name:'WorkBuddy 国内',
+      features:[
+        {name:'成长任务列表', action:'wb-gateway:growth_tasks'},
+        {name:'接受任务', action:'wb-gateway:growth_task_accept'},
+        {name:'领取任务奖励', action:'wb-gateway:growth_task_claim'},
+        {name:'猫猫旅行-查询', action:'wb-gateway:buddy_info'},
+        {name:'猫猫旅行-派出', action:'wb-gateway:travel_depart'},
+        {name:'连登状态', action:'wb-gateway:streak_status'},
+        {name:'抽奖次数', action:'wb-gateway:lottery_summary'},
+      ]
+    },
+    {
+      id:'wb-gateway-intl', name:'WorkBuddy 国际',
+      features:[
+        {name:'成长任务列表', action:'wb-gateway-intl:growth_tasks'},
+        {name:'接受任务', action:'wb-gateway-intl:growth_task_accept'},
+        {name:'领取任务奖励', action:'wb-gateway-intl:growth_task_claim'},
+        {name:'连登状态', action:'wb-gateway-intl:streak_status'},
+      ]
+    },
+  ];
+
+  return `
+  <div class="card">
+    <h2>任务中心 <span class="faint" style="font-size:11.5px;font-weight:normal">（按平台分类）</span></h2>
+    <div class="note ${enabled?'':'warn'}">
+      只显示有签到/积分任务的平台，没有的自动隐藏。点击按钮可手动执行对应任务。
+    </div>
+  </div>
+
+  <div class="grid g2">
+    ${platforms.map(p=>{
+      const site=sites.find(s=>s.id===p.id);
+      const hasLogin=site&&site.logged;
+      return `
+      <div class="card">
+        <h2>${esc(p.name)} ${hasLogin?'<span class="tag ok">已登录</span>':'<span class="tag warn">未登录</span>'}</h2>
+        <table><tbody>
+          ${p.features.map(f=>`<tr>
+            <td>${esc(f.name)}</td>
+            <td class="right"><button class="btn sm" onclick="runAction('${esc(f.action)}')">执行</button></td>
+          </tr>`).join('')}
+        </tbody></table>
+      </div>`;
+    }).join('')}
+  </div>
+
+  <div class="card">
+    <h2>网关成长任务（WorkBuddy 通用）</h2>
+    <div class="note ${enabled?'':'warn'}">
+      网关成长任务当前${enabled?'已启用':'未启用'}，每日 ${g.hour||10}:00 自动执行。
+    </div>
+    <div class="flex mt">
+      <button class="btn pri" onclick="runGrowth()">立即执行全部</button>
+      <button class="btn" onclick="loadGrowth()">刷新</button>
     </div>
   </div>
 
