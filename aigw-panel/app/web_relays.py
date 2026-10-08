@@ -88,7 +88,8 @@ def _read_sse(resp, on_line):
 # ==================================================================== 智谱清言
 GLM_BASE = "https://chatglm.cn/chatglm"
 GLM_SIGN_SECRET = "8a1317a7468aa3ad86e997d08f3f31cb"   # ← glm_auth.py:19 一手常量
-GLM_ASSISTANT_ID = "65940acff94777010aa6b796"          # glm2api 默认助手
+GLM_ASSISTANT_ID = "65940acff94777010aa6b796"          # glm2api 默认对话助手
+GLM_IMAGE_ASSISTANT_ID = "65a232c082ff90a2ad2f15e2"    # 图片生成助手
 # refresh_token -> access_token 缓存（按 refresh_token 键，带过期）
 _GLM_TOK = {}
 
@@ -150,6 +151,21 @@ def glm_chat(messages, secret, model="glm-4-flash", timeout=180):
     if not at:
         return False, err
 
+    # 处理模型变体（-think / -search / -think-search）
+    think_enabled = False
+    search_enabled = False
+    actual_model = model
+    if model.endswith("-think-search"):
+        think_enabled = True
+        search_enabled = True
+        actual_model = model[:-len("-think-search")]
+    elif model.endswith("-think"):
+        think_enabled = True
+        actual_model = model[:-len("-think")]
+    elif model.endswith("-search"):
+        search_enabled = True
+        actual_model = model[:-len("-search")]
+
     url = GLM_BASE + "/backend-api/assistant/stream"
     conv = [m for m in messages if m.get("role") in ("user", "assistant")]
     body = {
@@ -157,11 +173,16 @@ def glm_chat(messages, secret, model="glm-4-flash", timeout=180):
         "conversation_id": "",
         "messages": [{"role": m.get("role"), "content": m.get("content", "")}
                      for m in conv],
-        "model": model,
+        "model": actual_model,
         "stream": True,
         "prompt": "",
         "tools": [],
     }
+    # 深度思考 / 联网搜索参数
+    if think_enabled:
+        body["thinking"] = {"type": "enabled"}
+    if search_enabled:
+        body["search"] = {"enable": True}
     timestamp, nonce, sign = _glm_build_sign()
     headers = {
         "Authorization": "Bearer " + at,
@@ -198,6 +219,69 @@ def glm_chat(messages, secret, model="glm-4-flash", timeout=180):
                 return False, "上游未返回可解析内容（签名或请求体不符）"
             return True, {"choices": [{"message": {"role": "assistant",
                                                    "content": last}}]}
+    except urllib.error.HTTPError as e:
+        return False, "HTTP %s: %s" % (e.code, e.read().decode("utf-8", "replace")[:300])
+    except Exception as e:
+        return False, "%s: %s" % (type(e).__name__, e)
+
+
+def glm_image(prompt, secret, model="glm-image-1", size="1024x1024", timeout=120):
+    """智谱清言网页版图片生成（参考 glm2api 项目）。"""
+    if not secret:
+        return False, "缺少 chatglm_refresh_token"
+    at, err = _glm_access_token(secret)
+    if not at:
+        return False, err
+
+    url = GLM_BASE + "/backend-api/assistant/stream"
+    body = {
+        "assistant_id": GLM_IMAGE_ASSISTANT_ID,
+        "conversation_id": "",
+        "messages": [{"role": "user", "content": prompt}],
+        "model": model,
+        "stream": True,
+        "prompt": "",
+        "tools": [],
+        "image_generation": {"size": size},
+    }
+    timestamp, nonce, sign = _glm_build_sign()
+    headers = {
+        "Authorization": "Bearer " + at,
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "User-Agent": UA_CHROME,
+        "X-Nonce": nonce,
+        "X-Sign": sign,
+        "X-Timestamp": timestamp,
+    }
+    try:
+        with _open(url, headers, timeout,
+                   data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                   method="POST") as r:
+            image_url = ""
+            def _on(_ev, data):
+                nonlocal image_url
+                if data in ("[DONE]", ""):
+                    return
+                try:
+                    d = json.loads(data)
+                except Exception:
+                    return
+                # 图片生成返回的 parts 里可能有 image_url
+                for p in (d.get("parts") or []):
+                    if isinstance(p, dict):
+                        if p.get("image_url"):
+                            nonlocal image_url
+                            image_url = p["image_url"]
+                        elif p.get("content") and not image_url:
+                            # 有时候图片 URL 在 content 里
+                            c = p["content"]
+                            if isinstance(c, str) and c.startswith("http"):
+                                image_url = c
+            _read_sse(r, _on)
+            if image_url:
+                return True, {"data": [{"url": image_url}]}
+            return False, "未找到图片生成结果"
     except urllib.error.HTTPError as e:
         return False, "HTTP %s: %s" % (e.code, e.read().decode("utf-8", "replace")[:300])
     except Exception as e:
@@ -574,14 +658,42 @@ def chat(pid, messages, secret, model=None):
 def model_list(pid):
     """静态模型清单（对话写 模型id@pid）。"""
     if pid == "web-glm":
-        return [
-            {"id": "glm-4-flash", "name": "GLM-4 Flash", "desc": "智谱清言网页版（免费快）"},
-            {"id": "glm-4", "name": "GLM-4", "desc": "智谱清言网页版"},
-            {"id": "glm-4-plus", "name": "GLM-4 Plus", "desc": "智谱清言网页版（增强）"},
-            {"id": "glm-4-air", "name": "GLM-4 Air", "desc": "智谱清言网页版"},
-            {"id": "glm-4-all", "name": "GLM-4 All", "desc": "智谱清言网页版（All 工具）"},
-            {"id": "glm-zero-preview", "name": "GLM Zero Preview", "desc": "智谱清言网页版（深度思考）"},
+        # 参考 glm2api 项目扩展的模型列表（2026-10-08）
+        # 每个基础模型支持 -think（深度思考）、-search（联网搜索）变体
+        base_models = [
+            # 最新一代
+            ("glm-5.2", "GLM-5.2", "最新一代"),
+            ("glm-5.1", "GLM-5.1", "最新一代"),
+            ("glm-5", "GLM-5", "最新一代"),
+            ("glm-5-turbo", "GLM-5 Turbo", "最新一代（快速）"),
+            ("glm-5v-turbo", "GLM-5V Turbo", "最新一代（视觉）"),
+            # 新一代
+            ("glm-4.7", "GLM-4.7", "新一代"),
+            ("glm-4.7-flash", "GLM-4.7 Flash", "新一代（快速免费）"),
+            ("glm-4.6", "GLM-4.6", "新一代"),
+            ("glm-4.6v-flash", "GLM-4.6V Flash", "新一代（视觉快速）"),
+            # 经典系列
+            ("glm-4", "GLM-4", "经典系列"),
+            ("glm-4-plus", "GLM-4 Plus", "经典系列（增强）"),
+            ("glm-4-flash", "GLM-4 Flash", "经典系列（免费快速）"),
+            ("glm-4-air", "GLM-4 Air", "经典系列（轻量）"),
+            ("glm-4-all", "GLM-4 All", "经典系列（全工具）"),
+            ("glm-4v", "GLM-4V", "经典系列（视觉）"),
+            # 特殊模型
+            ("glm-zero-preview", "GLM Zero Preview", "零号模型（深度思考）"),
+            ("glm-deep-research", "GLM Deep Research", "深度研究"),
+            ("glm-4.1v-thinking-flashx", "GLM-4.1V Thinking FlashX", "视觉+思考"),
         ]
+        result = []
+        for mid, name, desc in base_models:
+            result.append({"id": mid, "name": name, "desc": desc + "（对话）"})
+            result.append({"id": mid + "-think", "name": name + " Think", "desc": desc + "（深度思考）"})
+            result.append({"id": mid + "-search", "name": name + " Search", "desc": desc + "（联网搜索）"})
+            result.append({"id": mid + "-think-search", "name": name + " Think+Search", "desc": desc + "（深度思考+联网搜索）"})
+        # 图片生成模型
+        result.append({"id": "glm-image-1", "name": "GLM Image 1", "desc": "图片生成"})
+        result.append({"id": "cogview-4", "name": "CogView-4", "desc": "图片生成（最新）"})
+        return result
     if pid == "web-trae":
         return [
             {"id": "gpt-4o", "name": "GPT-4o", "desc": "Trae 直连"},

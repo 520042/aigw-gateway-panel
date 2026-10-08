@@ -220,7 +220,7 @@ async function refresh(){
   if(S.busy)return;
   S.busy=true;
   try{
-    const o=await api('/api/overview');
+    const o=await api('api/overview');
     S.data.overview=o;
     $('#stl').textContent='面板原生模式 · 面板已运行 '+dur(o.uptime)+' · 调度 '+((o.scheduler&&o.scheduler.ticks)||0)+' 次';
     render();
@@ -294,12 +294,12 @@ let SRC_VIEW = 'card';        // card | detail
 
 function loadSources(){
   Promise.all([
-    api('/api/login?action=platforms').catch(()=>({platforms:[]})),
-    api('/api/accounts').catch(()=>({accounts:[],stats:{}})),
-    api('/api/autocheckin?action=status').catch(()=>({platforms:[]})),
-    api('/api/models?action=sources').catch(()=>({sources:[]})),
-    api('/api/models').catch(()=>({models_enriched:[],rate_summary:{}})),
-    api('/api/overview').catch(()=>({})),
+    api('api/login?action=platforms').catch(()=>({platforms:[]})),
+    api('api/accounts').catch(()=>({accounts:[],stats:{}})),
+    api('api/autocheckin?action=status').catch(()=>({platforms:[]})),
+    api('api/models?action=sources').catch(()=>({sources:[]})),
+    api('api/models').catch(()=>({models_enriched:[],rate_summary:{}})),
+    api('api/overview').catch(()=>({})),
   ]).then(([lp,ac,au,src,md,ov])=>{
     S.data.loginPlatforms=lp.platforms||[];
     S.data.accounts=ac.accounts||[];
@@ -397,8 +397,8 @@ let TOOLS_TAB = 'call';
 
 async function loadTools(){
   Promise.all([
-    api('/api/localproxy').catch(()=>({})),
-    api('/api/toolcall?action=list').catch(()=>({tools:[]})),
+    api('api/localproxy').catch(()=>({})),
+    api('api/toolcall?action=list').catch(()=>({tools:[]})),
   ]).then(([lp,tc])=>{
     S.data.lp=lp; S.data.toolList=tc.tools||[]; S.data.toolNames=tc.names||[];
     render();
@@ -492,10 +492,10 @@ let ROUTE_TAB = 'models';
 
 async function loadRoute(){
   // ★ grouped 先行并行拉（模型总表是本页主体），不被任何慢请求串行拖住
-  api('/api/models?action=grouped').then(g=>{S.data.grouped=g;render();}).catch(()=>{});
+  api('api/models?action=grouped').then(g=>{S.data.grouped=g;render();}).catch(()=>{});
   const [rt,us]=await Promise.all([
-    api('/api/route').catch(()=>({})),
-    api('/api/usage?range=all').catch(()=>({})),
+    api('api/route').catch(()=>({})),
+    api('api/usage?range=all').catch(()=>({})),
   ]);
   S.data.route=rt; S.data.usage=us;
   render();
@@ -692,7 +692,7 @@ function leaveLoginView(){
   if(s&&(s.status==='pending'||s.status==='waiting')){
     // 不等后端返回，先把本地状态收掉，避免下次进来又被这张旧卡挡住
     S.data.loginSession=null;
-    api('/api/login?action=cancel',{id:s.id}).catch(()=>null);
+    api('api/login?action=cancel',{id:s.id}).catch(()=>null);
   }
 }
 
@@ -767,7 +767,7 @@ function viewTcModels(){
 }
 
 async function loadTcStatus(){
-  const r=await api('/api/tencent?action=status').catch(()=>({ok:false}));
+  const r=await api('api/tencent?action=status').catch(()=>({ok:false}));
   const d=(r&&r.result)||r||{};
   S.data.tcStatus={loaded:true,logged:!!d.logged,verify:d.verify||{},
     tokenLen:d.tokenLen||0,account:d.account||''};
@@ -781,7 +781,7 @@ async function tencentLogin(){
   if(TCB.busy) return;
   TCB.busy=true;
   toast('正在起浏览器…');
-  const r=await api('/api/tencent?action=login',{}).catch(e=>({ok:false,message:e.message}));
+  const r=await api('api/tencent?action=login',{}).catch(e=>({ok:false,message:e.message}));
   if(r&&r.ok===false){ toast(r.message||'起浏览器失败','err'); TCB.busy=false; return; }
   const d=(r&&r.result)||r||{};
   TCB.state=d.state; TCB.url=d.url;
@@ -796,7 +796,7 @@ function tcPoll(){
   if(TCB.timer) clearInterval(TCB.timer);
   TCB.timer=setInterval(async ()=>{
     if(!TCB.state) return;
-    const r=await api('/api/tencent?action=poll',{state:TCB.state,timeout:2})
+    const r=await api('api/tencent?action=poll',{state:TCB.state,timeout:2})
       .catch(()=>({ok:false}));
     const d=(r&&r.result)||r||{};
     if(d.accessToken||d.saved){
@@ -809,7 +809,7 @@ function tcPoll(){
 }
 
 async function loadTcQuota(silent){
-  const r=await api('/api/tencent?action=quota').catch(()=>({ok:false}));
+  const r=await api('api/tencent?action=quota').catch(()=>({ok:false}));
   if(r&&r.ok===false){ if(!silent) toast(r.message||'取额度失败','err'); return; }
   S.data.tcQuota=(r&&r.result)||r||null;
   // silent 只表示「失败别弹 toast」，成功照样要 render 才看得到额度
@@ -817,7 +817,7 @@ async function loadTcQuota(silent){
 }
 
 async function tencentCheckin(){
-  const r=await api('/api/tencent?action=checkin').catch(e=>({ok:false,message:e.message}));
+  const r=await api('api/tencent?action=checkin').catch(e=>({ok:false,message:e.message}));
   if(r&&r.ok===false){toast(r.message||'签到失败','err');return;}
   const d=(r&&r.result)||r||{};
   if(d.already) toast('今天已经签过了');
@@ -826,7 +826,7 @@ async function tencentCheckin(){
 }
 
 async function tencentModels(){
-  const r=await api('/api/tencent?action=catalog',{}).catch(e=>({ok:false,message:e.message}));
+  const r=await api('api/tencent?action=catalog',{}).catch(e=>({ok:false,message:e.message}));
   if(r&&r.ok===false){toast(r.message||'拉模型失败','err');return;}
   const d=(r&&r.result)||r||{};
   S.data.tcModels=d.models||[];
@@ -923,7 +923,7 @@ function srcLogin(pid){
 async function loadSrcModels(pid){
   const box=$('#srcModels');
   if(box)box.innerHTML='<div class="sk line" style="height:34px"></div>';
-  const r=await api('/api/models?action=platform_models',{platform:pid})
+  const r=await api('api/models?action=platform_models',{platform:pid})
     .catch(e=>({ok:false,message:e.message}));
   if(!box)return;
   if(r.ok===false){box.innerHTML='<div class="note warn">'+esc(r.message||'取不到')+'</div>';return;}
@@ -1038,9 +1038,9 @@ function go(v){
 
 // ---------------------------------------------------------------- 网关
 async function loadGateway(){
-  const r=await api('/api/settings');
+  const r=await api('api/settings');
   S.data.settings=r;
-  const c=await api('/api/credentials');
+  const c=await api('api/credentials');
   S.data.creds=c;
   render();
 }
@@ -1064,8 +1064,8 @@ function viewGateway(){
         <tr><td>冷却策略</td><td class="right">账号 ${g.accountCooldownSeconds||60}s / 模型 ${g.modelCooldownSeconds||600}s</td></tr>
       </tbody></table>
       <div class="flex mt">
-        <button class="btn pri" onclick="post('/api/settings?action=gateway_restart',{})">启动网关</button>
-        <button class="btn dgr" onclick="post('/api/settings?action=gateway_stop',{})">停止网关</button>
+        <button class="btn pri" onclick="post('api/settings?action=gateway_restart',{})">启动网关</button>
+        <button class="btn dgr" onclick="post('api/settings?action=gateway_stop',{})">停止网关</button>
         <button class="btn" onclick="loadGateway()">刷新</button>
       </div>
     </div>
@@ -1106,27 +1106,27 @@ function viewGateway(){
 
 async function delCred(name){
   if(!confirm('删除凭据 '+name+' ？该操作会移除本地账号池中的这个账号。'))return;
-  const r=await post('/api/credentials?action=delete',{name});
+  const r=await post('api/credentials?action=delete',{name});
   toast(r.ok?'已删除':'失败：'+r.message,r.ok?'ok':'err');
   loadGateway();
 }
 async function gwSetup(){
   const u=$('#gwUser').value.trim(),p=$('#gwPass').value;
   if(!u||!p)return toast('用户名和密码必填','err');
-  const r=await post('/api/settings?action=gateway_setup',{username:u,password:p});
+  const r=await post('api/settings?action=gateway_setup',{username:u,password:p});
   toast(r.message||(r.ok?'成功':'失败'),r.ok?'ok':'err');
   loadGateway();
 }
 async function gwLogin(){
   const u=$('#gwUser').value.trim(),p=$('#gwPass').value;
-  const r=await post('/api/settings?action=gateway_login',{username:u,password:p});
+  const r=await post('api/settings?action=gateway_login',{username:u,password:p});
   toast(r.message||(r.ok?'成功':'失败'),r.ok?'ok':'err');
   loadGateway();
 }
 
 // ---------------------------------------------------------------- 签到
 async function loadCheckin(){
-  const r=await api('/api/checkins');
+  const r=await api('api/checkins');
   S.data.checkin=r;
   render();
 }
@@ -1191,11 +1191,11 @@ function viewCheckin(){
 }
 async function checkin(force){
   toast(force?'已触发强制签到…':'已触发签到…');
-  await api('/api/checkins?trigger=1'+(force?'&force=1':''));
+  await api('api/checkins?trigger=1'+(force?'&force=1':''));
   setTimeout(loadCheckin,3000);
 }
 async function runOne(id){
-  const r=await post('/api/sites?action=run_one',{id,force:true});
+  const r=await post('api/sites?action=run_one',{id,force:true});
   const x=r.result||{};
   toast((x.name||'')+'：'+(x.message||''),x.ok?'ok':'err');
   loadCheckin();
@@ -1207,7 +1207,7 @@ function quickCheckin(){
 
 // ---------------------------------------------------------------- 成长任务
 async function loadGrowth(){
-  const r=await api('/api/growth');
+  const r=await api('api/growth');
   S.data.growth=r;
   render();
 }
@@ -1276,14 +1276,14 @@ function viewGrowth(){
   </div>`;
 }
 async function runGrowth(){
-  const r=await api('/api/growth?trigger=1');
+  const r=await api('api/growth?trigger=1');
   toast(r.message||'已触发');
   setTimeout(loadGrowth,4000);
 }
 
 // ---------------------------------------------------------------- 任务
 async function loadTasks(){
-  const r=await api('/api/tasks');
+  const r=await api('api/tasks');
   S.data.tasks=r;
   render();
 }
@@ -1332,15 +1332,15 @@ function viewTasks(){
 async function addTask(){
   const n=$('#tName').value.trim(),s=$('#tSite').value;
   if(!n)return toast('任务名必填','err');
-  const r=await post('/api/tasks?action=add',{name:n,site:s});
+  const r=await post('api/tasks?action=add',{name:n,site:s});
   toast(r.message||'已添加',r.ok?'ok':'err');
   $('#tName').value='';
   loadTasks();
 }
-async function tgTask(id){await post('/api/tasks?action=toggle',{id});loadTasks();}
-async function delTask(id){if(!confirm('删除该任务？'))return;await post('/api/tasks?action=delete',{id});loadTasks();}
+async function tgTask(id){await post('api/tasks?action=toggle',{id});loadTasks();}
+async function delTask(id){if(!confirm('删除该任务？'))return;await post('api/tasks?action=delete',{id});loadTasks();}
 async function runTask(id){
-  const r=await post('/api/tasks?action=run',{id});
+  const r=await post('api/tasks?action=run',{id});
   const x=r.result||{};
   toast(x.message||r.message||'已执行',x.ok?'ok':'err');
   loadTasks();
@@ -1348,7 +1348,7 @@ async function runTask(id){
 
 // ---------------------------------------------------------------- 用量
 async function loadUsage(){
-  const r=await api('/api/usage?range=all');
+  const r=await api('api/usage?range=all');
   S.data.usage=r;
   render();
 }
@@ -1429,6 +1429,7 @@ function viewPanelUsage(p){
   const byModel=Object.entries(p.by_model||{}).sort((a,b)=>b[1].n-a[1].n).slice(0,20);
   const byPlat=Object.entries(p.by_platform||{}).sort((a,b)=>b[1].n-a[1].n);
   const days=p.days||[];
+  const recent=p.recent||[];
   return `
   <div class="card">
     <h2>面板原生直连用量 <span class="faint" style="font-size:11.5px">（auto 路由 / 免密车道 / @平台 直连；保留 90 天）</span></h2>
@@ -1466,6 +1467,17 @@ function viewPanelUsage(p){
         <td>${nraw(d.success)}</td><td>${d.failed?'<span class="tag warn">'+d.failed+'</span>':'0'}</td>
         <td>${nraw(d.tokensIn)}</td><td>${nraw(d.tokensOut)}</td></tr>`).join('')}
       </tbody></table></div>`:''}
+    ${recent.length?`<div class="scroll sm mt"><h3 style="margin-bottom:8px">最近调用记录（前 20 条）</h3>
+      <table><thead><tr><th>时间</th><th>平台</th><th>模型</th><th>IP</th><th>UA</th><th>状态</th></tr></thead><tbody>
+      ${recent.map(x=>`<tr>
+        <td class="mono nowrap">${esc(new Date(x.ts*1000).toLocaleString())}</td>
+        <td class="mono">${esc(x.platform||'-')}</td>
+        <td class="mono" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.model||'-')}</td>
+        <td class="mono">${esc(x.ip||'-')}</td>
+        <td class="mono" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(x.ua||'')}">${esc((x.ua||'').substring(0,30))}</td>
+        <td>${x.ok?'<span class="tag ok">成功</span>':'<span class="tag warn">失败</span>'}</td>
+      </tr>`).join('')}
+      </tbody></table></div>`:''}
   </div>`;
 }
 function chart(pts){
@@ -1495,7 +1507,7 @@ function chart(pts){
 // ---------------------------------------------------------------- 模型
 /** 模型总表数据（按来源分组，含每模型连接测试） */
 async function loadModels(){
-  const g=await api('/api/models?action=grouped').catch(()=>null);
+  const g=await api('api/models?action=grouped').catch(()=>null);
   S.data.grouped=g;
   render();
 }
@@ -1558,7 +1570,7 @@ async function gmTest(btn,id){
   GM_TEST[id]={state:'loading'};
   const cell=btn.closest('td');
   if(cell)cell.innerHTML=gmTestCell(id);
-  const r=await api('/api/models?action=test_model',{model:id})
+  const r=await api('api/models?action=test_model',{model:id})
     .catch(e=>({ok:false,message:e.message}));
   // 后端把测试结果平铺在顶层：{ok:是否连通, latency_ms, via, reply, error}
   // （ok() 包装后的 "ok" 键被结果本身的 ok=okk 覆盖——正是设计意图）
@@ -1701,7 +1713,7 @@ function viewModels(){
 
 // ---------------------------------------------------------------- 站点
 async function loadSites(){
-  const r=await api('/api/sites');
+  const r=await api('api/sites');
   S.data.sites=r.sites||[];
   S.data.catalogSites=r.catalog||[];
   render();
@@ -1755,7 +1767,7 @@ function viewSites(){
       <div><label>密码（可选）</label><input id="sP2" type="password"></div>
     </div>
     <div class="row">
-      <div><label>签到路径</label><input id="sPath" value="/api/user/checkin"></div>
+      <div><label>签到路径</label><input id="sPath" value="api/user/checkin"></div>
       <div class="n" style="flex:0 0 auto"><label>&nbsp;</label>
         <button class="btn" onclick="clearForm()">清空</button></div>
       <div class="n" style="flex:0 0 auto"><label>&nbsp;</label>
@@ -1811,7 +1823,7 @@ async function saveSite(){
     cookie:$('#sCookie').value.trim(),
     username:$('#sU2').value.trim(),
     password:$('#sP2').value,
-    checkin_path:$('#sPath').value.trim()||'/api/user/checkin',
+    checkin_path:$('#sPath').value.trim()||'api/user/checkin',
     checkin:true,
     in_route:$('#sRoute').checked,
     route_endpoint:$('#sRep').value.trim(),
@@ -1820,13 +1832,13 @@ async function saveSite(){
     route_priority:parseInt($('#sRPriority').value||'10',10),
   };
   if(!s.name||!s.url)return toast('名称与地址必填','err');
-  const r=await post('/api/sites?action='+(s.id?'update':'add'),s);
+  const r=await post('api/sites?action='+(s.id?'update':'add'),s);
   toast(r.message||'已保存',r.ok?'ok':'err');
   clearForm();loadSites();
 }
 function clearForm(){
   ['sId','sName','sUrl','sToken','sUser','sCookie','sU2','sP2','sRep','sRModel'].forEach(i=>$('#'+i).value='');
-  $('#sPath').value='/api/user/checkin';
+  $('#sPath').value='api/user/checkin';
   $('#sRoute').checked=false;
   $('#sRWeight').value='100';
   $('#sRPriority').value='10';
@@ -1837,7 +1849,7 @@ function editSite(id){
   $('#sId').value=s.id;$('#sName').value=s.name||'';$('#sUrl').value=s.url||'';
   $('#sToken').value=s.token||'';$('#sUser').value=s.api_user||'';
   $('#sCookie').value=s.cookie||'';$('#sU2').value=s.username||'';$('#sP2').value=s.password||'';
-  $('#sPath').value=s.checkin_path||'/api/user/checkin';
+  $('#sPath').value=s.checkin_path||'api/user/checkin';
   $('#sRoute').checked=!!s.in_route;
   $('#sRep').value=s.route_endpoint||'';
   $('#sRModel').value=s.route_model||'';
@@ -1847,26 +1859,26 @@ function editSite(id){
 }
 async function delSite(id){
   if(!confirm('删除该站点配置？'))return;
-  const r=await post('/api/sites?action=delete',{id});
+  const r=await post('api/sites?action=delete',{id});
   toast(r.message||'已删除',r.ok?'ok':'err');
   loadSites();
 }
 async function probeOne(id){
   S.data.probeOut='探测中…';
   render();
-  const r=await post('/api/sites?action=probe',{id});
+  const r=await post('api/sites?action=probe',{id});
   S.data.probeOut=JSON.stringify(r.probe||r,null,2);
   render();
 }
 async function probeAll(){
   S.data.probeOut='批量探测中，请稍候…';render();
-  const r=await post('/api/sites?action=probe_all',{});
+  const r=await post('api/sites?action=probe_all',{});
   S.data.probeOut=JSON.stringify(r.results||r,null,2);
   render();
 }
 async function balAll(){
   S.data.probeOut='查询余额中…';render();
-  const r=await post('/api/sites?action=balance_all',{});
+  const r=await post('api/sites?action=balance_all',{});
   S.data.probeOut=JSON.stringify(r.results||r,null,2);
   render();
 }
@@ -1874,17 +1886,17 @@ async function importCatalog(){
   const cat=S.data.catalogSites||[];
   const payload=cat.map(s=>({
     name:s.name,url:s.url,token:'',cookie:'',username:'',password:'',
-    checkin:!!s.checkin,checkin_path:s.name==='AnyRouter'?'/api/user/sign_in':'/api/user/checkin',
+    checkin:!!s.checkin,checkin_path:s.name==='AnyRouter'?'api/user/sign_in':'api/user/checkin',
     category:s.category,bonus:s.bonus,limit:s.limit,
   }));
-  const r=await post('/api/sites?action=import',{sites:payload});
+  const r=await post('api/sites?action=import',{sites:payload});
   toast('已导入 '+r.imported+' 个站点，请逐个补凭据',r.ok?'ok':'err');
   loadSites();
 }
 
 // ---------------------------------------------------------------- 导航
 async function loadCatalog(){
-  const r=await api('/api/catalog');
+  const r=await api('api/catalog');
   S.data.catalog=r;
   render();
 }
@@ -2078,7 +2090,7 @@ function viewRoute0(){
 '}',
 '',
 '# 3) curl 实测',
-'curl '+location.origin+'/v1/chat/completions \\',
+'curl '+location.origin+'v1/chat/completions \\',
 '  -H "Content-Type: application/json" \\',
 '  -d \'{"model":"auto","messages":[{"role":"user","content":"ping"}]}\'',
 '',
@@ -2091,7 +2103,7 @@ function strategyLabel(s){
 }
 async function probeRoute(){
   toast('探测中，各上游并发测 /models…');
-  const r=await post('/api/route?action=probe',{});
+  const r=await post('api/route?action=probe',{});
   S.data.routeOut=JSON.stringify(r.results||r,null,2);
   S.data.route=r;
   render();
@@ -2100,7 +2112,7 @@ async function probeRoute(){
 async function testRoute(model){
   S.data.routeOut='试跑 '+model+' …';
   render();
-  const r=await post('/api/route?action=test_chat',{model,message:'ping'});
+  const r=await post('api/route?action=test_chat',{model,message:'ping'});
   S.data.routeOut=JSON.stringify(r,null,2);
   S.data.route=r;
   render();
@@ -2112,7 +2124,7 @@ async function testRoute(model){
 // ---------------------------------------------------------------- 上游档案
 // ---------------------------------------------------------------- 通知
 async function loadNotify(){
-  const r=await api('/api/notify');
+  const r=await api('api/notify');
   S.data.notify=r;
   render();
 }
@@ -2175,40 +2187,40 @@ function viewNotify(){
   </div>`;
 }
 async function saveNotifyFlags(){
-  await api('/api/notify?action=send',{event:'checkin',title:'开关已更新',body:'通知开关修改已保存'});
-  const r=await fetch('/api/notify');
+  await api('api/notify?action=send',{event:'checkin',title:'开关已更新',body:'通知开关修改已保存'});
+  const r=await fetch('api/notify');
   const j=await r.json();
   const cfg=j.notify;
   cfg.notify_checkin=$('#nCheck').checked;
   cfg.notify_quota=$('#nQuota').checked;
   cfg.notify_error=$('#nErr').checked;
-  await post('/api/notify?action=__noop',{});
+  await post('api/notify?action=__noop',{});
   // 直接覆盖保存
-  await api('/api/notify?action=save_flags',{notify:cfg});
+  await api('api/notify?action=save_flags',{notify:cfg});
   toast('已保存','ok');
 }
 async function addHook(){
   const h={type:$('#wType').value,name:$('#wName').value.trim(),url:$('#wUrl').value.trim(),enabled:true,events:[]};
   if(!h.url)return toast('地址必填','err');
-  const r=await post('/api/notify?action=add',h);
+  const r=await post('api/notify?action=add',h);
   toast(r.message||'已添加',r.ok?'ok':'err');
   loadNotify();
 }
 async function delHook(i){
   if(!confirm('删除该 Webhook？'))return;
-  await post('/api/notify?action=delete',{index:i});
+  await post('api/notify?action=delete',{index:i});
   loadNotify();
 }
 async function testHook(){
   const h={type:$('#wType').value,url:$('#wUrl').value.trim()};
-  const r=await post('/api/notify?action=test',h);
+  const r=await post('api/notify?action=test',h);
   toast((r.sent?'发送成功：':'失败：')+r.message,r.sent?'ok':'err');
   loadNotify();
 }
 
 // ---------------------------------------------------------------- 日志
 async function loadLogs(){
-  const r=await api('/api/logs');
+  const r=await api('api/logs');
   S.data.logs=r;
   render();
 }
@@ -2245,10 +2257,10 @@ let SET_TAB = "main";
 async function loadSettings(){
   // 设置页现在是 Tab 容器，数据一次性拉齐
   await Promise.all([
-    api('/api/settings').catch(()=>({settings:{}})),
-    api('/api/sites').catch(()=>({sites:[],catalog:[]})),
-    api('/api/notify').catch(()=>({config:{}})),
-    api('/api/logs').catch(()=>({lines:[]})),
+    api('api/settings').catch(()=>({settings:{}})),
+    api('api/sites').catch(()=>({sites:[],catalog:[]})),
+    api('api/notify').catch(()=>({config:{}})),
+    api('api/logs').catch(()=>({lines:[]})),
   ]);
 }
 
@@ -2335,7 +2347,7 @@ async function saveSettings(){
     auto_growth:$('#sAG').checked,
     lobster_server:$('#sLob').value.trim(),
   };
-  const r=await post('/api/settings?action=save',p);
+  const r=await post('api/settings?action=save',p);
   toast(r.message||'已保存',r.ok?'ok':'err');
   refresh();loadSettings();
 }
@@ -2343,7 +2355,7 @@ async function saveSettings(){
 // ---------------------------------------------------------------- 通用
 async function quitPanel(){
   if(!confirm('退出面板？\n\n· 面板会关闭，http 服务停止\n· 想后台常驻请用「开机自启动」'))return;
-  const r=await post('/api/settings?action=shutdown',{});
+  const r=await post('api/settings?action=shutdown',{});
   toast(r.ok?'已退出面板':'退出失败：'+(r.message||''),r.ok?'ok':'err');
   if(r.ok){
     setTimeout(()=>{
@@ -2366,10 +2378,10 @@ function stopLoginPoll(){
 }
 
 async function loadLogin(){
-  const lp=await api('/api/login?action=platforms').catch(()=>({platforms:[]}));
-  const ac=await api('/api/accounts').catch(()=>({accounts:[],stats:{}}));
-  const pa=await api('/api/platform?action=actions').catch(()=>({}));
-  const bd=await api('/api/login?action=browser').catch(()=>({browser:null}));
+  const lp=await api('api/login?action=platforms').catch(()=>({platforms:[]}));
+  const ac=await api('api/accounts').catch(()=>({accounts:[],stats:{}}));
+  const pa=await api('api/platform?action=actions').catch(()=>({}));
+  const bd=await api('api/login?action=browser').catch(()=>({browser:null}));
   S.data.loginPlatforms=lp.platforms||[];
   S.data.accounts=ac.accounts||[];
   S.data.accountStats=ac.stats||{};
@@ -2385,7 +2397,7 @@ async function startLogin(pid,edition,headless){
   const body={platform:pid};
   if(edition)body.edition=edition;
   if(headless)body.headless=1;
-  const r=await api('/api/login?action=start',body).catch(e=>({ok:false,message:e.message}));
+  const r=await api('api/login?action=start',body).catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'发起登录失败','err');return;}
   S.data.loginSession=r.session||null;
   render();
@@ -2398,7 +2410,7 @@ async function startLogin(pid,edition,headless){
 // 服务端远程扫码（无需本机浏览器）：直接打平台 Web 二维码接口
 async function startQrScan(pid){
   toast('正在生成远程二维码…');
-  const r=await api('/api/login?action=qrscan',{platform:pid}).catch(e=>({ok:false,message:e.message}));
+  const r=await api('api/login?action=qrscan',{platform:pid}).catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'发起远程扫码失败','err');return;}
   S.data.loginSession=r.session||null;
   render();
@@ -2411,7 +2423,7 @@ function startLoginPoll(){
   LOGIN_TIMER=setInterval(async()=>{
     const s=S.data.loginSession;
     if(!s){stopLoginPoll();return;}
-    const r=await api('/api/login?action=poll',{id:s.id}).catch(()=>null);
+    const r=await api('api/login?action=poll',{id:s.id}).catch(()=>null);
     if(!r||!r.session){stopLoginPoll();return;}
     S.data.loginSession=r.session;
     paintLoginSession();
@@ -2478,7 +2490,7 @@ function loginStatusTag(s){
 async function cancelLogin(){
   const s=S.data.loginSession;
   stopLoginPoll();
-  if(s)await api('/api/login?action=cancel',{id:s.id}).catch(()=>null);
+  if(s)await api('api/login?action=cancel',{id:s.id}).catch(()=>null);
   S.data.loginSession=null;
   render();
 }
@@ -2486,7 +2498,7 @@ async function cancelLogin(){
 async function pollCookieOnce(){
   const s=S.data.loginSession;
   if(!s){toast('没有进行中的会话','err');return;}
-  const r=await api('/api/login?action=poll',{id:s.id}).catch(e=>({ok:false,message:e.message}));
+  const r=await api('api/login?action=poll',{id:s.id}).catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'读取失败','err');return;}
   S.data.loginSession=r.session;
   paintLoginSession();
@@ -2505,8 +2517,26 @@ async function submitManualCookie(){
   if(!v){toast('请先粘贴 Cookie','err');return;}
   const pid=s?s.platform:(($('#manualPlatform')||{}).value||'');
   if(!pid){toast('缺少平台','err');return;}
-  const r=await api('/api/login?action=submit',
+  const r=await api('api/login?action=submit',
     {id:s?s.id:undefined,platform:pid,cookie:v}).catch(e=>({ok:false,message:e.message}));
+  if(r.ok===false){toast(r.message||'保存失败','err');return;}
+  if(r.session){
+    S.data.loginSession=r.session;
+    paintLoginSession();
+    if(r.session.status==='success'){toast('已保存','ok');loadLogin();}
+    else toast(r.session.message||r.session.error||'未通过校验','warn');
+  }else{toast('已保存','ok');loadLogin();}
+}
+
+async function submitManualSecret(){
+  const s=S.data.loginSession;
+  const box=$('#manualSecret');
+  const v=box?box.value.trim():'';
+  if(!v){toast('请先粘贴凭据内容','err');return;}
+  const pid=s?s.platform:'';
+  if(!pid){toast('缺少平台','err');return;}
+  const r=await api('api/login?action=submit',
+    {id:s?s.id:undefined,platform:pid,secret:v}).catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'保存失败','err');return;}
   if(r.session){
     S.data.loginSession=r.session;
@@ -2518,14 +2548,14 @@ async function submitManualCookie(){
 
 async function delAccount(id){
   if(!confirm('确认删除该账号凭据？'))return;
-  const r=await api('/api/accounts?action=delete',{id:id}).catch(e=>({ok:false}));
+  const r=await api('api/accounts?action=delete',{id:id}).catch(e=>({ok:false}));
   if(r.ok===false){toast('删除失败','err');return;}
   toast('已删除','ok');
   loadLogin();
 }
 
 async function toggleAccount(id,on){
-  await api('/api/accounts?action=update',{id:id,enabled:on}).catch(()=>null);
+  await api('api/accounts?action=update',{id:id,enabled:on}).catch(()=>null);
   loadLogin();
 }
 
@@ -2540,7 +2570,7 @@ async function runPlatformAction(pid,act,need){
     }
   }
   toast('正在调用 '+act+' …');
-  const r=await api('/api/platform?action=call',{platform:pid,action:act,params:params})
+  const r=await api('api/platform?action=call',{platform:pid,action:act,params:params})
     .catch(e=>({ok:false,message:e.message}));
   const box=$('#paResult');
   if(box)box.textContent=JSON.stringify(r.result||r,null,2);
@@ -2550,7 +2580,7 @@ async function runPlatformAction(pid,act,need){
 
 async function platformCheckin(pid){
   toast('正在签到…');
-  const r=await api('/api/platform?action=checkin',{platform:pid})
+  const r=await api('api/platform?action=checkin',{platform:pid})
     .catch(e=>({ok:false,message:e.message}));
   const box=$('#paResult');
   if(box)box.textContent=JSON.stringify(r.result||r,null,2);
@@ -2560,7 +2590,7 @@ async function platformCheckin(pid){
 
 async function platformProbe(pid){
   toast('正在扫描 '+pid+' 的真实端点…（整站鉴权的平台需要先存凭据）');
-  const r=await api('/api/platform?action=probe',{platform:pid})
+  const r=await api('api/platform?action=probe',{platform:pid})
     .catch(e=>({ok:false,message:e.message}));
   S.data.probeResult=r;
   if(r.ok===false){
@@ -2620,7 +2650,7 @@ const TC = { messages: [], enabled: {}, result: null, execLog: [] };
  * 用户不必手动装服务、改 YAML、敲命令行。
  */
 function loadLocalproxy(){
-  api('/api/localproxy?action=status').then(r=>{
+  api('api/localproxy?action=status').then(r=>{
     S.data.lp=r;
     render();
   }).catch(e=>toast('读取本地上游状态失败：'+e.message,'err'));
@@ -2628,7 +2658,7 @@ function loadLocalproxy(){
 async function lpAct(action, body){
   const label={start:'启动',stop:'停止',restart:'重启',config:'保存配置',login:'登录'}[action]||action;
   toast(label+'中…');
-  const r=await api('/api/localproxy?action='+action, body||{})
+  const r=await api('api/localproxy?action='+action, body||{})
     .catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||label+'失败','err');return r;}
   if(action==='login'){
@@ -2757,7 +2787,7 @@ function viewLocalproxy(){
   return h;
 }
 async function lpShowLog(){
-  const r=await api('/api/localproxy?action=log',{lines:120}).catch(e=>({ok:false}));
+  const r=await api('api/localproxy?action=log',{lines:120}).catch(e=>({ok:false}));
   S.data.lpLog=(r&&r.log)||'';
   render();
 }
@@ -2771,11 +2801,11 @@ let ACC_TAB = 'login';
 
 function loadAccount(){
   Promise.all([
-    api('/api/login?action=platforms').catch(()=>({platforms:[]})),
-    api('/api/accounts').catch(()=>({accounts:[],stats:{}})),
-    api('/api/platform?action=actions').catch(()=>({})),
-    api('/api/autocheckin?action=status').catch(()=>({platforms:[]})),
-    api('/api/login?action=browser').catch(()=>({browser:null})),
+    api('api/login?action=platforms').catch(()=>({platforms:[]})),
+    api('api/accounts').catch(()=>({accounts:[],stats:{}})),
+    api('api/platform?action=actions').catch(()=>({})),
+    api('api/autocheckin?action=status').catch(()=>({platforms:[]})),
+    api('api/login?action=browser').catch(()=>({browser:null})),
   ]).then(([lp,ac,pa,au,bd])=>{
     S.data.loginPlatforms=lp.platforms||[];
     S.data.accounts=ac.accounts||[];
@@ -2961,7 +2991,7 @@ async function oneClick(){
 
   step('准备','检查网关与凭据…');
   // 1) 自动签到（所有勾选且已登录的平台）
-  const r1=await api('/api/autocheckin?action=run',{}).catch(e=>({ok:false,message:e.message}));
+  const r1=await api('api/autocheckin?action=run',{}).catch(e=>({ok:false,message:e.message}));
   if(r1&&r1.finished){
     const res=r1.results||[];
     const ok=res.filter(x=>x.ok).length;
@@ -2975,7 +3005,7 @@ async function oneClick(){
   }
   // 2) 任务中心里到期的任务
   step('任务','检查待执行任务…');
-  const r2=await api('/api/tasks?action=run_all',{}).catch(()=>({ok:false}));
+  const r2=await api('api/tasks?action=run_all',{}).catch(()=>({ok:false}));
   if(r2&&r2.ok!==false){
     const rs=r2.results||[];
     step('任务',rs.length?('执行 '+rs.filter(x=>x.ok).length+' / '+rs.length):'没有到期的任务');
@@ -3006,7 +3036,7 @@ function viewOneClick(){
 
 /* ================================================================ 定时自动签到 */
 function loadAutocheckin(){
-  api('/api/autocheckin?action=status').then(r=>{
+  api('api/autocheckin?action=status').then(r=>{
     S.data.autoCheckin=r;
     render();
   }).catch(e=>toast('加载自动签到配置失败：'+e.message,'err'));
@@ -3025,7 +3055,7 @@ async function acSave(){
     retry_delay_min:st.retry_delay_min, notify:!!st.notify,
     platforms:pls,
   };
-  const r=await api('/api/autocheckin?action=save',b).catch(e=>({ok:false,message:e.message}));
+  const r=await api('api/autocheckin?action=save',b).catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'保存失败','err');return;}
   S.data.autoCheckin=r;
   toast('已保存','ok'); render();
@@ -3033,7 +3063,7 @@ async function acSave(){
 
 async function acRun(force){
   toast(force?'立即执行全部平台（忽略今天已跑）':'开始执行一轮…');
-  const r=await api('/api/autocheckin?action=run',{force:!!force})
+  const r=await api('api/autocheckin?action=run',{force:!!force})
     .catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'执行失败','err');return;}
   toast('已触发，结果稍后刷新','ok');
@@ -3044,7 +3074,7 @@ async function acRun(force){
 
 async function acRunOne(platform){
   toast('正在执行 '+platform+' …');
-  const r=await api('/api/autocheckin?action=run',{platforms:[platform],force:true})
+  const r=await api('api/autocheckin?action=run',{platforms:[platform],force:true})
     .catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'失败','err');return;}
   toast('已触发','ok');
@@ -3052,7 +3082,7 @@ async function acRunOne(platform){
 }
 
 function loadToolcall(){
-  api('/api/toolcall?action=list').then(r=>{
+  api('api/toolcall?action=list').then(r=>{
     S.data.toolList=r.tools||[];
     S.data.toolNames=r.names||[];
     if(!Object.keys(TC.enabled).length){
@@ -3073,7 +3103,7 @@ async function tcSend(){
   TC.execLog=[]; TC.result=null;
   render();
   toast('正在请求（带 '+names.length+' 个工具）…');
-  const r=await api('/api/toolcall?action=chat',{
+  const r=await api('api/toolcall?action=chat',{
     messages:TC.messages, names:names,
     tool_choice:($('#tcChoice')||{}).value||''
   }).catch(e=>({ok:false,message:e.message}));
@@ -3091,7 +3121,7 @@ async function tcExec(){
   const tcs=(TC.result&&TC.result.tool_calls)||[];
   if(!tcs.length){toast('没有待执行的 tool_calls','err');return;}
   toast('本地执行 '+tcs.length+' 个工具…');
-  const r=await api('/api/toolcall?action=exec',{tool_calls:tcs})
+  const r=await api('api/toolcall?action=exec',{tool_calls:tcs})
     .catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'执行失败','err');return;}
   TC.execLog=r.results||[];
@@ -3104,7 +3134,7 @@ async function tcContinue(){
   if(!TC.messages.length){toast('先发一次请求','err');return;}
   const names=Object.keys(TC.enabled).filter(k=>TC.enabled[k]);
   toast('把工具结果回传给模型…');
-  const r=await api('/api/toolcall?action=chat',{
+  const r=await api('api/toolcall?action=chat',{
     messages:TC.messages, names:names
   }).catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'失败','err');return;}
@@ -3301,6 +3331,14 @@ function viewLoginSession(onlyPid){
         +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
         +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualCookie()">提交 Cookie</button></div>';
     }
+    if(sess.method==='file'){
+      const ph=(S.data.loginPlatforms||[]).find(p=>p.id===sess.platform);
+      const placeholder=(ph&&ph.placeholder)||'粘贴 API Key 或 refresh_token';
+      h+='<div style="margin-top:12px">'
+        +'<textarea id="manualSecret" rows="4" placeholder="'+esc(placeholder)+'" '
+        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
+        +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualSecret()">提交凭据</button></div>';
+    }
     h+='</div></div>';
   }else{
     h+='<div class="note">当前没有进行中的登录。去「登录与凭据」选一个平台点「去登录」。</div>';
@@ -3402,6 +3440,14 @@ function viewLogin(){
         +'<textarea id="manualCookie" rows="3" placeholder="粘贴 Cookie，例如 sessionid=xxx; passport_csrf_token=yyy" '
         +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
         +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualCookie()">提交 Cookie</button></div>';
+    }
+    if(sess.method==='file'){
+      const ph=(S.data.loginPlatforms||[]).find(p=>p.id===sess.platform);
+      const placeholder=(ph&&ph.placeholder)||'粘贴 API Key 或 refresh_token';
+      h+='<div style="margin-top:12px">'
+        +'<textarea id="manualSecret" rows="4" placeholder="'+esc(placeholder)+'" '
+        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
+        +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualSecret()">提交凭据</button></div>';
     }
     h+='</div></div>';
   }
@@ -3538,7 +3584,7 @@ window.addEventListener('DOMContentLoaded',()=>{
   const h=(location.hash||'').replace('#','');
   refresh().then(()=>{
     // 预取签到中心依赖的站点列表
-    api('/api/sites').then(r=>{S.data.sites=r.sites||[];S.data.catalogSites=r.catalog||[];});
+    api('api/sites').then(r=>{S.data.sites=r.sites||[];S.data.catalogSites=r.catalog||[];});
     // 默认着陆（无 hash）也要拉数据；带 hash 且是合法视图则直达
     const target=TITLES[h]?h:'sources';
     const b=$(`.navbtn[data-v="${target}"]`);
@@ -3548,7 +3594,7 @@ window.addEventListener('DOMContentLoaded',()=>{
   // 后台轮询总览
   setInterval(()=>{
     if(document.hidden)return;
-    api('/api/overview').then(o=>{S.data.overview=o;$('#stl').textContent=
+    api('api/overview').then(o=>{S.data.overview=o;$('#stl').textContent=
       '面板原生模式 · 账号池 '+(S.data.accounts||[]).length+' 个'+
       ' · 面板已运行 '+dur(o.uptime);}).catch(()=>{});
   },15000);

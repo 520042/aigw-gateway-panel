@@ -519,6 +519,180 @@ ACTIONS["web-lobster"] = [
      "note": "Bearer accessToken；credits 在这里"},
 ]
 
+# ---------------------------------------------------------------- WorkBuddy 国内站（CodeBuddy 同一账号）
+# 2026-10-08 整理：用户确认 CodeBuddy 与 WorkBuddy 是同一个账号体系，
+# 合并为「国内站 / 国际站」两个入口，去掉 apk-codebuddy / apk-codebuddy-cn 重复项。
+ACTIONS["wb-gateway"] = [
+    # ---- 基础 ----
+    {"id": "models", "name": "模型目录", "method": "GET",
+     "path": "/console/enterprises/personal/models",
+     "base": "https://copilot.tencent.com", "verified": True},
+    {"id": "checkin", "name": "每日签到", "method": "POST",
+     "path": "/v2/billing/meter/daily-checkin",
+     "base": "https://copilot.tencent.com", "verified": True},
+    {"id": "points_balance", "name": "积分余额", "method": "POST",
+     "path": "/v2/billing/meter/get-user-resource",
+     "base": "https://copilot.tencent.com", "verified": True},
+    {"id": "usage_summary", "name": "用量摘要", "method": "GET",
+     "path": "/billing/meter/get-user-resource-summary",
+     "base": "https://copilot.tencent.com"},
+    {"id": "auth_refresh", "name": "刷新 token", "method": "POST",
+     "path": "/v2/plugin/auth/token/refresh",
+     "base": "https://copilot.tencent.com", "verified": True,
+     "header_token": "X-Refresh-Token", "need": ["refreshToken"]},
+
+    # ---- 成长任务 ----
+    {"id": "growth_tasks", "name": "成长任务列表", "method": "GET",
+     "path": "/activity/growth/tasks",
+     "base": "https://copilot.tencent.com", "verified": True,
+     "note": "拉取所有成长任务及完成进度"},
+    {"id": "growth_task_accept", "name": "接受任务", "method": "POST",
+     "path": "/activity/growth/tasks/accept",
+     "base": "https://copilot.tencent.com", "need": ["task_codes"],
+     "note": "批量接受任务（task_codes 是数组）"},
+    {"id": "growth_task_claim", "name": "领取任务奖励", "method": "POST",
+     "path": "/activity/growth/tasks/{task_code}/claim",
+     "base": "https://www.workbuddy.cn",
+     "note": "领奖走 Web 域 www.workbuddy.cn，不是 CLI 域"},
+    {"id": "active_report", "name": "对话活跃上报", "method": "POST",
+     "path": "/report",
+     "base": "https://copilot.tencent.com",
+     "note": "chat_request_send 事件上报，点亮连登 + 解锁 first_buddy"},
+
+    # ---- 猫猫旅行 ----
+    {"id": "buddy_info", "name": "猫猫档案", "method": "GET",
+     "path": "/activity/growth/buddy/info",
+     "base": "https://copilot.tencent.com"},
+    {"id": "buddy_agreement", "name": "同意领养协议", "method": "POST",
+     "path": "/activity/growth/buddy/agreement",
+     "base": "https://copilot.tencent.com"},
+    {"id": "buddy_adopt", "name": "领养第一只 Buddy", "method": "POST",
+     "path": "/activity/growth/buddy/first",
+     "base": "https://copilot.tencent.com"},
+    {"id": "travel_status", "name": "旅行状态", "method": "GET",
+     "path": "/activity/growth/buddy/travel/status",
+     "base": "https://copilot.tencent.com"},
+    {"id": "travel_depart", "name": "派出旅行", "method": "POST",
+     "path": "/activity/growth/buddy/travel/depart",
+     "base": "https://copilot.tencent.com"},
+    {"id": "travel_claim", "name": "领取旅行奖励", "method": "POST",
+     "path": "/activity/growth/buddy/travel/claim",
+     "base": "https://copilot.tencent.com"},
+
+    # ---- 连登 & 抽奖 ----
+    {"id": "streak_status", "name": "连登状态", "method": "GET",
+     "path": "/activity/growth/streak",
+     "base": "https://copilot.tencent.com",
+     "note": "连续登录天数 + 各档位解锁状态"},
+    {"id": "streak_redeem", "name": "兑换连登档位", "method": "POST",
+     "path": "/activity/growth/redeem",
+     "base": "https://copilot.tencent.com", "need": ["tier"],
+     "note": "兑换已解锁的连登档位奖励"},
+    {"id": "lottery_summary", "name": "抽奖次数", "method": "GET",
+     "path": "/activity/growth/lottery/summary",
+     "base": "https://copilot.tencent.com"},
+    {"id": "lottery_draw", "name": "抽奖一次", "method": "POST",
+     "path": "/activity/growth/lottery/draw",
+     "base": "https://copilot.tencent.com"},
+]
+
+# ---------------------------------------------------------------- WorkBuddy 国际站
+ACTIONS["wb-gateway-intl"] = [
+    # ---- 基础 ----
+    {"id": "models", "name": "模型目录", "method": "GET",
+     "path": "/console/enterprises/personal/models",
+     "base": "https://www.codebuddy.ai", "verified": True},
+    {"id": "checkin", "name": "每日签到", "method": "POST",
+     "path": "/v2/billing/meter/daily-checkin",
+     "base": "https://www.codebuddy.ai", "verified": True},
+    {"id": "points_balance", "name": "积分余额", "method": "POST",
+     "path": "/v2/billing/meter/get-user-resource",
+     "base": "https://www.codebuddy.ai", "verified": True},
+    {"id": "usage_summary", "name": "用量摘要", "method": "GET",
+     "path": "/billing/meter/get-user-resource-summary",
+     "base": "https://www.codebuddy.ai"},
+    {"id": "auth_refresh", "name": "刷新 token", "method": "POST",
+     "path": "/v2/plugin/auth/token/refresh",
+     "base": "https://www.codebuddy.ai", "verified": True,
+     "header_token": "X-Refresh-Token", "need": ["refreshToken"]},
+
+    # ---- 成长任务 ----
+    {"id": "growth_tasks", "name": "成长任务列表", "method": "GET",
+     "path": "/activity/growth/tasks",
+     "base": "https://www.codebuddy.ai",
+     "note": "拉取所有成长任务及完成进度"},
+    {"id": "growth_task_accept", "name": "接受任务", "method": "POST",
+     "path": "/activity/growth/tasks/accept",
+     "base": "https://www.codebuddy.ai", "need": ["task_codes"]},
+    {"id": "growth_task_claim", "name": "领取任务奖励", "method": "POST",
+     "path": "/activity/growth/tasks/{task_code}/claim",
+     "base": "https://www.codebuddy.ai"},
+    {"id": "active_report", "name": "对话活跃上报", "method": "POST",
+     "path": "/report",
+     "base": "https://www.codebuddy.ai"},
+
+    # ---- 猫猫旅行 ----
+    {"id": "buddy_info", "name": "猫猫档案", "method": "GET",
+     "path": "/activity/growth/buddy/info",
+     "base": "https://www.codebuddy.ai"},
+    {"id": "buddy_agreement", "name": "同意领养协议", "method": "POST",
+     "path": "/activity/growth/buddy/agreement",
+     "base": "https://www.codebuddy.ai"},
+    {"id": "buddy_adopt", "name": "领养第一只 Buddy", "method": "POST",
+     "path": "/activity/growth/buddy/first",
+     "base": "https://www.codebuddy.ai"},
+    {"id": "travel_status", "name": "旅行状态", "method": "GET",
+     "path": "/activity/growth/buddy/travel/status",
+     "base": "https://www.codebuddy.ai"},
+    {"id": "travel_depart", "name": "派出旅行", "method": "POST",
+     "path": "/activity/growth/buddy/travel/depart",
+     "base": "https://www.codebuddy.ai"},
+    {"id": "travel_claim", "name": "领取旅行奖励", "method": "POST",
+     "path": "/activity/growth/buddy/travel/claim",
+     "base": "https://www.codebuddy.ai"},
+
+    # ---- 连登 & 抽奖 ----
+    {"id": "streak_status", "name": "连登状态", "method": "GET",
+     "path": "/activity/growth/streak",
+     "base": "https://www.codebuddy.ai"},
+    {"id": "streak_redeem", "name": "兑换连登档位", "method": "POST",
+     "path": "/activity/growth/redeem",
+     "base": "https://www.codebuddy.ai", "need": ["tier"]},
+    {"id": "lottery_summary", "name": "抽奖次数", "method": "GET",
+     "path": "/activity/growth/lottery/summary",
+     "base": "https://www.codebuddy.ai"},
+    {"id": "lottery_draw", "name": "抽奖一次", "method": "POST",
+     "path": "/activity/growth/lottery/draw",
+     "base": "https://www.codebuddy.ai"},
+]
+
+# ---------------------------------------------------------------- 智谱清言 web-glm
+# 2026-10-08 新增：逆向自 chatglm.cn 前端 JS（main.d15ba76c.js）
+# 上游：https://chatglm.cn
+# 认证：Bearer access_token（由 chatglm_refresh_token 经 /chatglm/user-api/user/refresh 换取）
+# 注意：member-api 与 payment-api 端点可能需要 Cookie 认证，不是纯 Bearer
+ACTIONS["web-glm"] = [
+    {"id": "score_balance", "name": "积分余额", "method": "GET",
+     "path": "/chatglm/backend-api/v1/score",
+     "note": "查询当前积分余额"},
+    {"id": "daily_login_score", "name": "每日登录领积分", "method": "POST",
+     "path": "/chatglm/member-api/member/daily_login_score",
+     "note": "每日登录赠送积分（需 Cookie 认证，可能返回需登录页面）"},
+    {"id": "score_activity_status", "name": "积分活动状态", "method": "GET",
+     "path": "/chatglm/member-api/member/score_activity_status",
+     "note": "当前积分活动进度（可领多少、剩几天）"},
+    {"id": "score_activity_draw", "name": "领取积分活动奖励", "method": "POST",
+     "path": "/chatglm/member-api/member/score_activity_draw",
+     "note": "积分达标后领取奖励（折扣券等）"},
+    {"id": "score_record", "name": "积分流水", "method": "GET",
+     "path": "/chatglm/member-api/member/score_record",
+     "note": "积分获取/消耗明细"},
+    {"id": "cdkey_exchange", "name": "兑换码兑换", "method": "POST",
+     "path": "/chatglm/payment-api/cdkey/exchange",
+     "need": ["code"],
+     "note": "输入 CDKey 兑换积分/会员"},
+]
+
 # ================================================================ 2026-10-05 全项目复查补齐
 # (1) 官方 API 平台（api-*）：15 家全是 OpenAI 兼容端点，用账号池里的 API Key
 #     调 /models 就能拉实时模型清单。端点真实性已由 2026-10-04 审计证实

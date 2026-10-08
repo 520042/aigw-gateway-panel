@@ -1458,7 +1458,8 @@ def api_models(action=None, body=None):
     return ok(_merge_model_rates(admin, m, v1))
 
 
-def _record_usage(platform, model, tin, tout, secs, ok, upstream=""):
+def _record_usage(platform, model, tin, tout, secs, ok, upstream="",
+                  client_ip="", user_agent=""):
     """面板侧用量记录（保留 90 天 / 5000 条，等价网关 usageRetentionDays）"""
     try:
         store = APP["store"]
@@ -1466,7 +1467,9 @@ def _record_usage(platform, model, tin, tout, secs, ok, upstream=""):
         ev.append({"ts": time.time(), "platform": platform, "model": model,
                    "in": int(tin or 0), "out": int(tout or 0),
                    "ms": int((secs or 0) * 1000), "ok": bool(ok),
-                   "upstream": str(upstream or "")[:60]})
+                   "upstream": str(upstream or "")[:60],
+                   "ip": str(client_ip or "")[:40],
+                   "ua": str(user_agent or "")[:80]})
         cutoff = time.time() - 90 * 86400
         store.put("usage_events", [x for x in ev if x.get("ts", 0) >= cutoff][-5000:])
     except Exception:
@@ -2448,6 +2451,12 @@ class Handler(BaseHTTPRequestHandler):
           （端点/头组静态提取自各 APK/EXE 字节码，见 app/native_relay.py）；
         否则透传到本地网关（若在运行）。
         """
+        # 获取客户端 IP 和 UA（参考 newapi 风格）
+        client_ip = self.headers.get("X-Forwarded-For", "").split(",")[0].strip() \
+                    or self.headers.get("X-Real-IP", "") \
+                    or (self.client_address[0] if self.client_address else "")
+        user_agent = self.headers.get("User-Agent", "")
+
         model = (body or {}).get("model") or ""
         router = APP.get("router")
         if router and model in router.list_models():
@@ -2473,7 +2482,8 @@ class Handler(BaseHTTPRequestHandler):
                 str(_rt.get("upstream_id") or "route").replace("native:", ""),
                 model, _tin, _tout,
                 (_rt.get("latency_ms") or 0) / 1000.0,
-                "choices" in result, upstream=_rt.get("upstream", ""))
+                "choices" in result, upstream=_rt.get("upstream", ""),
+                client_ip=client_ip, user_agent=user_agent)
             if result.get("ok") is False and "choices" not in result:
                 self._send(result, 503 if result.get("code") == 503 else 502)
                 return
@@ -2521,7 +2531,8 @@ class Handler(BaseHTTPRequestHandler):
                               (payload.get("usage") or {}).get("prompt_tokens")
                               if okk else 0,
                               (payload.get("usage") or {}).get("completion_tokens")
-                              if okk else 0, time.time() - t0, okk)
+                              if okk else 0, time.time() - t0, okk,
+                              client_ip=client_ip, user_agent=user_agent)
                 if not okk:
                     st = payload.get("status") if isinstance(payload, dict) else 0
                     if st in (401, 403):
@@ -2593,7 +2604,8 @@ class Handler(BaseHTTPRequestHandler):
                     if (body or {}).get("stream"):
                         def _wgen():
                             okk, payload = WR.chat(pid, rbody.get("messages") or [], secret, mid)
-                            _record_usage(pid, mid, 0, 0, 0, okk, upstream=pid)
+                            _record_usage(pid, mid, 0, 0, 0, okk, upstream=pid,
+                                          client_ip=client_ip, user_agent=user_agent)
                             if okk:
                                 txt = (payload.get("choices") or [{}])[0].get("message", {}).get("content", "")
                                 for piece in self._sse_text_chunks(txt, mid):
@@ -2605,7 +2617,8 @@ class Handler(BaseHTTPRequestHandler):
                     _t0 = time.time()
                     okk, payload = WR.chat(pid, rbody.get("messages") or [], secret, mid)
                     _tin, _tout = _usage_from_payload(payload) if okk else (0, 0)
-                    _record_usage(pid, mid, _tin, _tout, time.time() - _t0, okk, upstream=pid)
+                    _record_usage(pid, mid, _tin, _tout, time.time() - _t0, okk, upstream=pid,
+                                  client_ip=client_ip, user_agent=user_agent)
                     if okk:
                         self._send(payload, 200)
                     else:
@@ -2636,7 +2649,8 @@ class Handler(BaseHTTPRequestHandler):
                     okk, payload = NR.relay_once(pid, rbody, "",
                                                  base_override=_lobster_base())
                     _tin, _tout = _usage_from_payload(payload) if okk else (0, 0)
-                    _record_usage(pid, mid, _tin, _tout, time.time() - _t0, okk, upstream=pid)
+                    _record_usage(pid, mid, _tin, _tout, time.time() - _t0, okk, upstream=pid,
+                                  client_ip=client_ip, user_agent=user_agent)
                     self._send(payload if okk else
                                {"ok": False, "code": "relay_failed",
                                 "message": str(payload)[:400]}, 200 if okk else 502)
@@ -2646,10 +2660,12 @@ class Handler(BaseHTTPRequestHandler):
                 okk, payload, _acct = __import__("app.acct_pool", fromlist=["try_accounts"]).try_accounts(acc, pid, _call)
                 if okk:
                     _tin, _tout = _usage_from_payload(payload)
-                    _record_usage(pid, mid, _tin, _tout, time.time() - _t0, True, upstream=pid)
+                    _record_usage(pid, mid, _tin, _tout, time.time() - _t0, True, upstream=pid,
+                                  client_ip=client_ip, user_agent=user_agent)
                     self._send(payload, 200)
                 else:
-                    _record_usage(pid, mid, 0, 0, time.time() - _t0, False, upstream=pid)
+                    _record_usage(pid, mid, 0, 0, time.time() - _t0, False, upstream=pid,
+                                  client_ip=client_ip, user_agent=user_agent)
                     self._send({"ok": False, "code": "relay_failed",
                                 "message": str(payload)[:400],
                                 "relay": NR.relay_stream_meta(pid)}, 502)
@@ -2673,6 +2689,12 @@ class Handler(BaseHTTPRequestHandler):
         其它模型 → 交给 _proxy_chat 的既有链路（路由/中继/EXE），
         最后把 OpenAI 形状转回 Anthropic 形状。非流式。
         """
+        # 获取客户端 IP 和 UA
+        client_ip = self.headers.get("X-Forwarded-For", "").split(",")[0].strip() \
+                    or self.headers.get("X-Real-IP", "") \
+                    or (self.client_address[0] if self.client_address else "")
+        user_agent = self.headers.get("User-Agent", "")
+
         model = (body or {}).get("model") or ""
         msgs_in = (body or {}).get("messages") or []
         system = (body or {}).get("system") or ""
@@ -2736,7 +2758,8 @@ class Handler(BaseHTTPRequestHandler):
             _record_usage("apk-doubao", db_model,
                           (payload.get("usage") or {}).get("prompt_tokens") if okk else 0,
                           (payload.get("usage") or {}).get("completion_tokens") if okk else 0,
-                          time.time() - t0, okk)
+                          time.time() - t0, okk,
+                          client_ip=client_ip, user_agent=user_agent)
             if okk:
                 out = to_anthropic(payload)
                 out["model"] = model

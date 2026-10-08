@@ -99,9 +99,10 @@ PLATFORMS = {
     },
     "web-glm": {
         "name": "智谱清言网页版（glm2api 逆向）",
-        "method": "file",
+        "method": "cookie",
         "hosts": ["chatglm.cn"],
         "login_url": "https://chatglm.cn",
+        "login_click": ["微信扫码登录", "扫码登录"],
         "gateway": False,
         "upstream": "chatglm.cn",
         "placeholder": "粘贴 chatglm_refresh_token（登录 chatglm.cn 后 F12 → Application → Cookies）",
@@ -109,10 +110,14 @@ PLATFORMS = {
         #   上游 https://chatglm.cn/chatglm/backend-api/assistant/stream（SSE），
         #   已实现 X-Sign/X-Timestamp/X-Nonce 签名 + refresh_token→access_token
         #   自动换取（/user-api/user/refresh），不再是 build33 的「推断/必 403」。
-        "hint": "登录 chatglm.cn，F12 拿 chatglm_refresh_token（Cookies）粘这里；"
-                "面板会自动换 access_token 并补签名头。对话 model 写 模型id@web-glm"
+        "hint": "支持微信扫码登录（点开始登录后用手机扫二维码即可）；"
+                "或手动粘贴 chatglm_refresh_token（F12 → Cookies）。"
+                "对话 model 写 模型id@web-glm"
                 "（glm-4-flash / glm-4 / glm-4-plus / glm-4-air / glm-4-all / glm-zero-preview）。",
-        "verify": {"type": "bearer", "ok_keys": ["data", "choices", "id"]},
+        # 扫码登录捕获的是完整Cookie，先离线验活（检查有没有refresh_token），
+        # 保存前自动提取出 refresh_token 转成 bearer 凭据
+        "verify": {"session_markers": ["chatglm_refresh_token"]},
+        "extract_secret_from_cookie": "chatglm_refresh_token",
     },
     "web-trae": {
         "name": "Trae 直连（Trae2api-cn 逆向）",
@@ -171,20 +176,7 @@ PLATFORMS = {
                    "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
                    "ok_keys": ["uid", "nick", "userId"]},
     },
-    "apk-codebuddy": {
-        "name": "CodeBuddy 国际版",
-        "method": "qrcode", "edition": "intl",
-        "gateway": False,
-        "upstream": "www.codebuddy.ai",
-        "hint": "CodeBuddy 国际站账号（OAuthWebActivity 对应的网页授权）",
-        # 2026-10-04 实测：与国内站同一套后端，换 /console/account 验活
-        # （不能用 /v3/config —— 那个免登录就 200，用它验活等于没验）
-        "verify": {"url": "https://copilot.tencent.com/console/account",
-                   "type": "bearer",
-                   "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
-                   "ok_keys": ["uid", "nick", "userId"]},
-        # ✓ 来自 data/verify2.txt（对 www.codebuddy.ai 探测的结果）
-    },
+    # ★ 2026-10-08 整理：apk-codebuddy 已合并到 wb-gateway-intl（同一账号体系）
     "apk-doubao": {
         "name": "豆包 dev.doubao2api",
         "method": "cookie",
@@ -311,23 +303,7 @@ PLATFORMS = {
         "verify": {"url": "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
                    "method": "POST", "type": "bearer"},
     },
-    "apk-codebuddy-cn": {
-        "name": "CodeBuddy 国内站（www.codebuddy.cn）",
-        "method": "qrcode", "edition": "cn",
-        "gateway": False,
-        "upstream": "www.codebuddy.cn",
-        "hint": "CodeBuddy 国内站，与国际站 www.codebuddy.ai 是两套"
-                "（实测国内站的模型目录与积分接口都通）",
-        # ✓ 修正 2026-10-04：之前误判成「域错了/404」，其实是**方法错了**。
-        #   GET  /v2/billing/meter/get-user-resource → 404（路由不匹配 GET）
-        #   POST 同路径                        → 401（存在，要凭据）
-        #   www.codebuddy.cn 和 copilot.tencent.com 两域行为一致，都能用。
-        #   data/verify2.txt 里记的是 GET 才 401，那是当时无凭据的 400/401 混了。
-        "verify": {"url": "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
-                   "type": "bearer", "method": "POST",
-                   "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
-                   "ok_keys": ["Response", "Data", "Accounts"]},
-    },
+    # ★ 2026-10-08 整理：apk-codebuddy-cn 已合并到 wb-gateway（同一账号体系）
     # ==================== 办公 AI / Agent 平台（2026-10-04 调研） ====================
     "apk-coze": {
         "name": "扣子 Coze（api.coze.cn 官方 API）",
@@ -1569,8 +1545,21 @@ class LoginManager:
                 sess.message = ("已检测到凭据但登录校验未通过（%s），"
                                 "请继续完成扫码登录" % info)
             return False
+        # ★ 从 Cookie 中提取指定键作为最终 secret（如 web-glm 需要从完整Cookie
+        #   里抽出 chatglm_refresh_token 单独存，后端 relay 用它换 access_token）
+        extract_key = spec.get("extract_secret_from_cookie")
+        final_secret = cookie
+        final_type = "cookie"
+        account = info
+        if extract_key and cookie:
+            import re as _re
+            m = _re.search(r"(?:^|;\s*)" + re.escape(extract_key) + r"=([^;]+)", cookie)
+            if m:
+                final_secret = m.group(1)
+                final_type = "bearer"
+                account = (account + "（已提取 %s）" % extract_key) if account else extract_key
         sess.finish("success", "登录成功（来源：%s）" % (source or "未知"),
-                    result={"type": "cookie", "secret": cookie, "account": info,
+                    result={"type": final_type, "secret": final_secret, "account": account,
                             "source": source})
         self._save(sess)
         return True
