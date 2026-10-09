@@ -6,10 +6,7 @@
      3. 表格统一 .dt（data table）结构，自带搜索/排序/分页
    ================================================================ */
 
-/* ---------- 子页面 sticky 返回栏 ----------
-   ★ 2026-10-06：用户反馈「返回源列表不醒目、手机端想返回时点不到」。
-   子页面（源详情等）顶部固定一条返回栏：向下滚动时吸附在视口顶部，
-   任何位置都能一眼看到、一键返回；手机端加大点击区。 */
+/* ---------- 子页面 sticky 返回栏 ---------- */
 .backbar{position:sticky;top:0;z-index:40;
   background:var(--panel);border-bottom:1px solid var(--line);
   margin:-20px -24px 14px;padding:10px 24px;
@@ -29,7 +26,7 @@
   --bg:#f4f6f9; --panel:#ffffff; --panel-2:#fafbfc; --panel-3:#f2f4f7;
   --line:#e5e8ec; --line2:#d3d8e0;
   --fg:#1a1d23; --muted:#5f6672; --faint:#98a0ac;
-  --accent:#2f6fed; --acc:var(--accent);          /* --acc 是历史别名，勿删 */
+  --accent:#2f6fed; --acc:var(--accent);
   --accent-soft:#e9f0ff; --accent-line:#c7d9ff;
   --ok:#0f9d58; --ok-soft:#e7f6ee; --ok-line:#bce5ce;
   --warn:#c2740a; --warn-soft:#fdf3e4; --warn-line:#f4dcb4;
@@ -82,10 +79,8 @@ code,.mono{font-family:var(--mono);font-size:12.5px}
 .navbtn.on::before{content:"";position:absolute;left:-10px;top:6px;bottom:6px;width:3px;
   border-radius:0 3px 3px 0;background:var(--accent)}
 .navbtn .ic{width:18px;text-align:center;flex:0 0 auto;font-size:13px}
-/* 侧边栏分组 */
 .navgrp{font-size:11px;color:var(--faint);font-weight:600;letter-spacing:.4px;
   padding:12px 10px 4px;text-transform:uppercase}
-/* 可折叠「高级」分组 */
 .navgrp-toggle{display:flex;align-items:center;justify-content:space-between;cursor:pointer;
   user-select:none}
 .navgrp-toggle:hover{color:var(--muted)}
@@ -105,12 +100,12 @@ h3{font-size:13.5px;margin:0 0 8px;font-weight:650;color:var(--muted)}
 /* ================================ 卡片 ================================ */
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
   padding:var(--s4);box-shadow:var(--shadow);margin-bottom:var(--s4);
-  min-width:0}   /* grid/flex 子项默认 min-width:auto，内容过长会撑破容器造成溢出 */
+  min-width:0;transition:box-shadow .15s ease, border-color .15s ease}
+.card:hover{box-shadow:var(--shadow-lg)}
 .card>.ch{display:flex;align-items:center;justify-content:space-between;gap:10px;
   margin:-2px 0 12px;flex-wrap:wrap;min-width:0}
 .card>.ch b{font-size:14.5px;font-weight:650}
 .grid{display:grid;gap:var(--s3)}
-/* align-items:start 防止等高拉伸时卡片内容被拉散；min-width:0 防止子项撑破 */
 .grid>*{min-width:0;align-self:start}
 .g2{grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
 .g3{grid-template-columns:repeat(auto-fit,minmax(224px,1fr))}
@@ -118,16 +113,15 @@ h3{font-size:13.5px;margin:0 0 8px;font-weight:650;color:var(--muted)}
 .g5{grid-template-columns:repeat(auto-fit,minmax(132px,1fr))}
 
 .kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:13px 15px;
-  box-shadow:var(--shadow)}
+  box-shadow:var(--shadow);transition:transform .15s ease, box-shadow .15s ease}
+.kpi:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg)}
 .kpi .lb{color:var(--muted);font-size:12px;margin-bottom:5px}
-.kpi .vl{font-size:22px;font-weight:680;letter-spacing:-.4px;line-height:1.2}
+.kpi .vl{font-size:22px;font-weight:680;letter-spacing:-.4px;line-height:1.2;
+  background:linear-gradient(135deg, var(--fg), var(--accent));-webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;background-clip:text}
 .kpi .ex{color:var(--faint);font-size:11.5px;margin-top:4px;line-height:1.45}
 
-/* ================================ 接入源 ================================
-   ★ 2026-10-07 用户反馈「接入源那块排布很不整齐，介绍部分太多」：
-     1) 顶部 4 张 KPI 卡 + 一大段说明 → 压成一条状态条 + 可折叠说明
-     2) 卡片改为 flex 列布局 + 等高拉伸，说明固定 2 行截断、按钮贴底对齐
-     3) 补搜索 / 筛选（参考 new-api 的渠道列表做法） */
+/* ================================ 接入源 ================================ */
 .srcbar{display:flex;align-items:center;gap:var(--s5);flex-wrap:wrap;
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
   padding:10px 15px;box-shadow:var(--shadow);margin-bottom:var(--s3)}
@@ -136,7 +130,6 @@ h3{font-size:13.5px;margin:0 0 8px;font-weight:650;color:var(--muted)}
 .srcbar-i b{font-size:17px;font-weight:680;letter-spacing:-.3px;line-height:1.25}
 .srcbar-i b .faint{font-size:12.5px;font-weight:500}
 
-/* 搜索 / 筛选工具条 */
 .srcbar2{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:var(--s3)}
 .srcbar2 .q{flex:1 1 200px;min-width:150px;max-width:300px}
 .srcseg{display:inline-flex;border:1px solid var(--line2);border-radius:20px;overflow:hidden}
@@ -146,7 +139,6 @@ h3{font-size:13.5px;margin:0 0 8px;font-weight:650;color:var(--muted)}
 .srcseg button:hover{color:var(--accent)}
 .srcseg button.on{background:var(--accent);color:#fff}
 
-/* 卡片网格：stretch 让同行卡片等高（覆盖 .grid>* 的 align-self:start） */
 .srcgrid{align-items:stretch}
 .srcgrid>.sc{align-self:stretch;display:flex;flex-direction:column;
   padding:13px 14px;margin:0;cursor:pointer;
@@ -158,7 +150,6 @@ h3{font-size:13.5px;margin:0 0 8px;font-weight:650;color:var(--muted)}
 .sdot.ok{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
 .sc-n{font-size:13.5px;font-weight:650;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;min-width:0}
-/* 说明固定 2 行：不管原文多长，卡片高度都一致 */
 .sc-d{color:var(--faint);font-size:11.5px;line-height:1.5;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
   overflow:hidden;min-height:34px}
@@ -173,9 +164,11 @@ h3{font-size:13.5px;margin:0 0 8px;font-weight:650;color:var(--muted)}
   background:var(--panel);color:var(--fg);padding:6px 13px;border-radius:var(--r-sm);cursor:pointer;
   font:inherit;font-size:13px;white-space:nowrap;transition:border-color .12s,color .12s,box-shadow .12s}
 .btn:hover{border-color:var(--accent);color:var(--accent)}
-.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;
+.btn.pri{background:linear-gradient(135deg, var(--accent), #4d7ff5);
+  border-color:var(--accent);color:#fff;
   box-shadow:0 1px 3px rgba(47,111,237,.35)}
-.btn.pri:hover{filter:brightness(1.08);color:#fff;box-shadow:0 2px 8px rgba(47,111,237,.4)}
+.btn.pri:hover{filter:brightness(1.08);color:#fff;
+  box-shadow:0 2px 12px rgba(47,111,237,.45);transform:translateY(-1px)}
 .btn.sm{padding:3px 9px;font-size:12px}
 .btn.dgr:hover{border-color:var(--err);color:var(--err)}
 .btn:disabled,.btn[disabled]{opacity:.45;cursor:not-allowed}
@@ -190,17 +183,13 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);
 input::placeholder,textarea::placeholder{color:var(--faint)}
 label{display:block;font-size:12.5px;color:var(--muted);margin:10px 0 5px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
-/* .row 的直接子项默认撑满，这是「输入框被挤成怪形状」的根源。
-   只有显式标 .n 的才保持自然宽度。 */
 .row>*{flex:1;min-width:130px;min-width:0}
 .row>.n{flex:0 0 auto;min-width:0}
-/* 横向按钮组：给个专门的类，避免继承上面的 flex:1 */
 .btnrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .btnrow>*{flex:0 0 auto}
 
 /* ================================ 表格 ================================ */
 .dt{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--panel)}
-/* 工具条：搜索 / 排序 / 分页 */
 .dtbar{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line);
   background:var(--panel-2);flex-wrap:wrap}
 .dtbar input,.dtbar select{width:auto;flex:0 1 auto}
@@ -219,13 +208,10 @@ th .ar{opacity:.35;margin-left:3px;font-size:10px}
 th.on .ar{opacity:1;color:var(--accent)}
 tbody tr:hover{background:var(--panel-2)}
 tbody tr:last-child td{border-bottom:0}
-/* 只在有 overflow 祖先时 sticky 才安全；给一层兜底背景，防止透出下层内容 */
 .dtw th,.scroll th{background:var(--panel-2)}
-.dtfoot{position:relative;z-index:1}
 .dtfoot{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid var(--line);
   background:var(--panel-2);font-size:12.5px;color:var(--muted);flex-wrap:wrap}
 .dtfoot .sp{flex:1}
-/* 兼容旧写法 */
 .scroll{overflow:auto;max-height:min(62vh,560px);border:1px solid var(--line);border-radius:var(--r-sm)}
 .scroll.sm{max-height:300px}
 
@@ -271,14 +257,12 @@ pre{background:var(--panel-3);border:1px solid var(--line);border-radius:var(--r
 .toast.ok{background:var(--ok);color:#fff}
 @keyframes tin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
-/* 加载骨架 */
 .sk{background:linear-gradient(90deg,var(--panel-3) 25%,var(--panel-2) 37%,var(--panel-3) 63%);
   background-size:400% 100%;animation:skm 1.2s ease-in-out infinite;border-radius:var(--r-xs)}
 @keyframes skm{0%{background-position:100% 50%}100%{background-position:0 50%}}
 .sk.line{height:12px;margin-bottom:8px}
 .sk.block{height:76px}
 
-/* 工具类 */
 .muted{color:var(--muted)}
 .faint{color:var(--faint)}
 .right{text-align:right}
@@ -291,7 +275,6 @@ pre{background:var(--panel-3);border:1px solid var(--line);border-radius:var(--r
 .scroll-y{overflow-y:auto}
 
 /* ================================ 响应式 ================================ */
-/* 中窄（浏览器半屏 / 缩放后）：侧边栏收成图标竖栏，悬停可读 title */
 @media (max-width:1280px) and (min-width:1001px){
   .side{width:58px;flex:0 0 58px;padding:14px 8px}
   .brand{justify-content:center;padding:0 0 12px;font-size:0;gap:0}
@@ -308,7 +291,6 @@ pre{background:var(--panel-3);border:1px solid var(--line);border-radius:var(--r
   .side .faint{display:none}
   .main{padding:18px 18px 50px}
 }
-/* 窄（拖成左右两列的更小侧 / 平板竖屏）：侧边栏变成顶部导航条 */
 @media (max-width:1000px){
   .wrap{flex-direction:column}
   .side{width:100%;flex:none;height:auto;position:static;border-right:0;
@@ -330,7 +312,7 @@ pre{background:var(--panel-3);border:1px solid var(--line);border-radius:var(--r
   h1{font-size:18px}
 }
 
-/* ================================ 模型总表（按来源分组） ================================ */
+/* ================================ 模型总表 ================================ */
 .gm-group{border-bottom:1px solid var(--line)}
 .gm-group:last-of-type{border-bottom:0}
 .gm-head{display:flex;align-items:center;gap:9px;padding:11px 14px;cursor:pointer;
@@ -347,7 +329,6 @@ pre{background:var(--panel-3);border:1px solid var(--line);border-radius:var(--r
 .gm-id:hover{color:var(--accent);text-decoration:underline}
 .gm-desc{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-/* 细滚动条（表格/侧栏通用了更好看） */
 .dtw::-webkit-scrollbar,.side::-webkit-scrollbar,.scroll::-webkit-scrollbar,
 pre::-webkit-scrollbar{width:8px;height:8px}
 .dtw::-webkit-scrollbar-thumb,.side::-webkit-scrollbar-thumb,
@@ -359,10 +340,8 @@ pre::-webkit-scrollbar{width:8px;height:8px}
 .dtw::-webkit-scrollbar-track,.side::-webkit-scrollbar-track,
 .scroll::-webkit-scrollbar-track,pre::-webkit-scrollbar-track{background:transparent}
 
-/* 焦点可见性（键盘导航 / 无鼠标场景） */
 .btn:focus-visible,input:focus-visible,select:focus-visible,
 textarea:focus-visible,.navbtn:focus-visible{outline:2px solid var(--accent);
   outline-offset:1px}
 
-/* 选中文字用主题色 */
 ::selection{background:var(--accent-soft);color:var(--accent)}
