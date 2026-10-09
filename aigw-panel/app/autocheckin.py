@@ -46,19 +46,13 @@ CST = timedelta(hours=8)
 #   "bonus"  = 登录即送积分型（小浣熊）
 #   "none"   = 公开接口里没有签到端点，只能靠 probe 发现
 PLATFORM_CHECKIN = {
-    "apk-trae": {"name": "Trae", "mode": "flow", "hour": 9, "minute": 5},
-    "apk-codebuddy": {"name": "CodeBuddy 国际", "mode": "direct", "hour": 9, "minute": 10},
-    "apk-codebuddy-cn": {"name": "CodeBuddy 国内", "mode": "direct", "hour": 9, "minute": 15},
+    # 2026-10-08 整理：只保留真正有签到功能的平台
+    "wb-gateway": {"name": "WorkBuddy 国内", "mode": "direct", "hour": 9, "minute": 5},
+    "wb-gateway-intl": {"name": "WorkBuddy 国际", "mode": "direct", "hour": 9, "minute": 10},
+    "apk-trae": {"name": "Trae", "mode": "flow", "hour": 9, "minute": 15},
     "apk-raccoon": {"name": "小浣熊", "mode": "bonus", "hour": 9, "minute": 20},
-    "apk-loomy": {"name": "Loomy 讯飞", "mode": "none", "hour": 9, "minute": 25},
-    "apk-coze": {"name": "扣子 Coze", "mode": "none", "hour": 9, "minute": 30},
-    "apk-qwenwork": {"name": "千问办公", "mode": "none", "hour": 9, "minute": 35},
-    "apk-kuku": {"name": "库库 AI", "mode": "kuku", "hour": 9, "minute": 40},
-    "apk-qoder": {"name": "Qoder", "mode": "none", "hour": 9, "minute": 45},
-    "apk-doubao": {"name": "豆包", "mode": "none", "hour": 9, "minute": 50},
-    "apk-wps": {"name": "WPS AI", "mode": "wps", "hour": 9, "minute": 55},
-    "apk-nano": {"name": "纳米 AI", "mode": "none", "hour": 10, "minute": 0},
-    "apk-metaso": {"name": "秘塔 AI", "mode": "none", "hour": 10, "minute": 2},
+    "apk-kuku": {"name": "百度文库", "mode": "kuku", "hour": 9, "minute": 25},
+    "apk-wps": {"name": "WPS AI", "mode": "wps", "hour": 9, "minute": 30},
 }
 
 DEFAULT_CFG = {
@@ -105,7 +99,7 @@ def platform_list(store):
             "time": p.get("time") or "%02d:%02d" % (meta["hour"], meta["minute"]),
             "hint": {
                 "flow": "先查状态再领（Trae）",
-                "direct": "单接口直接领（CodeBuddy）",
+                "direct": "单接口直接领（WorkBuddy）",
                 "bonus": "登录即送积分（小浣熊）",
                 "kuku": "两段式：先取 bdstoken 会话参数再领积分",
                 "wps": "先查任务状态，未签则领（已签幂等）",
@@ -135,7 +129,6 @@ def due_list(cfg, dt=None):
         h, m = _hm(p.get("time") or "%02d:%02d" % (meta["hour"], meta["minute"]))
         if now_min >= h * 60 + m:
             out.append((pid, meta))
-    # 按配置的时间排序
     out.sort(key=lambda x: _hm(
         ((cfg.get("platforms") or {}).get(x[0]) or {}).get("time")
         or "%02d:%02d" % (x[1]["hour"], x[1]["minute"])))
@@ -154,7 +147,6 @@ def run_platform(accounts, platform, mode, log=None, options=None):
             except Exception:
                 pass
 
-    # 有凭据吗
     try:
         usable = accounts.usable(platform) if accounts else []
     except Exception:
@@ -186,7 +178,6 @@ def run_platform(accounts, platform, mode, log=None, options=None):
         _log("  %s 签到成功：%s" % (platform, msg))
         return True, msg, False
     msg = _brief(data)
-    # 没凭据/需要登录 这类不算失败，算跳过
     if _looks_like_auth_error(msg):
         return False, msg, True
     return False, msg, False
@@ -194,8 +185,6 @@ def run_platform(accounts, platform, mode, log=None, options=None):
 
 def _brief(data):
     if isinstance(data, dict):
-        # "error" 是各 flow 返回失败原因的键（如 Trae 的 code=1001 未认证），
-        # 不加进来就会把整个 dict 原样打印成一长串，看不出到底为什么失败
         for k in ("summary", "message", "msg", "desc", "error", "data", "already"):
             if k in data and data[k] not in (None, ""):
                 v = data[k]
@@ -210,9 +199,6 @@ def _brief(data):
 
 def _looks_like_auth_error(msg):
     m = str(msg).lower()
-    # "authenticate" 是 Trae 的实际措辞：
-    #   {"code":1001,"message":"...not able to authenticate you"}
-    # 只认 401/未登录 会把它当成真失败（其实是没登录，应算跳过而非失败）
     return any(k in m for k in (
         "401", "403", "未登录", "登录", "凭据", "cookie", "token", "账号",
         "unauthorized", "forbidden", "缺少", "no_credential", "无效",
@@ -232,7 +218,7 @@ class AutoCheckin(threading.Thread):
         self.log = log
         self.notifier = notifier
         self.stop_flag = threading.Event()
-        self.done_today = set()        # (date, platform)
+        self.done_today = set()
         self.running = False
         self.last_result = None
 
@@ -245,7 +231,6 @@ class AutoCheckin(threading.Thread):
     def mark_done(self, platform, date=None):
         d = date or (datetime.utcnow() + CST).strftime("%Y-%m-%d")
         self.done_today.add((d, platform))
-        # 只保留最近 3 天，防止无限增长
         for k in list(self.done_today):
             if k[0] < (datetime.utcnow() + CST - timedelta(days=3)).strftime("%Y-%m-%d"):
                 self.done_today.discard(k)
@@ -254,9 +239,7 @@ class AutoCheckin(threading.Thread):
         d = date or (datetime.utcnow() + CST).strftime("%Y-%m-%d")
         return (d, platform) in self.done_today
 
-    # ------------------------------------------------------------ 单轮
     def run_round(self, force=False, only=None, options=None):
-        """跑一轮。force=True 忽略「今天已跑过」标记。"""
         if self.running:
             return {"ok": False, "message": "上一轮签到还在跑"}
         self.running = True
@@ -285,7 +268,6 @@ class AutoCheckin(threading.Thread):
                 okk, msg, skipped = run_platform(
                     accounts, pid, meta["mode"], log=self._log,
                     options=options)
-                # 失败重试
                 tries = 0
                 while (not okk and not skipped and rt > 0
                        and tries < rt and delay > 0):
@@ -344,10 +326,9 @@ class AutoCheckin(threading.Thread):
         except Exception:
             pass
 
-    # ------------------------------------------------------------ 循环
     def run(self):
         self._log("APP 自动签到线程已启动")
-        self.stop_flag.wait(50)        # 与调度器一致的静默观察期
+        self.stop_flag.wait(50)
         while not self.stop_flag.is_set():
             try:
                 cfg = load_cfg(self.store)
