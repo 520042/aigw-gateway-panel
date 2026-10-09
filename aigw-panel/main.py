@@ -864,6 +864,35 @@ def api_autocheckin(action=None, body=None):
     return ok({"platforms": AC.platform_list(store)})
 
 
+def api_gwextra(action=None, body=None):
+    """
+    GWExtra 平台动作执行
+      exec   执行某平台的一个动作（如签到、领积分）
+      list   列出某平台所有可用动作
+    """
+    from app import gwextra
+    b = body or {}
+    accounts = APP.get("accounts")
+
+    if action == "list":
+        platform = b.get("platform")
+        if not platform:
+            return fail("platform 必填")
+        actions = gwextra.actions_of(platform)
+        return ok({"platform": platform, "actions": actions})
+
+    if action == "exec":
+        platform = b.get("pid") or b.get("platform")
+        aid = b.get("aid") or b.get("action")
+        if not platform or not aid:
+            return fail("pid 和 aid 必填")
+        okk, data = gwextra.call(accounts, platform, aid)
+        return ok({"ok": okk, "data": data}) if okk else fail(
+            str(data)[:500], code="exec_failed")
+
+    return ok({"actions": "list/exec"})
+
+
 def api_toolcall(action=None, body=None):
     """
     工具调用（function calling）测试台
@@ -2223,6 +2252,7 @@ ROUTES = {
     "/api/localproxy": lambda q, b: api_localproxy(q.get("action", ["status"])[0], b),
     "/api/tencent": lambda q, b: api_tencent(q.get("action", ["probe"])[0], b),
     "/api/autocheckin": lambda q, b: api_autocheckin(q.get("action", ["status"])[0], b),
+    "/api/gwextra": lambda q, b: api_gwextra(q.get("action", ["list"])[0], b),
     "/api/catalog": lambda q, b: api_catalog(),
     "/api/upstreams": lambda q, b: api_upstreams(),
     "/api/route": lambda q, b: api_route(q.get("action", [None])[0], b),

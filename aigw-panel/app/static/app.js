@@ -339,31 +339,26 @@ function sourceList(){
     models:lp.models||0, withRate:0, checkin:false,
     canModels:true, local:true, view:'localproxy',
   });
-  // 3) 可登录的平台 —— copilot 系四张卡合并成一张（同一套腾讯接口）
-  const COPILOT_IDS={'wb-gateway':'国内站','wb-gateway-intl':'国际站',
-                     'apk-codebuddy':'CodeBuddy 国际','apk-codebuddy-cn':'CodeBuddy 国内'};
+  // 3) 可登录的平台 —— WorkBuddy 国内/国际两张卡合并成一张
+  const COPILOT_IDS={'wb-gateway':'国内站','wb-gateway-intl':'国际站'};
   // APK 本地网关（手机上监听 0.0.0.0，面板走局域网反代）
   const LAN_APK={'apk-trae':'Trae aigw.app','apk-doubao':'dev.doubao2api',
                  'apk-yuanbao':'dev.yuanbao2api','apk-raccoon':'dev.raccoon2api',
-                 'apk-go':'wb2apimobile (Go)','apk-codebuddy':'workbuddy2api',
-                 'apk-codebuddy-cn':'workbuddy2api'};
+                 'apk-go':'wb2apimobile (Go)'};
   let copilotDone=false;
   for(const p of (S.data.loginPlatforms||[])){
     if(COPILOT_IDS[p.id]){
       if(copilotDone)continue;
       copilotDone=true;
-      const anyLogged=['wb-gateway','wb-gateway-intl','apk-codebuddy','apk-codebuddy-cn']
-        .some(x=>logged.has(x));
+      const anyLogged=['wb-gateway','wb-gateway-intl'].some(x=>logged.has(x));
       out.push({
-        key:'copilot', name:'CodeBuddy / WorkBuddy 账号（copilot 直连）', kind:'账号接入',
-        desc:'同一套接口，但国内/国际是两个独立账号（额度/积分互不互通），'
-            +'分别扫码登录。二维码直接显示在面板里，不跳网页、不需要网关 EXE。',
+        key:'copilot', name:'WorkBuddy 账号（国内/国际）', kind:'账号接入',
+        desc:'国内/国际是两个独立账号（额度/积分互不互通），分别扫码登录。'
+            +'二维码直接显示在面板里，不跳网页、不需要网关 EXE。',
         method:'qrcode', merged:true,
         variants:[
           {pid:'wb-gateway', label:'国内站账号', logged:logged.has('wb-gateway')},
           {pid:'wb-gateway-intl', label:'国际站账号', logged:logged.has('wb-gateway-intl')},
-          {pid:'apk-codebuddy', label:'CodeBuddy 国际账号', logged:logged.has('apk-codebuddy')},
-          {pid:'apk-codebuddy-cn', label:'CodeBuddy 国内账号', logged:logged.has('apk-codebuddy-cn')},
         ],
         logged:anyLogged, endpoint:'copilot.tencent.com',
         models:0, withRate:0, checkin:false, canModels:false,
@@ -1220,17 +1215,8 @@ function viewGrowth(){
   const enabled=g.enabled;
   const sites=S.data.sites||[];
 
-  // 按平台分类展示签到/积分任务
+  // 按平台分类展示签到/积分任务（2026-10-08 核实整理）
   const platforms=[
-    {
-      id:'web-glm', name:'智谱清言',
-      features:[
-        {name:'每日登录领积分', action:'web-glm:daily_login_score'},
-        {name:'积分余额查询', action:'web-glm:score'},
-        {name:'积分活动领奖', action:'web-glm:score_activity_draw'},
-        {name:'积分流水', action:'web-glm:score_record'},
-      ]
-    },
     {
       id:'wb-gateway', name:'WorkBuddy 国内',
       features:[
@@ -1252,13 +1238,82 @@ function viewGrowth(){
         {name:'连登状态', action:'wb-gateway-intl:streak_status'},
       ]
     },
+    {
+      id:'web-glm', name:'智谱清言',
+      features:[
+        {name:'每日登录领积分', action:'web-glm:daily_login_score'},
+        {name:'积分余额查询', action:'web-glm:score'},
+        {name:'积分活动领奖', action:'web-glm:score_activity_draw'},
+        {name:'积分流水', action:'web-glm:score_record'},
+      ]
+    },
+    {
+      id:'apk-trae', name:'Trae',
+      features:[
+        {name:'签到状态', action:'apk-trae:checkin_status'},
+        {name:'领取签到积分', action:'apk-trae:checkin_claim'},
+      ]
+    },
+    {
+      id:'apk-kuku', name:'百度文库',
+      features:[
+        {name:'任务与签到', action:'apk-kuku:tasks'},
+        {name:'每日签到', action:'apk-kuku:checkin_claim'},
+      ]
+    },
+    {
+      id:'apk-wps', name:'WPS',
+      features:[
+        {name:'每日签到', action:'apk-wps:checkin'},
+      ]
+    },
+    {
+      id:'apk-raccoon', name:'小浣熊',
+      features:[
+        {name:'积分余额', action:'apk-raccoon:balance'},
+      ]
+    },
+    {
+      id:'web-lobster', name:'Lobster AI',
+      features:[
+        {name:'积分查询', action:'web-lobster:profile'},
+      ]
+    },
   ];
+
+  const r=S.data.checkin||S.data.extra||{};
+  const sum=r.summary||{};
+  const today=r.today||[];
+  const pct=sum.total_checkin_sites?Math.round(sum.done_today/sum.total_checkin_sites*100):0;
 
   return `
   <div class="card">
-    <h2>任务中心 <span class="faint" style="font-size:11.5px;font-weight:normal">（按平台分类）</span></h2>
-    <div class="note ${enabled?'':'warn'}">
-      只显示有签到/积分任务的平台，没有的自动隐藏。点击按钮可手动执行对应任务。
+    <h2>任务中心 <span class="faint" style="font-size:11.5px;font-weight:normal">（签到 + 成长任务 + 积分）</span></h2>
+    <div class="note">
+      所有签到/任务/积分功能统一在这里管理。支持定时自动执行，不用手动点。
+    </div>
+  </div>
+
+  <div class="grid g4 mb">
+    <div class="kpi"><div class="lb">今日签到进度</div><div class="vl">${sum.done_today||0} / ${sum.total_checkin_sites||0}</div>
+      <div class="ex">${pct}% 完成 · ${esc(sum.date||'')}</div></div>
+    <div class="kpi"><div class="lb">最长连续签到</div><div class="vl">${sum.best_streak||0} 天</div>
+      <div class="ex">累计 ${sum.total_history||0} 次</div></div>
+    <div class="kpi"><div class="lb">今日成功</div><div class="vl">${today.filter(x=>x.ok).length}</div>
+      <div class="ex">今日记录 ${today.length} 条</div></div>
+    <div class="kpi"><div class="lb">定时执行</div><div class="vl">${g.hour||9}:00</div>
+      <div class="ex">每日自动跑全部签到任务</div></div>
+  </div>
+
+  <div class="card">
+    <h2>签到进度</h2>
+    ${bar(pct,'ok')}
+    <div class="flex mt" style="justify-content:space-between">
+      <span class="muted">${pct}% 完成 · 失败 ${today.filter(x=>!x.ok).length} 个</span>
+      <div class="flex">
+        <button class="btn" onclick="checkin(false)">补签未完成</button>
+        <button class="btn pri" onclick="checkin(true)">全部重签</button>
+      </div>
     </div>
   </div>
 
@@ -1309,6 +1364,22 @@ async function runGrowth(){
   const r=await api('api/growth?trigger=1');
   toast(r.message||'已触发');
   setTimeout(loadGrowth,4000);
+}
+
+async function runAction(action){
+  // action 格式："平台id:动作id"，如 "wb-gateway:growth_tasks"
+  const [pid, aid] = action.split(':');
+  toast('正在执行: '+aid+'...');
+  try {
+    const r = await post('api/gwextra?action=exec', {pid, aid});
+    if(r.ok !== false){
+      toast('执行成功: '+aid, 'ok');
+    } else {
+      toast('执行失败: '+(r.message||'未知错误'), 'err');
+    }
+  } catch(e) {
+    toast('执行失败: '+e.message, 'err');
+  }
 }
 
 // ---------------------------------------------------------------- 任务
@@ -1389,6 +1460,18 @@ function viewUsage(){
   const rows=((r.usage&&r.usage.rows)||[]).slice(0,200);
   const totReq=u.requests||1;
   return `
+  <div class="card mb">
+    <div class="flex" style="justify-content:space-between;align-items:center">
+      <h2 style="margin:0">用量统计</h2>
+      <div class="srcseg">
+        <button class="on">全部</button>
+        <button>今天</button>
+        <button>7天</button>
+        <button>30天</button>
+      </div>
+    </div>
+  </div>
+
   <div class="grid g4 mb">
     <div class="kpi"><div class="lb">总请求</div><div class="vl">${nfmt(u.requests)}</div>
       <div class="ex">成功 ${nfmt(u.success)} · 失败 ${nfmt(u.failed)}</div></div>
