@@ -2540,8 +2540,11 @@ function gmAll(open){
   gmSaveOpen();
 }
 
-function gmJs(s){                 // 模型 id 只含 [\w.@:-]，兜底替换掉危险字符
-  return String(s==null?'':s).replace(/[^\w.@:\-]/g,'_');
+function gmJs(s){                 // 模型 id 只含 [\w.@:/ -]，兜底替换掉危险字符
+  // ★ 2026-10-13：放行 '/'，否则 Kilo 等带 org/ 前缀的免费模型 id 会被
+  //   二次破坏成 poolside_laguna-s-2.1:free，导致测试/开关/复制按钮发错 id。
+  //   '/' 在单引号 JS 串 + 双引号 HTML 属性里是安全字符，无需替换。
+  return String(s==null?'':s).replace(/[^\w.@:\/-]/g,'_');
 }
 function gmShort(s){
   s=String(s||'');

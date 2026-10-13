@@ -190,6 +190,32 @@ RELAY_SPECS = {
         "pending_live": True,
         "models_anon": "https://opencode.ai/zen/v1/models",
     },
+    # ★ 2026-10-07 新增（参照 dsh-our-free-model src/kilo.js）：
+    #   Kilo AI 的网关免费池**完全不需要凭据**（无 key、无登录、无指纹门），
+    #   是继 OpenCode Zen 之后第二条"点一下就白嫖"的车道。
+    #   清单只取 isFree: true 的那一片；付费 id 无 key 会回
+    #   PAID_MODEL_AUTH_REQUIRED（属"这个模型不在这条车道"，不是凭据坏了）。
+    #   ⚠ 上游明说免费池的提示可能被记录用于改进其服务，别发敏感内容。
+    "kilo": {
+        "name": "Kilo Gateway（免凭据免费池）",
+        "base": "https://api.kilo.ai/api/gateway",
+        "path": "/chat/completions",
+        "method": "POST",
+        "auth": "none",
+        "fmt": "openai",
+        "secret_fixed": "public",
+        "models_anon": "https://api.kilo.ai/api/gateway/models",
+        "free_field": "isFree",
+        # ★ 2026-10-13：Kilo 免费池 id 形如 org/model:free（带 org/ 前缀），
+        #   上游**要求完整全名**才能命中；free_models 默认会把 org/ 前缀截掉
+        #   （那是给 Zen 联营道用的，Zen 上游接受裸名），对 Kilo 适用会导致
+        #   404 model_not_found / 401 PAID_MODEL_AUTH_REQUIRED。故这里显式
+        #   保留完整 id（含 org/），下游才能正确请求。
+        "models_keep_org": True,
+        "evidence": "dsh-our-free-model src/kilo.js（免费池免凭据；"
+                    "付费 id 回 PAID_MODEL_AUTH_REQUIRED）",
+        "pending_live": True,
+    },
     "web-qoder": {
         "name": "Qoder（直连模型端点，社区 Qoder2Api 逆向）",
         "base": "https://api2-v2.qoder.sh",
@@ -220,6 +246,62 @@ RELAY_SPECS = {
         "evidence": "base(4).apk classes6.dex",
         "pending_live": True,
     },
+    # ============================================================
+    # 订阅反代平台（CLIProxyAPI 原生实现，逐步替换外部 exe）
+    # ============================================================
+    "kimi-code": {
+        "name": "Kimi Code（订阅）",
+        "base": "https://api.kimi.com/coding/v1",
+        "path": "/chat/completions",
+        "method": "POST",
+        "auth": "bearer",
+        "fmt": "openai",
+        "extra_headers": {
+            "User-Agent": "kimi-code-cli/0.1.0",
+        },
+        "evidence": "Kimi Code 官方文档 + CLIProxyAPI 逆向",
+        "pending_live": True,
+        "models_static": [
+            {"id": "kimi-k2", "name": "Kimi K2", "desc": "Kimi Code 订阅"},
+            {"id": "kimi-k2-0905-preview", "name": "Kimi K2 0905", "desc": "Kimi Code 订阅"},
+            {"id": "kimi-latest", "name": "Kimi Latest", "desc": "Kimi Code 订阅"},
+        ],
+    },
+    "codex": {
+        "name": "Codex（OpenAI 订阅）",
+        "base": "https://api.openai.com/v1",
+        "path": "/chat/completions",
+        "method": "POST",
+        "auth": "bearer",
+        "fmt": "openai",
+        "extra_headers": {},
+        "evidence": "OpenAI 官方 API + CLIProxyAPI 逆向",
+        "pending_live": True,
+        "models_static": [
+            {"id": "gpt-4o", "name": "GPT-4o", "desc": "ChatGPT Plus 订阅"},
+            {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "desc": "ChatGPT Plus 订阅"},
+            {"id": "o1", "name": "o1", "desc": "ChatGPT Plus 订阅"},
+            {"id": "o1-mini", "name": "o1 Mini", "desc": "ChatGPT Plus 订阅"},
+        ],
+    },
+    "claude-code": {
+        "name": "Claude Code（Anthropic 订阅）",
+        "base": "https://api.anthropic.com/v1",
+        "path": "/messages",
+        "method": "POST",
+        "auth": "bearer",
+        "fmt": "anthropic",  # Anthropic 私有格式
+        "extra_headers": {
+            "anthropic-version": "2023-06-01",
+        },
+        "evidence": "Anthropic 官方 API + CLIProxyAPI 逆向",
+        "pending_live": True,
+        "models_static": [
+            {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "desc": "Anthropic Pro/Max 订阅"},
+            {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "desc": "Anthropic Pro/Max 订阅"},
+            {"id": "claude-3-opus-20240229", "name": "Claude 3 Opus", "desc": "Anthropic Pro/Max 订阅"},
+        ],
+    },
 }
 
 
@@ -234,10 +316,19 @@ def relay_list():
 
 # ---------------------------------------------------------------- 请求
 def _ssl_ctx():
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+    """★ 2026-10-07：恢复证书校验。
+    原实现 check_hostname=False + verify_mode=CERT_NONE，而所有出站请求都带
+    Bearer / Cookie / x-ide-token —— 路径上的任何中间人可直接窃取账号凭据。"""
+    return ssl.create_default_context()
+
+
+def _opener():
+    """直连 opener（不吃系统代理）。
+    原实现在每次请求前删掉进程级 *_PROXY 环境变量：不可逆，且会连带把
+    其它需要代理的出站（官方 API、本地网关）弄坏。改用 ProxyHandler({})。"""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=_ssl_ctx()))
 
 
 # X-Device-Token（腾讯图灵盾设备风控头）提供器。
@@ -288,7 +379,10 @@ def _filter_cookie(spec, cookie):
         return cookie
     keep = [p.strip() for p in cookie.split(";")
             if p.strip().split("=", 1)[0].strip() in keys]
-    return "; ".join(keep) if keep else cookie
+    # ★ 2026-10-07：一个键都没命中时不再"原样透传"。那等于把用户从浏览器
+    #   复制的、混着其它站点登录态的整串 Cookie 发给第三方逆向端点。
+    #   宁可能这次请求因缺鉴权失败，也不外发无关凭据。
+    return "; ".join(keep)
 
 
 # X-User-Id 懒取缓存：copilot 风控要求 uid 与 token 同账号（错配反是风控信号）。
@@ -311,11 +405,8 @@ def copilot_uid(secret, base="https://www.codebuddy.cn", timeout=15):
         headers={"Authorization": "Bearer " + (secret or ""),
                  "Accept": "application/json",
                  "User-Agent": "CLI/2.143.1 CodeBuddy/2.143.1"})
-    for k in list(__import__("os").environ):
-        if k.upper().endswith("_PROXY"):
-            __import__("os").environ.pop(k, None)
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+        with _opener().open(req, timeout=timeout) as r:
             d = json.loads(r.read().decode("utf-8", "replace"))
         uid = ((d.get("data") or {}).get("uid")) or ""
     except Exception:
@@ -366,6 +457,9 @@ def _headers(pid, spec, secret, body=None, account=None):
             h["X-User-Id"] = str(_uid)
     if spec["auth"] == "bearer":
         h["Authorization"] = "Bearer " + (secret or "")
+    elif spec["auth"] == "none":
+        # ★ 免凭据车道（Kilo 免费池）：一个授权头都不发
+        h.pop("Authorization", None)
     else:
         h["Cookie"] = _filter_cookie(spec, secret or "")
     for k, v in (spec.get("extra_headers") or {}).items():
@@ -411,11 +505,8 @@ def relay_once(pid, body, secret, timeout=180, base_override=None, account=None)
                                                   account=account))
     if stream_only:
         req.add_header("Accept", "text/event-stream")
-    for k in list(__import__("os").environ):
-        if k.upper().endswith("_PROXY"):
-            __import__("os").environ.pop(k, None)
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+        with _opener().open(req, timeout=timeout) as r:
             raw = r.read().decode("utf-8", "replace")
             status = r.status
     except urllib.error.HTTPError as e:
@@ -431,7 +522,14 @@ def relay_once(pid, body, secret, timeout=180, base_override=None, account=None)
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
-            return status < 400, {"status": status, "raw": raw[:2000]}
+            # ★ 2026-10-07：2xx 的非 JSON 正文绝不算成功。
+            #   原实现 return status < 400（2xx 即 True），于是下游把
+            #   {"status":200,"raw":"data: ..."} 当正常回答，客户端拿到
+            #   没有 choices 的 200 响应，用量也记成 0。
+            head = raw.lstrip()[:12].lower()
+            hint = ("上游返回了 SSE/非 JSON 正文（该上游可能忽略非流式请求）"
+                    if head.startswith("data:") else "上游返回非 JSON 正文")
+            return False, {"status": status, "raw": raw[:2000], "error": hint}
     if renames:
         payload = _zen_restore_tools(payload, renames)
     return (status < 400), payload
@@ -539,11 +637,8 @@ def relay_stream(pid, body, secret, base_override=None, timeout=180,
                                  headers=_headers(pid, spec, secret, sbody,
                                                   account=account))
     req.add_header("Accept", "text/event-stream")
-    for k in list(__import__("os").environ):
-        if k.upper().endswith("_PROXY"):
-            __import__("os").environ.pop(k, None)
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+        with _opener().open(req, timeout=timeout) as r:
             for raw in r:
                 line = raw.decode("utf-8", "replace").rstrip("\n")
                 if line:
@@ -551,6 +646,9 @@ def relay_stream(pid, body, secret, base_override=None, timeout=180,
     except Exception as e:
         yield 'data: ' + json.dumps({"aigw_error": True,
               "message": "%s: %s" % (type(e).__name__, e)}) + "\n\n"
+        # ★ 错误路径同样要有终止帧：客户端靠 data: [DONE] 收尾，
+        #   否则只能等连接关闭（原实现只发一帧 aigw_error 就 return）
+        yield "data: [DONE]\n\n"
 
 
 def _zen_ids():
@@ -642,7 +740,7 @@ def _zen_restore_tools(payload, renames):
     return payload
 
 
-_ZEN_CACHE = {"ts": 0.0, "ok": False, "models": []}
+_ZEN_CACHE = {"ts": 0.0, "ok": False, "models": [], "fail_ts": 0.0}
 
 # 免密车道判定（照抄 dsh-our-free-model catalog.isFreeLane）：
 # /zen/v1/models 混着收费 id —— 收费 id 打 chat 返 401 Missing API key，
@@ -652,6 +750,135 @@ _ZEN_ALWAYS_FREE = {"union-alpha", "space-bunny-free"}
 # 非Chat wire 的免费模型：muse-spark 系走 /zen/v1/responses、union-alpha 走
 # /zen/v1/messages。中继目前只透传 chat/completions，下发只会让路由进死胡同。
 _ZEN_NON_CHAT_PREFIX = ("muse-spark", "muse_spark")
+
+# ★ 兜底清单（照 2026-10-10 实测 /zen/v1/models 的免密车道快照烘焙）：
+# 上游清单是权威集合，但**不能因为上游不可达就让 anon-zen 在模型总表里凭空消失**
+# （用户反馈「缺失 ANON 等 AI」）。网络不通时直接回这份内置清单，live=False；
+# 上游恢复后由后台刷新线程替换成实时清单。
+_ZEN_FALLBACK = [
+    {"id": "jev-1.13-free", "name": "JEV 1.13 Free", "desc": "Zen 免密车道（兜底）"},
+    {"id": "exo-free", "name": "Exo Free", "desc": "Zen 免密车道（兜底）"},
+    {"id": "mimo-v2.6-flash-free", "name": "Mimo v2.6 Flash Free", "desc": "Zen 免密车道（兜底）"},
+    {"id": "space-bunny-free", "name": "Space Bunny Free", "desc": "Zen 免密车道（兜底）"},
+    {"id": "longcat-2.5-preview-free", "name": "Longcat 2.5 Preview Free", "desc": "Zen 免密车道（兜底）"},
+    {"id": "step-5-preview-free", "name": "Step 5 Preview Free", "desc": "Zen 免密车道（兜底）"},
+    {"id": "ling-3.0-flash-fin-free", "name": "Ling 3.0 Flash Fin Free", "desc": "Zen 免密车道（兜底）"},
+    {"id": "nemotron-3-ultra-free", "name": "Nemotron 3 Ultra Free", "desc": "Zen 免密车道（兜底）"},
+    {"id": "nemotron-3.5-lightning-free", "name": "Nemotron 3.5 Lightning Free", "desc": "Zen 免密车道（兜底）"},
+    {"id": "ling-3.1-flash-free", "name": "Ling 3.1 Flash Free", "desc": "Zen 免密车道（兜底）"},
+]
+
+# 失败负缓存 TTL：上游不可达时，不要在**每次**请求都重连阻塞 20s（这正是
+# 启动卡死 + 反复缺失 ANON 的根因）。失败缓存 FREE_FAIL_TTL 秒，期间直接回兜底/空。
+FREE_FAIL_TTL = 120
+# 后台刷新间隔（秒）：init_app 起的守护线程按此周期温习各免密车道清单。
+FREE_REFRESH_INTERVAL = 300
+
+_FREE_CACHE = {}   # pid -> {"ts", "ok", "models", "live", "fail_ts"}
+
+
+def _free_refresh_running():
+    """后台刷新线程是否已在跑，避免重复拉起。"""
+    return getattr(_free_refresh_running, "_on", False)
+
+
+def _schedule_free_refresh(pid):
+    """冷缓存时，后台线程拉一次该车道清单（绝不阻塞调用方）。"""
+    if _free_refresh_running():
+        return
+    try:
+        import threading
+        def _run():
+            try:
+                free_models(pid, timeout=20)
+            except Exception:
+                pass
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+    except Exception:
+        pass
+
+
+def refresh_free_lanes(interval=FREE_REFRESH_INTERVAL):
+    """后台温习所有免密车道清单（填充 _FREE_CACHE / _ZEN_CACHE）。
+    不带 interval 只跑一轮；带 interval 则循环（给 init_app 的守护线程用）。"""
+    def _once():
+        for _fpid, _fspec in RELAY_SPECS.items():
+            if not _fspec.get("models_anon"):
+                continue
+            try:
+                free_models(_fpid, timeout=20)
+            except Exception:
+                pass
+    if not interval:
+        _once()
+        return
+    _free_refresh_running._on = True
+    try:
+        while True:
+            _once()
+            time.sleep(interval)
+    finally:
+        _free_refresh_running._on = False
+
+
+def free_models(pid, timeout=20, ttl=600):
+    """免凭据车道的动态模型清单（anon-zen / kilo…）。返回 (ok, models|str)。
+
+    ★ 2026-10-07 新增，照 dsh-our-free-model 的分层设计：
+      上游清单是权威集合（跟随上游刷新，不写死在面板里），本地只做
+      「哪些 id 真属于这条免凭据车道」的判定 + 展示名/上下文补齐；
+      成功落 TTL，失败落**负缓存**（FREE_FAIL_TTL），避免每次请求都堵 timeout 秒。
+    """
+    if pid == "anon-zen":
+        return zen_models(timeout=timeout, ttl=ttl)
+    spec = RELAY_SPECS.get(pid) or {}
+    url = spec.get("models_anon")
+    if not url:
+        return False, "平台 %s 没有免凭据清单端点" % pid
+    now = time.time()
+    hit = _FREE_CACHE.get(pid)
+    if hit and hit.get("ok") and now - hit.get("ts", 0) < ttl:
+        return True, hit["models"]
+    # 负缓存：近期失败直接回缓存错误，不再现场重连阻塞
+    if hit and (not hit.get("ok")) and hit.get("fail_ts") \
+            and now - hit["fail_ts"] < FREE_FAIL_TTL:
+        return False, hit.get("err") or "近期拉取失败（负缓存中）"
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", spec.get("models_ua")
+                   or "aigw-panel-native-relay/1.0")
+    for k, v in (spec.get("extra_headers") or {}).items():
+        req.add_header(k, v)
+    try:
+        with _opener().open(req, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+        rows = d.get("data") or d.get("models") or []
+        field = spec.get("free_field")
+        out = []
+        for m in rows:
+            if not (isinstance(m, dict) and m.get("id")):
+                continue
+            if field and not m.get(field):
+                continue                       # 付费 id：这条车道不服务它
+            mid = str(m["id"]).strip()
+            # ★ 2026-10-13：默认截掉 org/ 前缀（Zen 联营道上游接受裸名）；
+            #   但 Kilo 上游要求完整 org/model:free 全名，由 spec 的
+            #   models_keep_org 控制是否保留前缀。
+            base = mid if spec.get("models_keep_org") else mid.split("/")[-1]
+            out.append({"id": base, "name": m.get("name") or base,
+                        "ctx": m.get("context_length") or m.get("contextWindow")
+                               or (m.get("top_provider") or {}).get("context_length"),
+                        "desc": m.get("description") or "免凭据免费池"})
+        out.sort(key=lambda x: x["id"])
+        _FREE_CACHE[pid] = {"ts": now, "ok": True, "models": out,
+                            "live": True, "fail_ts": 0.0}
+        return True, out
+    except Exception as e:
+        _FREE_CACHE[pid] = {"ts": now, "ok": False, "models": [],
+                            "live": False,
+                            "fail_ts": now, "err": "%s: %s" % (type(e).__name__, e)}
+        return False, "%s: %s" % (type(e).__name__, e)
 
 
 def _zen_free_lane(mid):
@@ -666,21 +893,21 @@ def zen_models(timeout=20, ttl=600):
 
     清单按免密车道过滤（见 _zen_free_lane），剔除非 chat wire 的模型；
     /v1/models 与 CodeDesk 类客户端会高频轮询，做 10 分钟 TTL 缓存，
-    失败不缓存（下次重试），成功才落缓存。
+    失败落**负缓存**（FREE_FAIL_TTL），下次请求不再现场阻塞 timeout 秒。
     """
     now = time.time()
     if _ZEN_CACHE["ok"] and now - _ZEN_CACHE["ts"] < ttl:
         return True, _ZEN_CACHE["models"]
+    if (not _ZEN_CACHE["ok"]) and _ZEN_CACHE.get("fail_ts") \
+            and now - _ZEN_CACHE["fail_ts"] < FREE_FAIL_TTL:
+        return False, _ZEN_CACHE.get("err") or "近期拉取失败（负缓存中）"
     req = urllib.request.Request(
         "https://opencode.ai/zen/v1/models",
         headers={"User-Agent": "opencode/1.18.31",
                  "Authorization": "Bearer public",
                  "Accept": "application/json"})
-    for k in list(__import__("os").environ):
-        if k.upper().endswith("_PROXY"):
-            __import__("os").environ.pop(k, None)
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+        with _opener().open(req, timeout=timeout) as r:
             d = json.loads(r.read().decode("utf-8", "replace"))
         models = d.get("data") or d.get("models") or []
         out = []
@@ -699,7 +926,33 @@ def zen_models(timeout=20, ttl=600):
                         "desc": (", ".join(caps) if isinstance(caps, list)
                                  else (m.get("description") or ""))
                                 or "Zen 免密车道"})
-        _ZEN_CACHE.update(ts=now, ok=True, models=out)
+        _ZEN_CACHE.update(ts=now, ok=True, models=out, fail_ts=0.0, err=None)
         return True, out
     except Exception as e:
-        return False, "%s: %s" % (type(e).__name__, e)
+        err = "%s: %s" % (type(e).__name__, e)
+        _ZEN_CACHE.update(ts=now, ok=False, fail_ts=now, err=err)
+        return False, err
+
+
+def free_models_cached(pid):
+    """模型总表（grouped）等非阻塞场景用：绝不现场拉网，直接回缓存/兜底。
+
+    返回 (ok, models, live)：
+      - 缓存命中 → 回缓存（live 取缓存标记）
+      - 冷缓存 / 近期失败 → anon-zen 回 _ZEN_FALLBACK（live=False），
+        其它车道回空，并后台补拉一次，下次请求即命中。
+    这样前端「模型总表」瞬间出图，绝不会因上游不可达而卡在「正在加载」。
+    """
+    now = time.time()
+    if pid == "anon-zen":
+        zc = _ZEN_CACHE
+        if zc["ok"] and zc.get("models"):
+            return True, zc["models"], True
+        # 冷缓存或近期失败：先回兜底，后台补拉
+        _schedule_free_refresh(pid)
+        return True, _ZEN_FALLBACK, False
+    hit = _FREE_CACHE.get(pid)
+    if hit and hit.get("models"):
+        return hit.get("ok", True), hit["models"], hit.get("live", True)
+    _schedule_free_refresh(pid)
+    return False, "未缓存（后台刷新中）", False
