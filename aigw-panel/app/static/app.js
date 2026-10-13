@@ -590,6 +590,7 @@ let ROUTE_TAB = 'models';
 async function loadRoute(){
   // ★ grouped 先行并行拉（模型总表是本页主体），不被任何慢请求串行拖住
   api('api/models?action=grouped').then(g=>{S.data.grouped=g;render();}).catch(()=>{});
+  loadFreeModels();   // 每日免费模型榜（非阻塞，失败不影响本页）
   const [rt,us]=await Promise.all([
     api('api/route').catch(()=>({})),
     api('api/usage?range=all').catch(()=>({})),
@@ -3198,10 +3199,62 @@ function viewRoute0(){
 '',
 '# 响应里会带回路由痕迹 _route / _aigw_route，方便确认走了哪家'
 ].join('\n'))}</pre>
-  </div>`;
+  </div>
+
+  <div class="card">
+    <div class="flex" style="justify-content:space-between">
+      <h2>每日免费模型榜 <span class="faint" style="font-size:12px" id="freeFeedTs"></span></h2>
+      <button class="btn" onclick="loadFreeModels(true)">立即刷新</button>
+    </div>
+    <div class="faint" style="margin:4px 0 10px">数据源 ClawLabsAI/free-ai-models（每天 04:00 UTC 更新）；<b>不训练</b> 表示提供商承诺不用你的提示词训练模型。模型 id 可直接用于对应提供商的 OpenAI SDK。</div>
+    <div id="freeModelsBody" class="scroll" style="max-height:560px">${freeModelsHtml()}</div>
+  </div>
+`;
 }
 function strategyLabel(s){
   return {fastest:'最快延迟',weight:'权重优先',priority:'优先级'}[s]||s||'—';
+}
+// -------------------------------------------------- 每日免费模型榜
+function freeModelsHtml(){
+  const f=S.data.freeModels;
+  if(!f){return '<div class="faint">加载中…</div>';}
+  if(!f.models||!f.models.length){
+    return '<div class="faint">'+(f.note||'暂无数据')+'</div>';
+  }
+  const trainTag=u=>{
+    if(u==='no-training')return tag('不训练','ok');
+    if(u==='may-train')return tag('可能训练','err');
+    if(u==='mixed')return tag('混合','warn');
+    return tag('未知','info');
+  };
+  const rows=f.models.slice(0,30).map(m=>{
+    const prov=(m.provider||(m.served_by&&m.served_by[0])||'—');
+    const ctx=m.context_window?Math.round(m.context_window/1024)+'K':'—';
+    const tools=m.supports_tools?'✓':'—';
+    return `<tr>
+      <td><b>${esc(m.rank!=null?m.rank:'—')}</b></td>
+      <td><b class="mono">${esc(m.id)}</b><div class="faint" style="font-size:11px">${esc(m.name||'')}</div></td>
+      <td>${esc(prov)}</td>
+      <td>${trainTag(m.data_use)}</td>
+      <td class="mono">${ctx}</td>
+      <td>${tools}</td>
+      <td class="faint" style="font-size:11px">${esc(m.rate_limit||'')}</td>
+    </tr>`;
+  }).join('');
+  return `<table><thead><tr><th>#</th><th>模型 id</th><th>提供商</th><th>隐私</th><th>上下文</th><th>工具</th><th>限额</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+async function loadFreeModels(force){
+  try{
+    const r=await api('api/free_models'+(force?'?refresh=1':''));
+    S.data.freeModels=r;
+    const ts=r.updated_at?('源更新 '+new Date(r.updated_at).toLocaleString()):'';
+    const el=document.getElementById('freeFeedTs');
+    if(el)el.textContent=ts+' · 共'+(r.total||0)+'个';
+    const body=document.getElementById('freeModelsBody');
+    if(body)body.innerHTML=freeModelsHtml();
+  }catch(e){
+    toast('免费模型榜加载失败：'+(e&&e.message||e),'err');
+  }
 }
 async function probeRoute(){
   toast('探测中，各上游并发测 /models…');

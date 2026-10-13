@@ -211,6 +211,17 @@ def init_app():
     except Exception as e:
         log("免密车道后台刷新启动失败：%s" % e)
 
+    # ---- 每日免费模型榜单后台刷新（ClawLabsAI/free-ai-models，每天 04:00 UTC 重建）
+    # ★ 2026-10-13 新增：面板「路由与模型」页展示该榜，用户随时看到当前最优、
+    #   并标注"是否会被用于训练"的免费模型。独立 daemon 线程，每日拉一次，不依赖网关。
+    try:
+        from app import free_models_feed as FF
+        FF.set_data_dir(APP["data_dir"])
+        FF.start_daily_refresh(interval_hours=24, first_delay=120)
+        log("每日免费模型榜单后台刷新线程已启动（每日 1 次）")
+    except Exception as e:
+        log("免费模型榜单后台刷新启动失败：%s" % e)
+
     # ---- copilot token 保活（对齐社区 2api 标配：到期前主动刷新）----
     # ★ 2026-10-06 扩展：原仅覆盖 wb-gateway/wb-gateway-intl，导致 CodeBuddy
     #   国内·国际版、Trae 的 accessToken 过期后静默 401、必须重扫。
@@ -395,6 +406,16 @@ def load_route_config(router, store, client):
             upstream_id="native:anon-zen",
             name="OpenCode Zen（匿名免费车道）",
             endpoint="native://anon-zen",
+            free=True,
+        ))
+        # 2.6) ★ 2026-10-13：Pollinations 免密钥匿名免费池（同 anon-zen 性质，
+        #      OpenAI 兼容、无需登录/Key）。作为 auto / free 的常驻免费候选，
+        #     保证 anon-zen / 豆包挂掉时仍有退路。
+        targets.append(Target(
+            model="openai",
+            upstream_id="native:pollinations",
+            name="Pollinations（免密钥匿名免费池）",
+            endpoint="native://pollinations",
             free=True,
         ))
         # 3) ★ 面板内部中继（豆包 samantha）：进程内直调，不出站、不依赖
@@ -1465,7 +1486,8 @@ def api_models(action=None, body=None):
                           ("apk-raccoon", "小浣熊"),
                           ("web-glm", "智谱清言"),
                           ("web-trae", "Trae 直连"),
-                          ("web-deepseek", "DeepSeek")):
+                          ("web-deepseek", "DeepSeek"),
+                          ("pollinations", "Pollinations 免费池")):
             spec = NR.relay_of(pid) or {}
             rows = [{"id": "%s@%s" % (m.get("id"), pid),
                      "name": m.get("name") or m.get("id"),
@@ -2917,7 +2939,38 @@ ROUTES = {
     "/api/catalog": lambda q, b: api_catalog(),
     "/api/upstreams": lambda q, b: api_upstreams(),
     "/api/route": lambda q, b: api_route(q.get("action", [None])[0], b),
+    "/api/free_models": lambda q, b: api_free_models(
+        q.get("refresh", ["0"])[0] == "1"),
 }
+
+
+# ------------------------------------------------------------------ 免费模型榜
+def api_free_models(refresh=False):
+    """每日免费模型榜单（数据源 ClawLabsAI/free-ai-models）。
+
+    refresh=1 → 强制现场重拉一次（并返回新数据）；否则优先回缓存/磁盘文件，
+    绝不现场阻塞。前端「路由与模型」页用它展示当前最优、且标注"是否训练"的免费模型。
+    """
+    try:
+        from app import free_models_feed as FF
+        if refresh:
+            d = FF.fetch_free_feed(force=True)
+        else:
+            d = FF.get_free_feed()
+            if d is None:
+                # 冷缓存：后台补拉，本次先回空（前端显示"加载中"）
+                try:
+                    FF.start_daily_refresh(first_delay=1)
+                except Exception:
+                    pass
+                return ok({"updated_at": None, "total": 0, "models": [],
+                           "note": "首次加载，正在后台拉取…"})
+        if not d:
+            return ok({"updated_at": None, "total": 0, "models": [],
+                       "note": "暂无可展示数据（拉取失败，稍后自动重试）"})
+        return ok(d)
+    except Exception as e:
+        return fail("%s: %s" % (type(e).__name__, e))
 
 
 # ------------------------------------------------------------------ HTTP

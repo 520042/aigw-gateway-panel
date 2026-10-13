@@ -75,6 +75,7 @@ a = Analysis(
         'app.tencent',       # 腾讯 CodeBuddy 直连（移植自 workbuddy-gateway 规格）
         'app.tlogin',        # 原生登录链路（抓包实测：enterprise 端点发 token）
         'app.loomy_client',  # Loomy 登录客户端（函数内动态导入）
+        'app.free_models_feed',  # 每日免费模型榜（函数内动态导入）
     ],
     hookspath=[],
     hooksconfig={},

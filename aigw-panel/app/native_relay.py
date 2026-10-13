@@ -216,6 +216,32 @@ RELAY_SPECS = {
                     "付费 id 回 PAID_MODEL_AUTH_REQUIRED）",
         "pending_live": True,
     },
+    # ★ 2026-10-13 新增（数据源 ClawLabsAI/free-ai-models + 实测）：
+    #   Pollinations 公共转发层 —— **免密钥匿名**，OpenAI 兼容
+    #   （https://text.pollinations.ai/openai/chat/completions），无需登录 /
+    #   注册 / 填 Key，是继 OpenCode Zen、Kilo 之后第三条"点一下就白嫖"的车道。
+    #   ★ 实测（2026-10-13）：model="openai"→gpt-oss-20b、model="gpt-oss-20b"
+    #     均返回合法 OpenAI 响应，user_tier=anonymous；"mistral"/"openai-fast"
+    #     不可用（旧 API / 限流），故 models_static 只列实测可用的两个。
+    "pollinations": {
+        "name": "Pollinations（免密钥匿名免费池）",
+        "base": "https://text.pollinations.ai",
+        "path": "/openai/chat/completions",
+        "method": "POST",
+        "auth": "none",                 # 一个授权头都不发（实测免密）
+        "fmt": "openai",
+        "secret_fixed": "public",
+        "models_static": [
+            {"id": "openai", "name": "OpenAI 路由（gpt-oss-20b）",
+             "desc": "免密钥匿名；Pollinations 公共转发层"},
+            {"id": "gpt-oss-20b", "name": "GPT-OSS 20B",
+             "desc": "免密钥匿名；OpenAI 兼容"},
+        ],
+        "pending_live": True,
+        "evidence": "text.pollinations.ai/openai/chat/completions 实测免密返回 "
+                    "OpenAI 兼容响应（user_tier=anonymous）；模型清单详见 "
+                    "ClawLabsAI/free-ai-models（text.pollinations.ai/models）",
+    },
     "web-qoder": {
         "name": "Qoder（直连模型端点，社区 Qoder2Api 逆向）",
         "base": "https://api2-v2.qoder.sh",
