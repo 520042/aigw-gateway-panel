@@ -396,7 +396,7 @@ RELAYS = [
 OFFICIAL = [
     # ============ 2026-10-04 实测确认存在的国内厂商（假 Key → 401 即端点真实） ============
     {"name": "DeepSeek 官方", "region": "国内",
-     "endpoint": "https://api.deepseek.com", "protocol": "openai",
+     "endpoint": "https://api.deepseek.com/v1", "protocol": "openai",
      "auth": "api_key", "env": "DEEPSEEK_API_KEY",
      "free": "无免费额度，但新号常有充值赠送",
      "checkin": None, "rate": "按账户",

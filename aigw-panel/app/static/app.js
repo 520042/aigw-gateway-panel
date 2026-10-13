@@ -195,17 +195,43 @@ function dtBindOnce(){
 
 // ---------------------------------------------------------------- 路由
 const TITLES={sources:'接入源',route:'路由与模型',tools:'工具与集成',settings:'设置与日志',
-  checkin:'签到记录',growth:'成长任务',tasks:'任务管理'};
+  growth:'成长任务',tasks:'任务管理'};
 /* 高级（二级）菜单里的视图：默认折叠，进入其中任一项时自动展开分组 */
-const ADV=['tools','settings','checkin','growth','tasks'];
+const ADV=['tools','settings','growth','tasks'];
 function toggleAdv(){
   const sub=$('#advSub'), t=$('#advToggle');
   const open=sub.classList.toggle('open');
   t.classList.toggle('open',open);
+  // 记住用户的手动选择（autoFitNav 之后不再覆盖它）
+  NAV_MANUAL.adv = !open;
+  if(open) autoFitNav();
 }
 function openAdv(){
   $('#advSub').classList.add('open');
   $('#advToggle').classList.add('open');
+  NAV_MANUAL.adv = false;
+  autoFitNav();
+}
+/* ★ 2026-10-12（用户要求「分析还有没有空间，有就不折叠」）：
+   侧边栏分组按**实际可用空间**动态决策 —— 默认全展开；只有侧边栏
+   真的会溢出时才从后往前逐组收起（留 24px 余量）。用户手动折叠过
+   的分组（NAV_MANUAL）保持尊重，不自动展开。 */
+let NAV_MANUAL = {adv:false};
+function autoFitNav(){
+  const side=document.querySelector('.side');
+  if(!side) return;
+  const sub=$('#advSub'), t=$('#advToggle');
+  if(!sub||!t) return;
+  if(!NAV_MANUAL.adv){
+    sub.classList.add('open');
+    t.classList.add('open');
+  }
+  let guard=0;
+  while(side.scrollHeight > side.clientHeight+24 && guard++<8){
+    if(!sub.classList.contains('open')) break;
+    sub.classList.remove('open');
+    t.classList.remove('open');
+  }
 }
 
 document.addEventListener('click',e=>{
@@ -257,6 +283,11 @@ function render(){
   const box=$('#oneClickBox');
   if(box)box.innerHTML=viewOneClick();
   if(S.v==='sources'||S.v==='tools')paintLoginSession();
+  // 一键执行按钮只在任务中心显示
+  const oneClickBtn=$('#hdOneClick');
+  if(oneClickBtn) oneClickBtn.style.display = (S.v==='growth') ? '' : 'none';
+  // ★ 侧边栏分组按实际空间决定展开/收起（有空间就不折叠）
+  autoFitNav();
 }
 async function switchView(v,force){
   // 切走视图 = 离开当前登录界面 → 停掉没成功的登录会话，浏览器立即释放
@@ -300,7 +331,11 @@ function loadSources(){
     api('api/models?action=sources').catch(()=>({sources:[]})),
     api('api/models').catch(()=>({models_enriched:[],rate_summary:{}})),
     api('api/overview').catch(()=>({})),
-  ]).then(([lp,ac,au,src,md,ov])=>{
+    api('api/custom_apis?action=list').catch(()=>({apis:[]})),
+    // ★ 2026-10-07：接入源卡片要显示「模型 已启用/总数」，grouped 是唯一带
+    //   启用状态与凭据数的接口（并行拉，不拖慢首屏）
+    api('api/models?action=grouped').catch(()=>({groups:[]})),
+  ]).then(([lp,ac,au,src,md,ov,ca,gr])=>{
     S.data.loginPlatforms=lp.platforms||[];
     S.data.accounts=ac.accounts||[];
     S.data.accountStats=ac.stats||{};
@@ -311,8 +346,37 @@ function loadSources(){
     S.data.srcKinds=src.platform_kinds||{};
     S.data.srcCats=src.categories||[];
     S.data.srcSummary=src.summary||{};
+    S.data.customApis=ca.apis||[];
+    S.data.grouped=gr||{groups:[]};
     render();
   }).catch(e=>toast('加载接入源失败：'+e.message,'err'));
+}
+
+// 手动刷新接入源数据
+async function refreshSources(){
+  toast('正在刷新…');
+  try{
+    await loadSources();
+    toast('刷新完成','ok');
+  }catch(e){
+    toast('刷新失败：'+e.message,'err');
+  }
+}
+
+// 全局刷新：刷新当前页面数据
+async function globalRefresh(){
+  toast('正在刷新…');
+  try{
+    const v = S.v;
+    const loader = LOADERS[v];
+    if(loader){
+      S.loaded = '';  // 强制重新加载
+      await loader();
+    }
+    toast('刷新完成','ok');
+  }catch(e){
+    toast('刷新失败：'+e.message,'err');
+  }
 }
 
 /** 把「可登录平台 + 可拉目录平台 + 网关本地模型」合成一张源清单 */
@@ -327,34 +391,144 @@ function sourceList(){
   const withRate=rows.filter(x=>x.credits).length;
 
   const out=[];
-  // ★ 本地网关 EXE 卡已彻底移除（2026-10-05 用户多次要求）：
-  //   登录/倍率/签到/模型/多账号池轮询/429 冷却/v1/messages/用量/通知
-  //   全部面板原生化，EXE 不再是任何环节的依赖。
-  // 1) 本地反代（CLIProxyAPI）
-  const lp=S.data.lp||{};
+  // 获取后端分好的类
+  const srcKinds=S.data.srcKinds||{};
+  function getCategory(pid){
+    const k=srcKinds[pid];
+    if(!k)return '账号接入';
+    const kind=k.kind||'';
+    if(kind==='API')return '开放平台 API';
+    // LOCAL、WEB、其他都归到账号接入（扫码/设备码登录的）
+    return '账号接入';
+  }
+  
+  // 0) 自定义 API（放在最前面）
+  const customApis = S.data.customApis || [];
+  for(const ca of customApis){
+    out.push({
+      key: ca.id, name: ca.name, kind: 'API', category: '开放平台 API',
+      desc: ca.base_url,
+      method: 'file',
+      logged: !!ca.api_key,
+      endpoint: ca.base_url,
+      models: ca.model_count || 0,
+      withRate: 0, checkin: false,
+      canModels: true,
+      custom: true,
+      protocol: ca.protocol || 'openai',
+    });
+  }
+  // 加一个"新建自定义 API"的卡片（也放在最前面）
   out.push({
-    key:'localproxy', name:'本地反代（CLIProxyAPI）', kind:'本地反代',
-    desc:'Kimi / Codex / Claude / Antigravity / Grok / Devin / Meta 的 CLI 订阅反代',
-    logged:!!lp.online, endpoint:lp.base_url||'http://127.0.0.1:8318/v1',
-    models:lp.models||0, withRate:0, checkin:false,
-    canModels:true, local:true, view:'localproxy',
+    key: 'custom-new', name: '➕ 新建自定义 API', kind: 'API', category: '开放平台 API',
+    desc: '自定义名称、URL、Key，自动同步模型',
+    method: 'new_custom',
+    logged: false, endpoint: '',
+    models: 0, withRate: 0, checkin: false,
+    canModels: false,
+    custom_new: true,
   });
+  
+  // 官方API（只需要填API key）
+  // ★ 2026-10-13：url 必须为可直连的 OpenAI 兼容前缀（router.py / custom_apis.py
+  //   会往后拼 /chat/completions、/models）。以下 base_url 均经官方文档核验：
+  //   - 多数厂商用 /v1；Meta 用 /compat/v1；商汤用 /compatible-mode/v1；Cohere 用 /compatibility/v1；
+  //   - 智谱 /v4、千帆 /v2、火山 /api/v3、通义 /compatible-mode/v1、有道 /llmgateway/api/v1 为各自原生前缀。
+  const officialApis=[
+    // 海外官方API
+    {id:'openai', name:'OpenAI', desc:'OpenAI 官方', url:'https://api.openai.com/v1'},
+    {id:'anthropic', name:'Claude', desc:'Anthropic 官方', url:'https://api.anthropic.com/v1'},
+    {id:'google', name:'Gemini', desc:'Google AI 官方', url:'https://generativelanguage.googleapis.com/v1beta/openai'},
+    {id:'xai', name:'Grok', desc:'xAI 官方', url:'https://api.x.ai/v1'},
+    {id:'meta', name:'Llama', desc:'Meta 官方', url:'https://api.llama.com/compat/v1'},
+    {id:'mistral', name:'Mistral', desc:'Mistral 官方', url:'https://api.mistral.ai/v1'},
+    {id:'cohere', name:'Cohere', desc:'Cohere 官方', url:'https://api.cohere.ai/compatibility/v1'},
+    {id:'groq', name:'Groq', desc:'高速推理', url:'https://api.groq.com/openai/v1'},
+    {id:'together', name:'Together', desc:'开源模型', url:'https://api.together.xyz/v1'},
+    {id:'fireworks', name:'Fireworks', desc:'开源模型', url:'https://api.fireworks.ai/inference/v1'},
+    {id:'deepinfra', name:'DeepInfra', desc:'开源模型', url:'https://api.deepinfra.com/v1/openai'},
+    {id:'perplexity', name:'Perplexity', desc:'AI 搜索', url:'https://api.perplexity.ai/v1'},
+    {id:'replicate', name:'Replicate', desc:'模型托管', url:'https://api.replicate.com/v1'},
+    {id:'nvidia', name:'NVIDIA NIM', desc:'GPU 推理（免费）', url:'https://integrate.api.nvidia.com/v1'},
+    {id:'aws_bedrock', name:'AWS Bedrock', desc:'亚马逊云（需填完整地址）', url:'https://bedrock-runtime.us-east-1.amazonaws.com'},
+    {id:'azure_openai', name:'Azure OpenAI', desc:'微软云', url:'https://{your-resource}.openai.azure.com/openai'},
+    {id:'huggingface', name:'Hugging Face', desc:'HF 推理端点', url:'https://router.huggingface.co/v1'},
+    {id:'stability', name:'Stability AI', desc:'图像生成', url:'https://api.stability.ai/v1'},
+    {id:'openrouter', name:'OpenRouter', desc:'聚合 100+ 模型', url:'https://openrouter.ai/api/v1'},
+    {id:'blackforest', name:'FLUX', desc:'图像生成', url:'https://api.bfl.ml/v1'},
+    {id:'elevenlabs', name:'ElevenLabs', desc:'语音合成', url:'https://api.elevenlabs.io/v1'},
+    // 国内官方API
+    {id:'deepseek', name:'DeepSeek', desc:'深度求索', url:'https://api.deepseek.com/v1'},
+    {id:'zhipu', name:'智谱清言', desc:'智谱 AI', url:'https://open.bigmodel.cn/api/paas/v4'},
+    {id:'baichuan', name:'百川', desc:'百川智能', url:'https://api.baichuan-ai.com/v1'},
+    {id:'qwen', name:'通义千问', desc:'阿里云百炼', url:'https://dashscope.aliyuncs.com/compatible-mode/v1'},
+    {id:'wenxin', name:'文心一言', desc:'百度千帆', url:'https://qianfan.baidubce.com/v2'},
+    {id:'minimax', name:'MiniMax', desc:'MiniMax', url:'https://api.minimax.io/v1'},
+    {id:'stepfun', name:'阶跃星辰', desc:'StepFun', url:'https://api.stepfun.com/v1'},
+    {id:'siliconflow', name:'硅基流动', desc:'SiliconFlow', url:'https://api.siliconflow.cn/v1'},
+    {id:'tencent', name:'混元', desc:'腾讯云', url:'https://api.hunyuan.cloud.tencent.com/v1'},
+    {id:'xfyun', name:'讯飞星火', desc:'科大讯飞', url:'https://spark-api-open.xf-yun.com/v1'},
+    {id:'sensechat', name:'商汤日日新', desc:'商汤科技', url:'https://api.sensenova.cn/compatible-mode/v1'},
+    {id:'volcengine', name:'豆包', desc:'火山引擎', url:'https://ark.cn-beijing.volces.com/api/v3'},
+    {id:'360gpt', name:'360智脑', desc:'360', url:'https://api.360.cn/v1'},
+    {id:'youdao', name:'网易有道', desc:'网易', url:'https://openapi.youdao.com/llmgateway/api/v1'},
+    {id:'huawei', name:'华为盘古', desc:'华为云', url:'https://api.modelarts-maas.com/openai/v1'},
+    {id:'modelscope', name:'魔搭', desc:'阿里达摩院', url:'https://api.modelscope.cn/v1'},
+  ];
+  
+  for(const p of officialApis){
+    const pid='api-'+p.id;
+    // ★ 2026-10-12：loginPlatforms 里同 id 的平台（api-deepseek 等）带控制台
+    //   地址与登录态 —— 这里合并进去，避免下面第 3 段再推一张重复卡。
+    const lp=(S.data.loginPlatforms||[]).find(x=>x.id===pid);
+    out.push({
+      key:pid, name:p.name, kind:'API', category:'开放平台 API',
+      desc:p.desc,
+      method:'api_key',
+      login_url:(lp&&lp.login_url)||'',
+      paste_type:'api_key',
+      placeholder:(lp&&lp.placeholder)||'',
+      logged:logged.has(pid), endpoint:p.url,
+      models:0, withRate:0, checkin:false,
+      canModels:false, native:true, subType:p.type,
+    });
+  }
+  
+  // 2.5) 公益中转站（只放第三方公益站，官方平台已在开放平台API里）
+  // 后端 all_sites() 已给每条 site 打 category：'relay'=第三方公益站，'official'=官方平台。
+  // 直接按 category 过滤，避免官方平台（阿里云百炼/百度千帆/硅基流动/讯飞/Groq/OpenRouter…）
+  // 因为名字没命中硬编码 officialNames 而漏进公益中转站，造成与开放平台API重复。
+  const freeSites = (S.data.catalogSites || []).filter(s => s.category === 'relay');
+  for(const s of freeSites){
+    out.push({
+      key:'free-'+s.name, name:s.name, kind:'公益站', category:'公益中转站',
+      desc:s.bonus || '公益中转站',
+      method:'api_key',
+      // ★ 2026-10-13：用 api_url（网站根址 + /v1）而非纯网站根址，否则抽屉预填 URL 缺前缀
+      logged:false, endpoint:s.api_url || s.url,
+      models:0, withRate:0, checkin:!!s.checkin,
+      canModels:false, native:false,
+    });
+  }
+  
   // 3) 可登录的平台 —— WorkBuddy 国内/国际两张卡合并成一张
   const COPILOT_IDS={'wb-gateway':'国内站','wb-gateway-intl':'国际站'};
-  // APK 本地网关（手机上监听 0.0.0.0，面板走局域网反代）
-  const LAN_APK={'apk-trae':'Trae aigw.app','apk-doubao':'dev.doubao2api',
-                 'apk-yuanbao':'dev.yuanbao2api','apk-raccoon':'dev.raccoon2api',
-                 'apk-go':'wb2apimobile (Go)'};
   let copilotDone=false;
+  // Kimi 国内/国际也合并成一张
+  const KIMI_IDS={'sub-kimi':'国内站','sub-kimi-ai':'国际站'};
+  let kimiDone=false;
+  // ★ 2026-10-12：api-* 已在 officialApis 段推过卡（并带上了控制台地址），
+  //   这里跳过，否则同一 key 出两张重复卡。
+  const pushedKeys=new Set(out.map(x=>x.key));
   for(const p of (S.data.loginPlatforms||[])){
+    if(pushedKeys.has(p.id)) continue;
     if(COPILOT_IDS[p.id]){
       if(copilotDone)continue;
       copilotDone=true;
       const anyLogged=['wb-gateway','wb-gateway-intl'].some(x=>logged.has(x));
       out.push({
-        key:'copilot', name:'WorkBuddy 账号（国内/国际）', kind:'账号接入',
-        desc:'国内/国际是两个独立账号（额度/积分互不互通），分别扫码登录。'
-            +'二维码直接显示在面板里，不跳网页、不需要网关 EXE。',
+        key:'copilot', name:'WorkBuddy', kind:'账号接入', category:'账号接入',
+        desc:'国内/国际独立账号，扫码登录',
         method:'qrcode', merged:true,
         variants:[
           {pid:'wb-gateway', label:'国内站账号', logged:logged.has('wb-gateway')},
@@ -365,16 +539,34 @@ function sourceList(){
       });
       continue;
     }
+    if(KIMI_IDS[p.id]){
+      if(kimiDone)continue;
+      kimiDone=true;
+      const anyLogged=['sub-kimi','sub-kimi-ai'].some(x=>logged.has(x));
+      out.push({
+        key:'kimi', name:'Kimi Code', kind:'账号接入', category:'账号接入',
+        desc:'国内/国际独立账号，设备码登录',
+        method:'oauth_device', merged:true,
+        variants:[
+          {pid:'sub-kimi', label:'国内站', logged:logged.has('sub-kimi')},
+          {pid:'sub-kimi-ai', label:'国际站', logged:logged.has('sub-kimi-ai')},
+        ],
+        logged:anyLogged, endpoint:'auth.kimi.com',
+        models:0, withRate:0, checkin:false, canModels:false,
+      });
+      continue;
+    }
     const pl=plan[p.id];
     let desc=p.hint||'';
-    if(LAN_APK[p.id]){
-      desc+=' ▸ 局域网反代：手机与电脑同一 WiFi，在 App 里看监听端口，'
-          +'到「路由与模型」添加 http://手机IP:端口/v1（Bearer API Key）。'
-          +'面板据此把该平台模型接入统一端点与自动路由。';
-    }
+    if(desc.length>60) desc=desc.slice(0,60)+'…';
     out.push({
-      key:p.id, name:p.name, kind:'账号接入',
+      key:p.id, name:p.name, kind:getCategory(p.id), category:getCategory(p.id),
       desc:desc, method:p.method,
+      no_remote:!!p.no_remote_scan,
+      browser_capture:!!p.browser_capture,
+      paste_type:p.paste_type||'',
+      placeholder:p.placeholder||'',
+      login_url:p.login_url||'',
       logged:logged.has(p.id), endpoint:p.upstream||'',
       models:0, withRate:0,
       checkin:!!(pl&&pl.has_public_checkin),
@@ -382,6 +574,7 @@ function sourceList(){
       on:pl?pl.on:true, done:pl?pl.done_today:false,
     });
   }
+  
   return out;
 }
 
@@ -391,11 +584,18 @@ function sourceList(){
 let TOOLS_TAB = 'call';
 
 async function loadTools(){
+  // ★ 2026-10-07：顺带拉账号池与自动签到配置 —— 工具页里的「签到计划」
+  //   「账号与凭据」两个 tab 依赖 S.data.autoCheckin / S.data.accounts，
+  //   原来只在 loadSources 里赋值，直接以 #tools 进入时这两块是全空的。
   Promise.all([
     api('api/localproxy').catch(()=>({})),
     api('api/toolcall?action=list').catch(()=>({tools:[]})),
-  ]).then(([lp,tc])=>{
+    api('api/accounts').catch(()=>({accounts:[]})),
+    api('api/autocheckin?action=status').catch(()=>({platforms:[]})),
+  ]).then(([lp,tc,ac,au])=>{
     S.data.lp=lp; S.data.toolList=tc.tools||[]; S.data.toolNames=tc.names||[];
+    S.data.accounts=ac.accounts||[];
+    S.data.autoCheckin=au;
     render();
   }).catch(()=>{});
 }
@@ -538,6 +738,53 @@ function srcGroups(){
 let SRC_HELP = false;          // 「怎么用」是否展开
 let SRC_F = 'all';             // 筛选：all | on | off | proxy
 let SRC_Q = '';                // 搜索关键词
+// ★ 2026-10-07 重构（照 dsh-our-free-model 的来源卡片）：
+//   顶部分类 tab + 卡片上直接给「账号 n / 模型 启用数·总数 / 积分」+ 卡片内
+//   可展开账号与模型清单（模型行带启用开关）。
+let SRC_CAT = '全部';          // 当前分类 tab
+let SRC_ACCT_OPEN = {};        // 卡片内「账号」区展开态
+let SRC_MOD_OPEN = {};         // 卡片内「模型」区展开态
+let SRC_EXPAND = null;         // 卡片下方「登录路径」内联展开态（key）
+let SRC_POP_ANIM = false;      // 抽屉入场动画只播一次（轮询重绘不重播）
+
+/** 分类归属：免凭据车道单独成组（照参考项目的「免费模型 / 白嫖」分组） */
+function srcCatOf(s){
+  const grp = ((S.data.grouped||{}).groups||[]).find(g=>g.pid===s.key);
+  if(grp && grp.free_lane) return '免凭据白嫖';
+  return s.category || '其他';
+}
+function srcCatCounts(items){
+  const m = {};
+  for(const s of items){ const c = srcCatOf(s); m[c] = (m[c]||0)+1; }
+  return m;
+}
+function setSrcCat(c){ SRC_CAT = c; render(); }
+function srcToggleMod(k){ SRC_MOD_OPEN[k] = !SRC_MOD_OPEN[k]; render(); }
+
+/** 懒拉某个源的模型清单（只有平台动作/内置表能给的才有），结果缓存在内存 */
+async function refreshSrcModels(pid){
+  toast('正在拉取 '+pid+' 的模型清单…');
+  try{
+    const r = await post('api/models?action=platform_models', {platform: pid});
+    if(r.ok === false){ toast('拉取失败：'+(r.message||''), 'err'); return; }
+    S.data.srcModels = S.data.srcModels || {};
+    S.data.srcModels[pid] = r.models || [];
+    SRC_MOD_OPEN[pid] = true;
+    toast('已获取 '+((r.models||[]).length)+' 个模型'+(r.live?'（实时清单）':'（内置清单）'), 'ok');
+    // ★ 2026-10-12（用户反馈「获取完模型后路由与模型页没更新」）：
+    //   后端已把拉取结果持久化，grouped 会消费 —— 这里立即重拉 grouped，
+    //   「路由与模型」页马上就能看到新清单。
+    if(typeof loadModels==='function') loadModels();
+    render();
+  }catch(e){ toast('拉取失败：'+e.message, 'err'); }
+}
+/** 删掉某个源下的一个账号 */
+async function delSrcAccount(id, name){
+  if(!confirm('删除账号 '+(name||id)+' ？该操作只影响本机账号池。')) return;
+  const r = await post('api/accounts?action=delete', {id});
+  toast(r.ok===false ? ('删除失败：'+(r.message||'')) : '已删除', r.ok===false?'err':'ok');
+  loadSources();
+}
 
 function srcFilter(list){
   const q=(SRC_Q||'').trim().toLowerCase();
@@ -558,37 +805,210 @@ function srcCards(items){
   let h='';
   for(const s of items){
     const on=!!s.logged;
-    const fact=(((S.data.srcKinds||{})[s.key])||{}).facts||{};
-    const marks=((fact.desktop?'桌':'')+(fact.web?'网':'')+(fact.api?'API':''))||'';
-    // copilot 那张合并卡：不再内嵌 4 条子账号列表，改成一个「n/4 账号」小标签
-    const sub=s.variants
-      ? (s.variants.filter(v=>v.logged).length+'/'+s.variants.length+' 账号') : '';
-    h+='<div class="card sc'+(on?' on':'')+'" onclick="openSrc(\''+esc(s.key)+'\')">'
-      +'<div class="sc-h">'
+    const expanded = SRC_EXPAND===s.key;
+    // 「新建自定义 API」入口：需要独立表单，单独一行
+    if(s.custom_new){
+      h+='<div class="sr-row" onclick="openSrc(\'custom-new\')">'
+        +'<span class="sdot"></span>'
+        +'<div class="sr-name"><b>'+esc(s.name)+'</b>'
+        +'<span class="faint">'+esc(s.desc||'')+'</span></div>'
+        +'<button class="btn sm pri" onclick="event.stopPropagation();openSrc(\'custom-new\')">新建</button>'
+        +'</div>';
+      continue;
+    }
+    // ★ 2026-10-12（用户实测截图：WorkBuddy 合并卡「账号 0」但明明已登录）：
+    //   合并卡 key 是 'copilot'/'kimi'，账号池里存的是 variants 的 pid
+    //   （wb-gateway/wb-gateway-intl）—— 按 s.key 过滤永远是 0。
+    //   统一按 variants 的 pid 集合过滤账号、查 grouped 分组。
+    const vpids=(s.variants||[]).map(v=>v.pid);
+    const accts=(S.data.accounts||[]).filter(a=>
+      vpids.length ? (vpids.indexOf(a.platform)>=0) : (a.platform===s.key));
+    const grp=((S.data.grouped||{}).groups||[]).find(gr=>
+      vpids.length ? (vpids.indexOf(gr.pid)>=0) : (gr.pid===s.key));
+    const lazy=(S.data.srcModels||{})[vpids[0]||s.key];
+    const mods=lazy||(grp?grp.models:null);
+    const modTot=mods?mods.length:0;
+    const modOn=mods?mods.filter(m=>m.on!==false).length:0;
+    const quota=accts.map(a=>a.quota).filter(Boolean)[0]||'';
+    // ★ 2026-10-12 终版（new-api 渠道列表范式）：所有源统一一行 ——
+    //   两段式紧凑卡：上行=状态+名称+分类；下行=详情+账号+模型+积分+⟳。
+    //   外层 .src-list 是 auto-fill 网格 —— 宽度/缩放不同，列数自动变。
+    h+='<div class="sr-row'+(on?' on':'')+(expanded?' open':'')+'" onclick="expandSrc(\''+esc(s.key)+'\')">'
+      +'<div class="sr-top">'
       +'<span class="sdot'+(on?' ok':'')+'" title="'+(on?'已接入':'未接入')+'"></span>'
-      +'<span class="sc-n" title="'+esc(s.name)+'">'+esc(s.name)+'</span>'
-      +'<span class="tag '+(on?'ok':'')+'" style="margin-left:auto;flex:0 0 auto">'
-        +(on?'已接入':'未接入')+'</span>'
+      +'<div class="sr-name">'
+      +'<b title="'+esc(s.name)+'">'+esc(s.name)+'</b>'
+      +'<span class="faint" title="'+esc(s.endpoint||'')+'">'+esc(s.endpoint||s.desc||'—')+'</span>'
       +'</div>'
-      +'<div class="sc-d" title="'+esc(s.desc||'')+'">'+esc(s.desc||'—')+'</div>'
-      +'<div class="sc-t">'
-      +'<span class="tag info">'+esc(s.kind)+'</span>'
-      +(sub?'<span class="tag acc">'+esc(sub)+'</span>':'')
-      +(marks?'<span class="tag" title="桌=有桌面客户端 网=有网页版 API=开放接口">'
-         +esc(marks)+'</span>':'')
-      +(s.checkin?'<span class="tag" title="每日 '+(s.at||'')+' 自动签到">签到'
-         +(s.done?' ✓':'')+'</span>':'')
-      +(s.models?'<span class="tag">'+s.models+' 模型</span>':'')
+      +'<span class="tag info sr-cat">'+esc(s.kind||'')+'</span>'
       +'</div>'
       +'<div class="sc-f">'
-      +'<span class="sc-ep" title="'+esc(s.endpoint||'')+'">'+esc(s.endpoint||'—')+'</span>'
-      +'<button class="btn sm'+(on?'':' pri')+'" style="flex:0 0 auto" '
-        +'onclick="event.stopPropagation();openSrc(\''+esc(s.key)+'\')">'
-        +(on?'详情':'接入')+'</button>'
+      +'<button class="btn sm'+(on?'':' pri')+'" onclick="event.stopPropagation();expandSrc(\''+esc(s.key)+'\')">'+(expanded?'收起':(on?'详情':'接入'))+'</button>'
+      +'<span class="sc-stat" title="账号数">账号 <b>'+accts.length+'</b></span>'
+      +'<span class="sc-stat" title="模型（启用/总数）">模型 <b>'+(mods?(modOn+'/'+modTot):(s.models||0))+'</b></span>'
+      +(quota?'<span class="sc-stat" title="可用积分">积分 <b>'+esc(String(quota).slice(0,10))+'</b></span>':'')
+      +'<button class="btn sm gh" style="margin-left:auto" title="刷新账号状态与模型清单" onclick="event.stopPropagation();refreshSrcCard(\''+esc(s.key)+'\')">⟳</button>'
       +'</div>'
       +'</div>';
   }
   return h;
+}
+
+/** 右侧抽屉：某源的详情面（登录流程 + 账号 + 模型，new-api Drawer 范式）
+ *  animate=false → 不加入场动画（轮询重绘时不能重播，否则每 2 秒闪一次） */
+function srcDrawer(s, animate){
+  const on=!!s.logged;
+  // ★ 合并卡按 variants 的 pid 过滤（key 是 copilot/kimi，账号存 wb-gateway 等）
+  const vpids=(s.variants||[]).map(v=>v.pid);
+  const accts=(S.data.accounts||[]).filter(a=>
+    vpids.length ? (vpids.indexOf(a.platform)>=0) : (a.platform===s.key));
+  const grp=((S.data.grouped||{}).groups||[]).find(gr=>
+    vpids.length ? (vpids.indexOf(gr.pid)>=0) : (gr.pid===s.key));
+  const lazy=(S.data.srcModels||{})[vpids[0]||s.key];
+  const mods=lazy||(grp?grp.models:null);
+  const modOn=mods?mods.filter(m=>m.on!==false).length:0;
+  const modTot=mods?mods.length:0;
+  let body='';
+  // ★ 2026-10-12（用户反馈：公益中转站等 api_key 平台也被迫「先点接入再粘贴」，
+  //   与开放平台 API 的「直接输入 Key」不一致，多此一举）：直接输入 Key 的判定
+  //   从 kind==='API' 扩展到 method==='api_key' —— 凡纯粘贴 Key/Token 的平台
+  //   （官方 API、公益中转站等）一律内联输入框 + 接入按钮，不再绕一圈「接入」按钮。
+  //   saveApiKey(key) 从抽屉输入框读取 URL+Key 后新增自定义 API，不会错配。
+  if(s.kind==='API' || s.method==='api_key'){
+    // ★ 2026-10-13（用户反馈：平台 API / 公益站要把 URL 栏也显示出来，去掉
+    //   「方式一 · 跳转」「方式二 · 粘贴 API Key」文案，按 URL / KEY / 模型获取排布；
+    //   URL 默认填好 endpoint，用户可手动修改）。
+    const defaultUrl = esc(s.endpoint||'');
+    body='<div style="display:flex;flex-direction:column;gap:10px">'
+      +'<div style="display:flex;flex-direction:column;gap:4px">'
+      +'<span class="faint" style="font-size:11px">API URL</span>'
+      +'<input type="text" placeholder="https://..." style="width:100%;box-sizing:border-box" id="api_url_'+esc(s.key)+'" value="'+defaultUrl+'">'
+      +'</div>'
+      +'<div style="display:flex;flex-direction:column;gap:4px">'
+      +'<span class="faint" style="font-size:11px">API Key</span>'
+      +'<div style="display:flex;gap:6px">'
+      +'<input type="password" placeholder="填入 API Key..." style="flex:1" id="api_key_'+esc(s.key)+'">'
+      +'<button class="btn sm pri" onclick="saveApiKey(\''+esc(s.key)+'\')">'+(on?'更新':'接入并获取模型')+'</button>'
+      +'</div></div>'
+      +'</div>';
+  }else{
+    body=srcLoginPanel(s, true)
+      +'<div class="sc-sect"><i>账号（'+accts.length+'）</i>'
+      +'<button class="btn sm gh" onclick="refreshSrcAccounts(\''+esc(s.key)+'\')">⟳ 刷新状态</button></div>'
+      +'<div class="sc-sub">'+(accts.length?accts.map(a=>
+        '<div class="sc-row">'
+        +'<span class="mono" title="'+esc(a.name||'')+'">'+esc(a.name||a.platform)+'</span>'
+        +'<span class="faint">'+esc(a.secret||'')+(a.status&&a.status!=='unknown'?' · '+esc(a.status):'')+'</span>'
+        +'<button class="btn sm dgr" onclick="delSrcAccount(\''+esc(a.id)+'\',\''+esc(a.name||'')+'\')">删除</button>'
+        +'</div>').join(''):'<div class="faint" style="padding:6px 0;font-size:11.5px">还没有账号，完成上方登录后会自动出现在这里</div>')+'</div>'
+      +'<div class="sc-sect"><i>模型（'+modOn+'/'+modTot+'）</i>'
+      +(mods?'<button class="btn sm gh" onclick="srcToggleMod(\''+esc(s.key)+'\')">'+(SRC_MOD_OPEN[s.key]?'收起清单':'展开清单')+'</button>'
+            :'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">拉取清单</button>')
+      +'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">⟳ 刷新</button></div>'
+      +((SRC_MOD_OPEN[s.key]&&mods)?'<div class="sc-sub">'+mods.slice(0,40).map(m=>
+        '<div class="sc-row">'
+        +'<span class="mono">'+esc(m.id)+'</span>'
+        +'<span class="faint">'+esc(m.name||'')+'</span>'
+        +'<button class="btn sm'+(m.on===false?'':' pri')+'" onclick="toggleModel(\''+gmJs(m.id)+'\')">'+(m.on===false?'已关闭':'已启用')+'</button>'
+        +'</div>').join('')+'</div>':'');
+  }
+  return '<div class="sc-mask" onclick="closeSrcPop()"></div>'
+    +'<div class="sc-drawer'+(animate?'':' no-anim')+'" onclick="event.stopPropagation();">'
+    +'<div class="dr-h"><b title="'+esc(s.name)+'">'+esc(s.name)+'</b>'
+    +'<span class="tag '+(on?'ok':'')+'">'+(on?'已接入':'未接入')+'</span>'
+    +'<button class="btn sm gh" style="margin-left:auto" onclick="closeSrcPop()">✕ 关闭</button></div>'
+    +(s.desc?'<div class="faint" style="font-size:11.5px;margin:2px 0 8px">'+esc(s.desc)+'</div>':'')
+    +body
+    +'</div>';
+}
+
+/** 关闭抽屉 */
+function closeSrcPop(){
+  SRC_EXPAND=null;
+  render();
+}
+
+/** 卡片 ⟳：统一刷新 —— 账号状态 + 平台态；该平台拉过模型清单的话连模型一起刷 */
+async function refreshSrcCard(pid){
+  toast('正在刷新 '+pid+' …');
+  await loadSources();
+  if((S.data.srcModels||{})[pid]) await refreshSrcModels(pid);
+  else toast('已刷新','ok');
+}
+
+/** 刷新某个源的账号状态（轻量：只重拉账号与平台态，不动模型） */
+async function refreshSrcAccounts(pid){
+  toast('正在刷新账号状态…');
+  await loadSources();
+  toast('账号状态已刷新','ok');
+}
+
+/** 保存 API Key 并获取模型（从抽屉 URL/Key 输入框读取） */
+async function saveApiKey(key){
+  const urlInput = document.getElementById('api_url_'+key);
+  const keyInput = document.getElementById('api_key_'+key);
+  if(!urlInput || !keyInput){
+    toast('找不到输入框', 'err');
+    return;
+  }
+  const url = urlInput.value.trim();
+  const apiKey = keyInput.value.trim();
+  if(!url){
+    toast('请输入 API URL', 'warn');
+    return;
+  }
+  if(!apiKey){
+    toast('请输入 API Key', 'warn');
+    return;
+  }
+  
+  toast('正在保存并获取模型...', 'info');
+  
+  try{
+    // ★ 2026-10-07 重写：原来调的是 api/custom_apis?action=add_from_preset ——
+    //   后端根本没有这个 action（只认 list/add/update/delete/sync），必然失败；
+    //   而且请求体还被 {method,body} 二次包装（api() 只收 (path, body)）。
+    //   现在走两条真实存在的链路：
+    //     ① 已知官方平台（api-<id>）：写进账号池，platform_models 会用 Bearer
+    //        拉实时模型清单；
+    //     ② 同时建一条自定义 API（任意 base_url + key 都能直接当上游用）。
+    let saved=false, msg='';
+    const known=!!((S.data.srcKinds||{})['api-'+key]);
+    if(known){
+      const r=await post('api/accounts?action=add', {
+        platform:'api-'+key, name:key+' 官方 Key', type:'api_key',
+        secret:apiKey, source:'接入源页填写'});
+      if(r.ok!==false){ saved=true; msg='已写入账号池'; }
+      else msg=(r.message||'写入账号池失败');
+    }
+    const addRes=await post('api/custom_apis?action=add', {
+      name:key+'（接入源）', protocol:'openai',
+      base_url:url||'', api_key:apiKey});
+    if(addRes.ok&&addRes.id){
+      const sync=await post('api/custom_apis?action=sync', {id:addRes.id});
+      msg=sync.ok?(sync.message||'已同步模型'):'已保存（模型同步失败）';
+      saved=true;
+    } else if(!saved){
+      msg=(addRes.message||addRes.error||'保存失败');
+    }
+    if(saved){ toast('已接入：'+msg,'ok'); await loadSources(); }
+    else { toast('保存失败：'+msg,'err'); }
+  }catch(e){
+    toast('保存失败：'+e.message, 'err');
+  }
+}
+
+/** 切换路由详情展开/收起 */
+function toggleRouteDetail(){
+  const body = document.getElementById('routeDetailBody');
+  const caret = document.getElementById('routeDetailCaret');
+  if(body.style.display === 'none'){
+    body.style.display = 'block';
+    caret.textContent = '▾';
+  } else {
+    body.style.display = 'none';
+    caret.textContent = '▸';
+  }
 }
 
 function srcSegHtml(){
@@ -602,12 +1022,55 @@ function srcSegHtml(){
       +'onclick="SRC_F=\''+x[0]+'\';srcRenderGrid()">'+x[1]+'</button>').join('');
 }
 
-/** 只重绘网格 + 筛选条：整页 render() 会让搜索框失焦，所以这里局部更新 */
+/** 分类 tab 条（照 dsh-our-free-model：一排分组，每组带 已接入/总数） */
+let SRC_CATS_OPEN = false;   // ★ 分类竖排列表默认收起（显示三行，展开可滚动）
+function toggleSrcCats(){
+  SRC_CATS_OPEN = !SRC_CATS_OPEN;
+  const box = document.getElementById('srcCatsList');
+  if(box) box.classList.toggle('open', SRC_CATS_OPEN);
+  const t = document.getElementById('srcCatsToggle');
+  if(t) t.innerHTML = SRC_CATS_OPEN ? '▴ 收起' : '▾ 展开';
+}
+function srcCatsHtml(items){
+  const catN = srcCatCounts(items);
+  const names = Object.keys(catN).sort((a,b)=>catN[b]-catN[a]);
+  // ★ 2026-10-12（用户反馈「这才几个怎么就收起了」）：**数量少就不折叠** ——
+  //   分类 ≤5 个时全部直接显示（无展开按钮/无高度限制）；
+  //   只有超过 5 个才默认收起三行 + 展开滚动。「全部」始终固定顶部。
+  const collapsed = names.length > 5;
+  let list = '';
+  for(const c of names){
+    const all = (c==='全部') ? items : items.filter(s=>srcCatOf(s)===c);
+    if(!all.length) continue;
+    const onN = all.filter(s=>s.logged).length;
+    list += '<button class="'+(SRC_CAT===c?'on':'')+'" onclick="setSrcCat(\''+esc(c)+'\')">'
+      + '<span class="cn">'+esc(c)+'</span><span class="faint">'+onN+'/'+all.length+'</span></button>';
+  }
+  return '<div class="src-cats-v" id="srcCats">'
+    + '<button class="cat-all'+(SRC_CAT==='全部'?' on':'')+'" onclick="setSrcCat(\'全部\')">'
+    + '<span class="cn">全部</span><span class="faint">'
+    + items.filter(s=>s.logged).length+'/'+items.length+'</span></button>'
+    + '<div class="cat-list'+(collapsed && !SRC_CATS_OPEN ? '' : ' open')+'" id="srcCatsList">'+list+'</div>'
+    + (collapsed ? '<button class="cat-toggle" id="srcCatsToggle" onclick="toggleSrcCats()">'
+      + (SRC_CATS_OPEN?'▴ 收起':'▾ 展开')+'</button>' : '')
+    + '</div>';
+}
+/** 网格本体（受当前分类 tab 约束） */
+function srcGridHtml(shown){
+  const items = (SRC_CAT==='全部') ? shown : shown.filter(s=>srcCatOf(s)===SRC_CAT);
+  if(!items.length)
+    return '<div class="empty">这个分类下暂时没有源，点上面的「全部」看看</div>';
+  return '<div class="src-list">'+srcCards(items)+'</div>';
+}
+/** ★ 2026-10-07：只重绘 tab + 网格（整页 render() 会让搜索框失焦）。
+    原来这里直接 g.innerHTML=srcCards(...)，把 .srcgrid 包裹层和分类 tab 都丢了。 */
 function srcRenderGrid(){
   const g=document.getElementById('srcGrid');
   if(!g) return;
   const items=srcFilter(sourceList());
-  g.innerHTML=srcCards(items);
+  g.innerHTML=srcGridHtml(items);
+  const tc=document.getElementById('srcCats');
+  if(tc) tc.outerHTML=srcCatsHtml(sourceList());
   const seg=document.getElementById('srcSeg');
   if(seg) seg.innerHTML=srcSegHtml();
   const cnt=document.getElementById('srcCnt');
@@ -654,17 +1117,54 @@ function viewSources(){
       +shown.length+' 个</span>'
     +'</div>';
 
-  h+='<div class="grid g3 srcgrid" id="srcGrid">'+srcCards(shown)+'</div>';
+  // ★ 2026-10-12（用户拍板）：分类改**左侧竖排**（全部固定 + 收起露三行 +
+  //   展开滚动），与右侧搜索/网格组成两栏布局。
+  h += '<div class="src-body">'
+    + srcCatsHtml(items)
+    + '<div class="src-main">'
+    + '<div id="srcGrid">' + srcGridHtml(shown) + '</div>'
+    + '</div></div>';
+  // ★ 详情 = 右侧抽屉（new-api 范式）：登录+账号+模型全在里面。
+  //   动画只在抽屉**首次打开**时播；轮询重绘不重播（否则每 2 秒闪一下）。
+  if(SRC_EXPAND){
+    const ds = items.find(x=>x.key===SRC_EXPAND)
+      || sourceList().find(x=>x.key===SRC_EXPAND);
+    if(ds){
+      const animate = !SRC_POP_ANIM;
+      SRC_POP_ANIM = true;
+      h += srcDrawer(ds, animate);
+    }
+  }
   return h;
 }
+
+// （2026-10-07：分类折叠分组已换成 srcCatsHtml 的 tab 条，
+//   SRC_OPEN_CATS / toggleSrcCat 一并删除，避免留下会失效的死状态）
 
 function setSrcTab(k){ SRC_TAB=k; render(); }
 
 function openSrc(key){
+  // ★ 2026-10-12：平台卡的「详情」不再跳页（一律内联展开，见 expandSrc）。
+  //   openSrc 只保留给「新建自定义 API」这种确实需要独立表单的入口。
   S.data.srcDetail=key;
   SRC_VIEW='detail';
   render();
 }
+function expandSrc(key){
+  const opening = SRC_EXPAND!==key;
+  SRC_EXPAND = (SRC_EXPAND===key ? null : key);
+  // 展开时顺手把同一张卡的账号/模型区也打开，减少二次点击
+  if(SRC_EXPAND){
+    SRC_ACCT_OPEN[key]=true;
+  }
+  // 抽屉每次「从关到开」重播一次入场动画；关闭时复位标记
+  SRC_POP_ANIM = false;
+  render();
+  // ★ 2026-10-12（用户拍板「点接入才跳转」）：**不再**在抽屉打开时自动发起登录。
+  //   打开详情只是看，点「接入 / 接入并打开登录页」才真正跳转（srcLogin）。
+  //   —— 这也是最初「打开详情就弹登录窗口」困惑的根因，已移除。
+}
+
 /* 返回源列表：顺手把「正在等扫码、但还没登录成功」的会话停掉。
  *
  * ★ 2026-10-06 用户点破的简化思路：
@@ -851,6 +1351,70 @@ function srcDetail(){
     S.data.srcDetail=null; SRC_VIEW='card';
     return viewSources();
   }
+  
+  // 自定义 API：新建表单
+  if(s.custom_new){
+    return backbar('新建自定义 API')
+      +'<div class="card"><div class="ch"><b>新建自定义 API</b>'
+      +'<button class="btn sm" onclick="closeSrc()">← 返回源列表</button></div><div class="cb">'
+      +'<div class="form-group">'
+      +'<label>名称</label>'
+      +'<input id="ca_name" type="text" placeholder="例如：我的 DeepSeek" style="width:100%">'
+      +'</div>'
+      +'<div class="form-group">'
+      +'<label>协议类型</label>'
+      +'<select id="ca_protocol" style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px">'
+      +'<option value="openai">OpenAI 兼容（/v1/chat/completions）</option>'
+      +'<option value="anthropic">Anthropic（/v1/messages）</option>'
+      +'</select>'
+      +'</div>'
+      +'<div class="form-group">'
+      +'<label>Base URL</label>'
+      +'<input id="ca_baseurl" type="text" placeholder="例如：https://api.deepseek.com/v1" style="width:100%">'
+      +'</div>'
+      +'<div class="form-group">'
+      +'<label>API Key</label>'
+      +'<input id="ca_apikey" type="password" placeholder="sk-..." style="width:100%">'
+      +'</div>'
+      +'<div class="btnrow" style="margin-top:15px">'
+      +'<button class="btn pri" onclick="saveCustomApi()">保存并同步模型</button>'
+      +'<button class="btn" onclick="closeSrc()">取消</button>'
+      +'</div>'
+      +'<div id="ca_result" class="mt"></div>'
+      +'</div></div>';
+  }
+  
+  // 自定义 API：详情页
+  if(s.custom){
+    const ca = (S.data.customApis||[]).find(x=>x.id===s.key);
+    let h = backbar(s.name)
+      +'<div class="card"><div class="ch"><b>'+esc(s.name)+'</b>'
+      +'<button class="btn sm" onclick="closeSrc()">← 返回源列表</button></div><div class="cb">';
+    
+    h += '<div class="flex mb">'
+      + '<span class="tag '+(s.logged?'ok':'')+'">'+(s.logged?'已配置':'未配置')+'</span>'
+      + '<span class="tag info">自定义 API</span>'
+      + '</div>';
+    
+    h += '<div class="muted" style="font-size:12.5px;margin-bottom:10px">'
+      + 'Base URL: <code>'+esc(s.endpoint)+'</code></div>';
+    
+    if(ca){
+      h += '<div class="note">已同步 <b>'+ca.model_count+'</b> 个模型'
+        + (ca.last_sync?' · 上次同步：'+esc(ca.last_sync):'') + '</div>';
+    }
+    
+    h += '<div class="btnrow" style="margin-top:15px">'
+      + '<button class="btn pri" onclick="syncCustomApi(\''+esc(s.key)+'\')">同步模型</button>'
+      + '<button class="btn" onclick="editCustomApi(\''+esc(s.key)+'\')">编辑配置</button>'
+      + '<button class="btn dgr" onclick="delCustomApi(\''+esc(s.key)+'\')">删除</button>'
+      + '</div>';
+    
+    h += '<div id="ca_result" class="mt"></div>';
+    h += '</div></div>';
+    return h;
+  }
+  
   if(s.view==='localproxy'){
     return backbar(s.name)+'<div class="card"><div class="ch"><b>'+esc(s.name)+'</b>'
       +'<button class="btn sm" onclick="closeSrc()">← 返回源列表</button></div>'
@@ -867,46 +1431,7 @@ function srcDetail(){
     +'</div>';
   h+='<div class="muted" style="font-size:12.5px;margin-bottom:10px">'+esc(s.desc||'')+'</div>';
 
-  if(s.variants){
-    h+='<div style="margin:10px 0">'
-      +s.variants.map(v=>
-        '<div class="flex" style="justify-content:space-between;align-items:center;'
-        +'padding:7px 0;border-top:1px solid var(--line2)">'
-        +'<span style="font-size:13px">'+esc(v.label)+'</span>'
-        +(v.logged
-          ?'<span class="tag ok">已登录</span>'
-          :'<button class="btn pri sm" onclick="srcLogin(\''+esc(v.pid)+'\')">'
-            +'扫码接入</button>')
-        +'</div>').join('')
-      +'<div class="faint" style="font-size:11.5px;margin-top:6px">'
-        +'国内/国际是两个独立账号，额度互不互通；需要哪个就登哪个。</div>'
-      +'</div>';
-    // 扫码后会话卡直接显示在这里（二维码就在当前页可见，不用跑去「当前登录」）
-    if(S.data.loginSession)h+=viewLoginSession('copilot');
-  }else if(s.logged){
-    h+='<div class="note ok" style="color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)">'
-      +'已接入 · 凭据 <code>'+esc(acc?String(acc.secret||''):'')+'</code>'
-      +'（'+esc(acc&&acc.source||'')+'，'+esc(acc&&acc.obtained_at||'')+'）</div>';
-    h+='<div class="btnrow">'
-      +'<button class="btn" onclick="loadSrcModels(\''+esc(s.key)+'\')">查看该源模型</button>'
-      +(s.checkin?'<button class="btn pri" onclick="acRunOne(\''+esc(s.key)+'\')">立即签到</button>':'')
-      +'<button class="btn" onclick="platformProbe(\''+esc(s.key)+'\')">探测端点</button>'
-      +'<button class="btn dgr" onclick="delAccountFor(\''+esc(s.key)+'\')">解除接入</button>'
-      +'</div>';
-    h+='<div id="srcModels" class="mt"></div>';
-  }else{
-    h+='<div class="btnrow">'
-      +'<button class="btn pri" onclick="srcLogin(\''+esc(s.key)+'\')">'
-      +(s.method==='qrcode'?'扫码接入':s.method==='cookie'?'用浏览器 Cookie 接入':'填 API Key 接入')
-      +'</button>'
-      +(s.method==='cookie'
-        ?'<button class="btn" title="无需本机浏览器：服务器起无头 Chromium 打开登录页，'
-          +'二维码抓回面板用手机扫，登录后 Cookie 自动入库" '
-          +'onclick="startLogin(\''+esc(s.key)+'\',\'\',1)">🌐 远程在线登录</button>':'')
-      +'<button class="btn" onclick="platformProbe(\''+esc(s.key)+'\')">先探测端点</button>'
-      +'</div>';
-    h+=viewLoginSession(s.key);
-  }
+  h+=srcLoginPanel(s);
   h+='</div></div>';
   return h;
 }
@@ -915,6 +1440,204 @@ function srcLogin(pid){
   const p=(S.data.loginPlatforms||[]).find(x=>x.id===pid);
   startLogin(pid,(p&&p.edition)||'');
 }
+
+/** 抽出「登录路径」UI，供卡片内联展开共用。
+ * 包含：variant 选择 / 已接入动作 / 未接入登录按钮 / 当前登录会话（二维码/链接）。
+ * compact=true：内联卡片模式 —— 不渲染探测端点/平台内部能力等旧详情页的大块内容，
+ * 登录会话也用轻量容器（2026-10-12 用户反馈展开后排版乱）。 */
+function srcLoginPanel(s, compact){
+  const acc=(S.data.accounts||[]).find(a=>a.platform===s.key)
+    ||(s.variants?(S.data.accounts||[]).find(a=>s.variants.some(v=>v.pid===a.platform)):null);
+  let h='';
+  if(s.variants){
+    const btnText = s.method==='qrcode' ? '跳转登录'
+      : s.method==='oauth_device' ? '设备码登录'
+      : s.method==='oauth_pkce' ? '授权登录'
+      : '接入';
+    h+='<div style="margin:4px 0">'
+      +'<div class="faint" style="font-size:11.5px;margin-bottom:4px">'
+      +'国内/国际是两个独立账号，额度互不互通；需要哪个就登哪个。</div>'
+      +s.variants.map(v=>
+        '<div class="flex" style="justify-content:space-between;align-items:center;'
+        +'padding:7px 0;border-top:1px solid var(--line2)">'
+        +'<span style="font-size:13px">'+esc(v.label)+'</span>'
+        +(v.logged
+          ?'<span class="tag ok">已登录</span>'
+          :'<button class="btn pri sm" onclick="event.stopPropagation();srcLogin(\''+esc(v.pid)+'\')">'
+            +btnText+'</button>')
+        +'</div>').join('')
+      +'<div class="faint" style="font-size:11.5px;margin-top:6px">'
+        +'国内/国际是两个独立账号，额度互不互通；需要哪个就登哪个。</div>'
+      +'</div>';
+    if(S.data.loginSession)h+=viewLoginSession(s.key, compact);
+    // ★ 2026-10-12（跳转制）：手动粘贴降级为 <details> 低调兜底，不在主区摆表单
+    const vp = s.variants.map(v=>'<option value="'+esc(v.pid)+'">'+esc(v.label)+'</option>').join('');
+    h+='<details style="margin-top:8px">'
+      +'<summary class="faint" style="font-size:11.5px;cursor:pointer">登录页打不开？手动粘贴 accessToken</summary>'
+      +'<div class="row n" style="gap:8px;margin:6px 0">'
+      +'<select id="pasteVariant_'+esc(s.key)+'" style="padding:6px 8px;border:1px solid var(--line2);'
+      +'border-radius:8px;font-size:12px">'+vp+'</select>'
+      +'<span class="faint" style="font-size:11.5px;align-self:center">选对应站点</span></div>'
+      +'<textarea id="directPaste_'+esc(s.key)+'" rows="3" placeholder="粘贴 accessToken（JWT，eyJ… 开头）" '
+      +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;'
+      +'font-family:monospace;font-size:12px"></textarea>'
+      +'<button class="btn pri sm" style="margin-top:6px" '
+      +'onclick="submitDirectPasteVariant(\''+esc(s.key)+'\',\'token\')">保存凭据</button>'
+      +'</details>';
+  }else if(s.logged){
+    // ★ 2026-10-12：展开面板里的「已接入」精简版 ——
+    //   大模型表（dataTable）从面板里移除（用户反馈冗余），模型用卡片上的
+    //   「查看清单」紧凑列表；这里只留状态 + 核心动作。
+    h+='<div class="note ok" style="color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)">'
+      +'已接入 · 凭据 <code>'+esc(acc?String(acc.secret||''):'')+'</code>'
+      +'（'+esc(acc&&acc.source||'')+'，'+esc(acc&&acc.obtained_at||'')+'）</div>';
+    h+='<div class="btnrow">'
+      +(s.checkin?'<button class="btn pri" onclick="acRunOne(\''+esc(s.key)+'\')">立即签到</button>':'')
+      +'<button class="btn" onclick="platformProbe(\''+esc(s.key)+'\')">探测端点</button>'
+      +'<button class="btn dgr" onclick="delAccountFor(\''+esc(s.key)+'\')">解除接入</button>'
+      +'</div>';
+  }else{
+    // ★ Loomy：签名 API 登录（短信/密码/session 三方式，无需浏览器）
+    if(s.method==='loomy'){
+      h+='<div class="faint" style="font-size:11.5px;margin:2px 0 4px">方式一 · 短信验证码登录（免浏览器，无设备重绑问题）：</div>'
+        +'<div class="row n" style="gap:6px">'
+        +'<input id="loomyPhone_'+esc(s.key)+'" placeholder="手机号" style="flex:1 1 130px" oninput="event.stopPropagation()">'
+        +'<button class="btn sm pri" onclick="event.stopPropagation();loomySendSms(\''+esc(s.key)+'\')">发送验证码</button>'
+        +'</div>'
+        +'<div class="row n" style="gap:6px;margin-top:6px">'
+        +'<input id="loomyCode_'+esc(s.key)+'" placeholder="短信验证码" style="flex:1 1 130px" oninput="event.stopPropagation()">'
+        +'<input id="loomyMsgid_'+esc(s.key)+'" type="hidden">'
+        +'<button class="btn sm pri" onclick="event.stopPropagation();loomySmsVerify(\''+esc(s.key)+'\')">登录</button>'
+        +'</div>'
+        +'<div class="sc-sect"><i>方式二 · 密码登录</i>'
+        +'<span class="faint" style="font-size:11px">需在讯飞账号中心设置过密码</span></div>'
+        +'<div class="row n" style="gap:6px">'
+        +'<input id="loomyPwdPhone_'+esc(s.key)+'" placeholder="手机号" style="flex:1 1 130px" oninput="event.stopPropagation()">'
+        +'<input id="loomyPwd_'+esc(s.key)+'" type="password" placeholder="密码" style="flex:1 1 130px" oninput="event.stopPropagation()">'
+        +'<button class="btn sm pri" onclick="event.stopPropagation();loomyPwdLogin(\''+esc(s.key)+'\')">登录</button>'
+        +'</div>';
+      const sess=S.data.loginSession;
+      if(sess && sess.platform===s.key) h+=viewLoginSession(s.key, compact);
+      h+='<div class="sc-sect"><i>方式三 · 粘贴 session</i>'
+        +'<span class="faint" style="font-size:11px">32 字符，登录后服务端下发，14 天有效</span></div>'
+        +'<textarea id="directPaste_'+esc(s.key)+'" rows="3" placeholder="粘贴 session…" '
+        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;'
+        +'font-family:monospace;font-size:12px"></textarea>'
+        +'<button class="btn pri sm" style="margin-top:6px" '
+        +'onclick="submitDirectPaste(\''+esc(s.key)+'\',\'token\')">保存凭据</button>';
+      return h;
+    }
+    // ★ 2026-10-12（用户拍板）：方式一收敛为「一键登录」—— 按优先级自动执行：
+    //   扫码（页面有码就抓码）→ 跳转（打开登录页，用户在里面登录）→
+    //   Cookie（登录后自动抓取入库）。远程无头/粘贴保留为备用。
+    const pasteKind = (s.method==='cookie') ? 'Cookie'
+      : (s.method==='file') ? (s.paste_type==='token' ? 'Token' : 'API Key / Token')
+      : 'Token';
+    const pasteType = s.paste_type || (s.method==='cookie' ? 'cookie'
+      : s.method==='file' ? 'api_key' : 'token');
+    // ★ 2026-10-12（用户拍板「取消所有扫码连接，全部改为跳转」）：
+    //   点「接入」即跳转官方登录页（抽屉打开时自动发起），面板不渲染二维码、
+    //   不摆方式一/二表单；手动粘贴降级为 <details> 里的低调兜底。
+    h+=viewLoginSession(s.key, compact);
+    const _sess=S.data.loginSession;
+    const _sessActive=_sess&&(_sess.status==='pending'||_sess.status==='waiting');
+    if(!_sessActive){
+      h+='<div class="note" style="margin:8px 0 0">点「接入」即打开官方登录页——'
+        +'在浏览器里完成登录，凭据会自动入库（无需在面板里扫码）。</div>';
+      // ★ 2026-10-12 修复：裸 <a> 链接不会启动后端会话/轮询 → 凭据永不回收。
+      //   主按钮改为 srcLogin(key)（与 variants 分支一致），后端开静默令牌通道
+      //   + 设会话 + 起 _poll_native；「我自己打开」作为在自有浏览器里登录的辅助入口。
+      h+='<div class="btnrow" style="margin-top:8px">'
+        +'<button class="btn pri" onclick="event.stopPropagation();srcLogin(\''+esc(s.key)+'\')">↗ 接入并打开登录页</button>';
+      if(s.login_url){
+        h+='<a class="btn" href="'+esc(s.login_url)+'" target="_blank" rel="noreferrer" '
+          +'title="在「我自己的浏览器」里打开登录页">我自己打开</a>';
+      }
+      h+='<button class="btn" onclick="event.stopPropagation();platformProbe(\''+esc(s.key)+'\')">先探测端点</button>'
+        +'</div>';
+      h+='<details style="margin-top:8px">'
+        +'<summary class="faint" style="font-size:11.5px;cursor:pointer">'
+        +'登录页打不开？手动粘贴'+esc(pasteKind)+'</summary>'
+        +'<textarea id="directPaste_'+esc(s.key)+'" rows="3" style="margin-top:6px" '
+        +'placeholder="'+esc(s.placeholder || ('粘贴 '+pasteKind+'…'))+'" '
+        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;'
+        +'font-family:monospace;font-size:12px"></textarea>'
+        +'<button class="btn pri sm" style="margin-top:6px" '
+        +'onclick="submitDirectPaste(\''+esc(s.key)+'\',\''+esc(pasteType)+'\')">保存凭据</button>'
+        +'</details>';
+    }
+  }
+  return h;
+}
+
+/** 方式二：不发起登录会话，直接把粘贴的凭据写进账号池。
+ *  后端 api/login?action=submit 无 id 时走「手动添加」分支。 */
+async function submitDirectPaste(pid, type){
+  const box=document.getElementById('directPaste_'+pid);
+  const v=(box?box.value:'').trim();
+  if(!v){ toast('请先粘贴凭据','warn'); return; }
+  const r=await post('api/login?action=submit',
+    {platform:pid, name:pid+'（手动粘贴）', type:type||'cookie', secret:v});
+  if(r.ok){
+    toast('已保存到账号池','ok');
+    box.value='';
+    await loadSources();
+  }else{
+    toast(r.message||r.error||'保存失败','err');
+  }
+}
+
+/** Loomy 短信登录三步（签名 API，免浏览器） */
+async function loomySendSms(key){
+  const phone=document.getElementById('loomyPhone_'+key).value.trim();
+  if(!phone){ toast('请先输入手机号','warn'); return; }
+  toast('正在发送验证码…');
+  const r=await post('api/login?action=loomy_sms_send',{phone});
+  if(r.ok && r.msgid){
+    document.getElementById('loomyMsgid_'+key).value=r.msgid;
+    toast('验证码已发送，请查收短信','ok');
+  }else{
+    toast(r.message||r.error||'发送失败','err');
+  }
+}
+async function loomySmsVerify(key){
+  const phone=document.getElementById('loomyPhone_'+key).value.trim();
+  const code=document.getElementById('loomyCode_'+key).value.trim();
+  const msgid=document.getElementById('loomyMsgid_'+key).value.trim();
+  if(!phone||!code||!msgid){ toast('请先填手机号并获取验证码','warn'); return; }
+  toast('正在登录…');
+  const r=await post('api/login?action=loomy_sms_verify',{phone,code,msgid});
+  if(r.ok){ toast('Loomy 登录成功','ok'); await loadSources(); }
+  else toast(r.message||r.error||'登录失败','err');
+}
+async function loomyPwdLogin(key){
+  const phone=document.getElementById('loomyPwdPhone_'+key).value.trim();
+  const pwd=document.getElementById('loomyPwd_'+key).value.trim();
+  if(!phone||!pwd){ toast('请填手机号和密码','warn'); return; }
+  toast('正在登录…');
+  const r=await post('api/login?action=loomy_pwd',{phone,password:pwd});
+  if(r.ok){ toast('Loomy 登录成功','ok'); await loadSources(); }
+  else toast(r.message||r.error||'登录失败','err');
+}
+
+/** 合并卡（copilot / kimi）变体选择版：平台 id 取下拉框当前值 */
+async function submitDirectPasteVariant(key, type){
+  const sel=document.getElementById('pasteVariant_'+key);
+  const pid=(sel&&sel.value)||key;
+  const box=document.getElementById('directPaste_'+key);
+  const v=(box?box.value:'').trim();
+  if(!v){ toast('请先粘贴凭据','warn'); return; }
+  const r=await post('api/login?action=submit',
+    {platform:pid, name:pid+'（手动粘贴）', type:type||'token', secret:v});
+  if(r.ok){
+    toast('已保存到 '+pid,'ok');
+    box.value='';
+    await loadSources();
+  }else{
+    toast(r.message||r.error||'保存失败','err');
+  }
+}
+
 async function loadSrcModels(pid){
   const box=$('#srcModels');
   if(box)box.innerHTML='<div class="sk line" style="height:34px"></div>';
@@ -1211,12 +1934,34 @@ async function loadGrowth(){
   render();
 }
 function viewGrowth(){
+  // ★ 2026-10-07 重构（任务模块）：数据来自后端**原生**负载 —— api_growth 已
+  //   去掉网关依赖，不再出现"网关不在 → 整页空白"。下面那张硬编码清单降级为
+  //   「中文名 + 常用动作」的兜底元数据（后端 autocheckin/gwextra 拿不到时才用）。
   const g=(S.data.growth&&S.data.growth.growth)||{};
+  const native=(g.platforms||[]);
+  // ⚠ LEGACY_PLATFORMS 在**本函数下方**才声明（const 有 TDZ），所以这里只定义
+  //   合并逻辑，等声明之后再调用 —— 否则会 "Cannot access before initialization"。
+  let platforms=[];
+  const buildPlatforms=()=>{
+    const legacy={};
+    for(const p of LEGACY_PLATFORMS) legacy[p.id]=p;
+    return native.length
+      ? native.map(p=>Object.assign({},p,{
+          id:p.platform,
+          name:p.name||(legacy[p.platform]||{}).name||p.platform,
+          features:(p.features&&p.features.length)
+            ? p.features : ((legacy[p.platform]||{}).features||[])}))
+      : LEGACY_PLATFORMS.map(p=>Object.assign({},p,{
+          platform:p.id,on:true,done_today:false,last:{},fail_streak:0}));
+  };
+  const nsum=g.summary||{};          // 后端任务汇总（平台/站点/心跳）
+  const ck=g.checkin_summary||{};    // store.checkin_summary()
+  const siteTasks=g.sites||[];       // 外部站点（store.sites 里 checkin=true 的）
   const enabled=g.enabled;
   const sites=S.data.sites||[];
 
-  // 按平台分类展示签到/积分任务（2026-10-08 核实整理）
-  const platforms=[
+  // 兜底元数据：平台中文名 + 常用动作（动作 id 已与 gwextra.ACTIONS 核对过）
+  const LEGACY_PLATFORMS=[
     {
       id:'wb-gateway', name:'WorkBuddy 国内',
       features:[
@@ -1242,7 +1987,7 @@ function viewGrowth(){
       id:'web-glm', name:'智谱清言',
       features:[
         {name:'每日登录领积分', action:'web-glm:daily_login_score'},
-        {name:'积分余额查询', action:'web-glm:score'},
+        {name:'积分余额查询', action:'web-glm:score_balance'},
         {name:'积分活动领奖', action:'web-glm:score_activity_draw'},
         {name:'积分流水', action:'web-glm:score_record'},
       ]
@@ -1257,20 +2002,20 @@ function viewGrowth(){
     {
       id:'apk-kuku', name:'百度文库',
       features:[
-        {name:'任务与签到', action:'apk-kuku:tasks'},
+        {name:'免费积分任务状态', action:'apk-kuku:freepoint_taskstatus'},
         {name:'每日签到', action:'apk-kuku:checkin_claim'},
       ]
     },
     {
       id:'apk-wps', name:'WPS',
       features:[
-        {name:'每日签到', action:'apk-wps:checkin'},
+        {name:'每日签到', action:'apk-wps:checkin_claim'},
       ]
     },
     {
       id:'apk-raccoon', name:'小浣熊',
       features:[
-        {name:'积分余额', action:'apk-raccoon:balance'},
+        {name:'积分余额', action:'apk-raccoon:points_balance'},
       ]
     },
     {
@@ -1281,10 +2026,13 @@ function viewGrowth(){
     },
   ];
 
-  const r=S.data.checkin||S.data.extra||{};
-  const sum=r.summary||{};
-  const today=r.today||[];
-  const pct=sum.total_checkin_sites?Math.round(sum.done_today/sum.total_checkin_sites*100):0;
+  platforms=buildPlatforms();         // ← LEGACY_PLATFORMS 已声明，可以安全调用
+  const sum=ck;                       // 兼容旧模板里的 sum.done_today 等
+  const today=[];                     // 今日明细改由「平台卡 + 站点卡」承载
+  const pct=sum.total_checkin_sites
+    ? Math.round((sum.done_today||0)/sum.total_checkin_sites*100) : 0;
+  const lastRun=Object.values(nsum).length?nsum.last_tick:null;
+  const actCount=platforms.reduce((a,p)=>a+((p.features||[]).length),0);
 
   return `
   <div class="card">
@@ -1295,14 +2043,18 @@ function viewGrowth(){
   </div>
 
   <div class="grid g4 mb">
-    <div class="kpi"><div class="lb">今日签到进度</div><div class="vl">${sum.done_today||0} / ${sum.total_checkin_sites||0}</div>
-      <div class="ex">${pct}% 完成 · ${esc(sum.date||'')}</div></div>
-    <div class="kpi"><div class="lb">最长连续签到</div><div class="vl">${sum.best_streak||0} 天</div>
-      <div class="ex">累计 ${sum.total_history||0} 次</div></div>
-    <div class="kpi"><div class="lb">今日成功</div><div class="vl">${today.filter(x=>x.ok).length}</div>
-      <div class="ex">今日记录 ${today.length} 条</div></div>
-    <div class="kpi"><div class="lb">定时执行</div><div class="vl">${g.hour||9}:00</div>
-      <div class="ex">每日自动跑全部签到任务</div></div>
+    <div class="kpi"><div class="lb">平台任务</div>
+      <div class="vl">${nsum.done_today||0} / ${nsum.on||platforms.length}</div>
+      <div class="ex">今日已完成 / 已启用（共 ${platforms.length} 个平台）</div></div>
+    <div class="kpi"><div class="lb">今日失败</div>
+      <div class="vl" style="color:${(nsum.failed_today||0)?'var(--err)':'var(--ok)'}">${nsum.failed_today||0}</div>
+      <div class="ex">${lastRun?'上次调度 '+esc(lastRun):'调度器未跑过'}</div></div>
+    <div class="kpi"><div class="lb">外部站点</div>
+      <div class="vl">${nsum.sites_done||0} / ${nsum.sites||0}</div>
+      <div class="ex">今日已签到 / 已启用站点</div></div>
+    <div class="kpi"><div class="lb">定时执行</div>
+      <div class="vl">${esc(g.hour||'09:10')}</div>
+      <div class="ex">${enabled?'已启用':'已关闭'} · 每轮错峰 ${g.stagger_sec||45}s · 重试 ${g.retry_times||0} 次</div></div>
   </div>
 
   <div class="card">
@@ -1317,53 +2069,143 @@ function viewGrowth(){
     </div>
   </div>
 
+  <div class="card">
+    <div class="flex" style="justify-content:space-between;align-items:center">
+      <h2 style="margin:0">平台任务 <span class="faint" style="font-size:11.5px;font-weight:normal">（${platforms.length} 个平台 · ${actCount} 个可执行动作）</span></h2>
+      <div class="flex">
+        <button class="btn pri" onclick="runGrowth()">⚡ 一键执行全部</button>
+        <button class="btn" onclick="loadGrowth()">刷新</button>
+      </div>
+    </div>
+    <div class="note" style="margin-top:8px">
+      每个平台每天只跑一次（已完成的会被跳过）；失败会在下一轮重试，连续 3 次失败当天放弃。
+      点平台名可单独执行该平台 —— 只跑这一个，不会连坐其它平台。
+    </div>
+  </div>
+
   <div class="grid g2">
     ${platforms.map(p=>{
-      const site=sites.find(s=>s.id===p.id);
-      const hasLogin=site&&site.logged;
+      const hasLogin=!!((S.data.accounts||[]).find(a=>
+        (a.platform===p.id||a.platform==='api-'+p.id)&&a.secret));
+      const last=p.last||{};
+      const failed=last.ok===false;
+      const done=!!p.done_today;
+      const off=p.on===false;
+      const state = off?'<span class="tag">已关闭</span>'
+        : failed?'<span class="tag err">今日失败</span>'
+        : done?'<span class="tag ok">今日完成</span>'
+        : !hasLogin?'<span class="tag warn">未接入</span>'
+        : '<span class="tag">待执行</span>';
+      const acts=(p.features||[]);
+      const open=TASK_OPEN[p.id];
       return `
       <div class="card">
-        <h2>${esc(p.name)} ${hasLogin?'<span class="tag ok">已登录</span>':'<span class="tag warn">未登录</span>'}</h2>
-        <table><tbody>
-          ${p.features.map(f=>`<tr>
-            <td>${esc(f.name)}</td>
-            <td class="right"><button class="btn sm" onclick="runAction('${esc(f.action)}')">执行</button></td>
-          </tr>`).join('')}
-        </tbody></table>
+        <div class="sc-h">
+          <span class="sdot${done&&!failed?' ok':''}"></span>
+          <span class="sc-n">${esc(p.name)}</span>
+          <span style="margin-left:auto;flex:0 0 auto">${state}</span>
+        </div>
+        <div class="tk-meta">
+          <span>定时 <b>${esc(p.time||'—')}</b></span>
+          <span>${hasLogin?'<b class="okc">已接入</b>':'<b class="warnc">未接入</b>'}</span>
+          ${p.mode&&p.mode!=='none'?`<span>方式 <b>${esc(p.mode)}</b></span>`:''}
+          ${p.fail_streak?`<span class="warnc">连败 ${p.fail_streak}</span>`:''}
+        </div>
+        <div class="tk-last${failed?' err':''}">
+          ${last.at||last.message? (esc((last.at||'')+' ')+(last.message?esc(String(last.message).slice(0,90)):'')) : '还没有执行记录'}
+        </div>
+        <div class="sc-f">
+          <button class="btn sm${done&&!failed?'':' pri'}" onclick="acRunOne('${esc(p.id)}')">
+            ${done&&!failed?'重跑':'单独执行'}</button>
+          <button class="btn sm gh" onclick="taskToggleActs('${esc(p.id)}')">
+            动作明细 ${open?'▴':'▾'} ${acts.length?'('+acts.length+')':''}</button>
+          <button class="btn sm gh" onclick="go('sources')">去接入</button>
+        </div>
+        ${open&&acts.length?`<div class="tk-acts">${acts.map(f=>`
+          <button class="btn sm gh" onclick="runAction('${esc(f.action)}')" title="${esc(f.action)}">${esc(f.name)}</button>
+        `).join('')}</div>`:''}
       </div>`;
     }).join('')}
   </div>
 
-  <div class="card">
-    <h2>网关成长任务（WorkBuddy 通用）</h2>
-    <div class="note ${enabled?'':'warn'}">
-      网关成长任务当前${enabled?'已启用':'未启用'}，每日 ${g.hour||10}:00 自动执行。
+  ${siteTasks.length?`<div class="card">
+    <h2>外部站点任务 <span class="faint" style="font-size:11.5px;font-weight:normal">（${siteTasks.filter(s=>s.checkin).length} 个站点参与定时签到）</span></h2>
+    <div class="scroll sm">
+      <table><thead><tr><th>站点</th><th>定时签到</th><th>今日结果</th><th class="right">操作</th></tr></thead><tbody>
+      ${siteTasks.map(s=>{
+        const l=s.last||{};
+        return `<tr>
+          <td>${esc(s.name||s.url||s.id)}</td>
+          <td>${s.checkin?'<span class="tag ok">已启用</span>':'<span class="tag">未启用</span>'}</td>
+          <td class="muted">${l.at?esc((l.ok?'✓ ':'✗ ')+String(l.message||'').slice(0,70)):'—'}</td>
+          <td class="right nowrap"><button class="btn sm" onclick="runOne('${esc(s.id)}')">立即签到</button></td>
+        </tr>`;
+      }).join('')}
+      </tbody></table>
     </div>
+  </div>`:''}
+
+  <div class="card">
+    <h2>执行方式</h2>
+    <table><tbody>
+      <tr><td>定时</td><td class="muted">每日 <b>${esc(g.hour||'09:10')}</b> 起错峰执行（${enabled?'<span class="tag ok">已启用</span>':'<span class="tag warn">已关闭</span>'}）</td></tr>
+      <tr><td>跳过规则</td><td class="muted">当天已成功的平台不再重复；失败自动重试 ${g.retry_times||0} 次（每次间隔 ${g.retry_delay_min||0} 分钟）</td></tr>
+      <tr><td>失败上限</td><td class="muted">连续失败 3 次 → 当天放弃该平台，不再反复打上游</td></tr>
+      <tr><td>通知</td><td class="muted">${g.notify?'执行结果推送到已配置的 webhook':'通知已关闭（设置→通知中心）'}</td></tr>
+      <tr><td>调度心跳</td><td class="muted">${nsum.ticks||0} 次 · 最近 ${esc(nsum.last_tick||'—')}</td></tr>
+    </tbody></table>
     <div class="flex mt">
-      <button class="btn pri" onclick="runGrowth()">立即执行全部</button>
-      <button class="btn" onclick="loadGrowth()">刷新</button>
+      <button class="btn pri" onclick="runGrowth()">⚡ 一键执行全部</button>
+      <button class="btn" onclick="acRunFailed()">只补跑失败的</button>
+      <button class="btn gh" onclick="go('tasks')">去任务管理</button>
     </div>
   </div>
 
   <div class="card">
-    <h2>最近成长记录</h2>
+    <h2>最近执行结果</h2>
     <div class="scroll sm">
-      <table><thead><tr><th>账号</th><th>动作</th><th>状态</th><th>详情</th><th>时间</th></tr></thead><tbody>
-      ${(g.results||[]).length?g.results.map(r=>`<tr>
-        <td>${esc(r.account||r.name||'-')}</td>
-        <td>${esc(r.action||'-')}</td>
-        <td>${tag(r.status||'-',r.status==='success'||r.status==='ok'?'ok':'warn')}</td>
-        <td class="muted">${esc(r.detail||r.reason||'')}</td>
-        <td class="mono nowrap">${esc((r.timestamp&&new Date(r.timestamp*1000).toLocaleString())||'')}</td>
-      </tr>`).join(''):'<tr><td colspan="5">'+empty('暂无成长记录。需先登录网关账号（workbuddy-gateway login）并启用成长任务')+'</td></tr>'}
+      <table><thead><tr><th>平台</th><th>状态</th><th>详情</th><th>时间</th></tr></thead><tbody>
+      ${platforms.filter(p=>p.last&&(p.last.at||p.last.message)).length
+        ?platforms.filter(p=>p.last&&(p.last.at||p.last.message)).map(p=>`<tr>
+          <td>${esc(p.name||p.id)}</td>
+          <td>${p.last.ok?'<span class="tag ok">成功</span>':'<span class="tag err">失败</span>'}</td>
+          <td class="muted">${esc(String(p.last.message||'').slice(0,120)||'—')}</td>
+          <td class="mono nowrap">${esc(p.last.at||'')}</td>
+        </tr>`).join('')
+        :'<tr><td colspan="4">'+empty('今天还没有执行记录。点上面的「⚡ 一键执行全部」跑一轮')+'</td></tr>'}
       </tbody></table>
     </div>
   </div>`;
 }
+// ★ 2026-10-07 任务模块：动作明细展开态 + 一键执行 / 只补跑失败的
+let TASK_OPEN = {};
+function taskToggleActs(pid){
+  TASK_OPEN[pid] = !TASK_OPEN[pid];
+  render();
+}
 async function runGrowth(){
+  toast('已触发一轮平台任务…');
   const r=await api('api/growth?trigger=1');
   toast(r.message||'已触发');
+  // 任务要跑一会儿，多刷几次让状态及时更新
+  setTimeout(loadGrowth,3000);
+  setTimeout(loadGrowth,9000);
+  setTimeout(loadGrowth,20000);
+}
+/** 只补跑今天失败/未完成的平台（逐个单独执行，避免连坐） */
+async function acRunFailed(){
+  const g=(S.data.growth&&S.data.growth.growth)||{};
+  const ids=(g.platforms||[]).filter(p=>{
+    const l=p.last||{};
+    return p.on!==false && !p.done_today && l.ok!==true;
+  }).map(p=>p.platform);
+  if(!ids.length){ toast('没有需要补跑的平台','ok'); return; }
+  toast('补跑 '+ids.length+' 个平台：'+ids.join(', '));
+  for(const pid of ids){
+    try{ await api('api/autocheckin?action=run',{platforms:[pid],force:true}); }catch(e){}
+  }
   setTimeout(loadGrowth,4000);
+  setTimeout(loadGrowth,12000);
 }
 
 async function runAction(action){
@@ -1392,12 +2234,53 @@ function viewTasks(){
   const t=S.data.tasks||{};
   const tasks=t.tasks||[];
   const sites=S.data.sites||[];
+  const pending=tasks.filter(x=>!x.done);
+  const runs=tasks.reduce((a,x)=>a+(x.runs||0),0);
+  const fails=tasks.filter(x=>x.last_ok===false);
+  const lastOne=tasks.filter(x=>x.last_run).sort((a,b)=>
+    String(b.last_run).localeCompare(String(a.last_run)))[0];
   return `
   <div class="grid g4 mb">
-    <div class="kpi"><div class="lb">任务总数</div><div class="vl">${t.total||0}</div></div>
-    <div class="kpi"><div class="lb">已完成</div><div class="vl" style="color:var(--ok)">${t.done||0}</div></div>
-    <div class="kpi"><div class="lb">待办</div><div class="vl" style="color:var(--warn)">${t.pending||0}</div></div>
-    <div class="kpi"><div class="lb">累计执行</div><div class="vl">${nfmt(tasks.reduce((a,x)=>a+(x.runs||0),0))}</div></div>
+    <div class="kpi"><div class="lb">待办任务</div><div class="vl">${pending.length}</div>
+      <div class="ex">共 ${t.total||0} 个 · 已完成 ${t.done||0}</div></div>
+    <div class="kpi"><div class="lb">上次失败</div>
+      <div class="vl" style="color:${fails.length?'var(--err)':'var(--ok)'}">${fails.length}</div>
+      <div class="ex">${lastOne?'最近执行 '+esc(lastOne.last_run):'还没有执行记录'}</div></div>
+    <div class="kpi"><div class="lb">关联站点</div><div class="vl">${tasks.filter(x=>x.site).length}</div>
+      <div class="ex">会调用真实签到接口，留空即手动任务</div></div>
+    <div class="kpi"><div class="lb">累计执行</div><div class="vl">${nfmt(runs)}</div>
+      <div class="ex">每次执行都记录结果与时间</div></div>
+  </div>
+
+  <div class="card">
+    <div class="flex" style="justify-content:space-between;align-items:center">
+      <h2 style="margin:0">任务清单 <span class="faint" style="font-size:11.5px;font-weight:normal">（勾选=已完成，会自动跳过）</span></h2>
+      <div class="flex">
+        <button class="btn pri" onclick="runAllTasks()">⚡ 执行未完成</button>
+        <button class="btn" onclick="loadTasks()">刷新</button>
+      </div>
+    </div>
+    <div class="scroll" style="margin-top:8px">
+      <table><thead><tr><th style="width:44px">完成</th><th>任务</th><th>关联站点</th><th style="width:64px">次数</th><th>上次结果</th><th class="right">操作</th></tr></thead><tbody>
+      ${tasks.length?tasks.map(x=>{
+        const st=sites.find(s=>s.id===x.site);
+        return `<tr>
+        <td><input type="checkbox" ${x.done?'checked':''} style="width:auto" title="勾选后「执行未完成」会跳过它" onchange="tgTask('${esc(x.id)}')"></td>
+        <td>${esc(x.name)}${x.done?' <span class="tag">已完成</span>':''}</td>
+        <td>${x.site?(st?'<span class="tag acc">'+esc(st.name||x.site)+'</span>':'<span class="tag warn">站点已删除</span>'):'<span class="tag">手动</span>'}</td>
+        <td>${x.runs||0}</td>
+        <td class="muted">${x.last_run
+          ?(x.last_ok===false?'<span class="tag err">失败</span> ':'<span class="tag ok">成功</span> ')
+            +esc(String(x.last_note||'').slice(0,80))+' <span class="faint">'+ago(new Date(String(x.last_run).replace(/-/g,'/')).getTime()/1000)+'</span>'
+          :'<span class="faint">未执行过</span>'}</td>
+        <td class="right nowrap">
+          <button class="btn sm${x.last_ok===false?' pri':''}" onclick="runTask('${esc(x.id)}')">立即执行</button>
+          <button class="btn sm dgr" onclick="delTask('${esc(x.id)}')">删除</button>
+        </td></tr>`;
+      }).join('')
+      :'<tr><td colspan="6">'+empty('还没有任务。点下面「新建任务」加一个；关联站点的任务会真的去签到')+'</td></tr>'}
+      </tbody></table>
+    </div>
   </div>
 
   <div class="card">
@@ -1409,26 +2292,24 @@ function viewTasks(){
         ${sites.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</select></div>
       <div class="n"><label>&nbsp;</label><button class="btn pri" onclick="addTask()">添加</button></div>
     </div>
-  </div>
-
-  <div class="card">
-    <h2>任务清单</h2>
-    <div class="scroll">
-      <table><thead><tr><th>状态</th><th>任务</th><th>类型</th><th>执行次数</th><th>上次结果</th><th>操作</th></tr></thead><tbody>
-      ${tasks.length?tasks.map(x=>`<tr>
-        <td><input type="checkbox" ${x.done?'checked':''} style="width:auto" onchange="tgTask('${esc(x.id)}')"></td>
-        <td>${esc(x.name)}</td>
-        <td>${tag(x.site?'站点签到':'手动',x.site?'acc':'')}</td>
-        <td>${x.runs||0}</td>
-        <td class="muted">${x.last_run?esc(x.last_note||'')+' ('+ago(new Date(x.last_run.replace(/-/g,'/')).getTime()/1000)+')':'—'}</td>
-        <td class="nowrap">
-          <button class="btn sm" onclick="runTask('${esc(x.id)}')">执行</button>
-          <button class="btn sm dgr" onclick="delTask('${esc(x.id)}')">删除</button>
-        </td></tr>`).join('')
-      :'<tr><td colspan="6">'+empty('还没有任务。关联站点的任务会调用真实签到接口')+'</td></tr>'}
-      </tbody></table>
+    <div class="note" style="margin-top:10px">
+      关联站点的任务：执行时真的调用该站的签到接口，结果写回「上次结果」；
+      手动任务：点执行只是标记一次完成（可用来记录别处做过的事）。
     </div>
   </div>`;
+}
+/** ⚡ 执行全部未完成任务（后端 api/tasks?action=run_all：逐条真实执行并写回结果） */
+async function runAllTasks(){
+  toast('正在执行未完成任务…');
+  try{
+    const r=await post('api/tasks?action=run_all',{});
+    if(r.ok===false){ toast('执行失败：'+(r.message||''),'err'); return; }
+    const rs=r.results||[];
+    const okN=rs.filter(x=>x.ok).length;
+    toast(rs.length?('执行完成：成功 '+okN+' / '+rs.length):'没有未完成的任务',
+          rs.length&&okN<rs.length?'err':'ok');
+    loadTasks();
+  }catch(e){ toast('执行失败：'+e.message,'err'); }
 }
 async function addTask(){
   const n=$('#tName').value.trim(),s=$('#tSite').value;
@@ -1696,6 +2577,34 @@ async function gmTest(btn,id){
   if(cell)cell.innerHTML=gmTestCell(id);
 }
 
+// ★ 2026-10-07 新增：模型总表逐个启用/关闭（写进后端 disabled_models）。
+//   关闭的模型不再进路由表，也不再出现在 /v1/models —— 对应参考项目
+//   "选择器只给真能用的模型" 的思路，但把决定权交给用户。
+async function toggleModel(id){
+  try{
+    const r = await post('api/models?action=toggle_model', {id});
+    if(r.ok===false){ toast('操作失败：'+(r.message||''), 'err'); return; }
+    // 就地更新这一行，避免整表重绘造成滚动位置丢失
+    const rows = document.querySelectorAll('.gm-id');
+    for(const el of rows){
+      if(el.textContent === id){
+        const tr = el.closest('tr');
+        const btn = tr && tr.querySelector('button');
+        if(tr) tr.style.opacity = r.on ? '' : '.45';
+        if(btn){
+          btn.className = 'btn sm' + (r.on ? ' pri' : '');
+          btn.textContent = r.on ? '已启用' : '已关闭';
+          btn.title = r.on ? '当前已启用：点一下关闭' : '当前已关闭：不进路由';
+        }
+        break;
+      }
+    }
+    toast((r.on?'已启用 ':'已关闭 ')+id, 'ok');
+    // 路由表变了，后台静默刷新一次总表计数
+    loadRoute().catch(()=>{});
+  }catch(e){ toast('操作失败：'+e.message, 'err'); }
+}
+
 function gmToggle(pid){
   const grp=document.querySelector('.gm-group[data-pid="'+pid+'"]');
   if(!grp)return;
@@ -1784,21 +2693,33 @@ function viewModels(){
     h+='<div class="gm-group" data-pid="'+esc(grp.pid)+'">'
       +'<div class="gm-head'+(open?' open':'')+'" onclick="gmToggle(\''+gmJs(grp.pid)+'\')">'
       +'<span class="caret">▸</span><b>'+esc(grp.name)+'</b>'
-      +'<span class="tag">'+grp.models.length+' 模型</span>'
-      +(grp.usable>0
-        ?'<span class="tag ok">✓ '+grp.usable+' 凭据</span>'
-        :'<span class="tag">未接入</span>')
+      // ★ 2026-10-07（参照 dsh-our-free-model 的来源卡片）：直接显示
+      //   已启用/总数 + 账号数，一眼看清"账号 n / 模型 n"
+      +'<span class="tag">'+((typeof grp.models_on==='number'?grp.models_on:grp.models.length)
+        +'/'+grp.models.length+' 模型')+'</span>'
+      +(grp.free_lane
+        ?'<span class="tag ok">免凭据直连</span>'
+        :(grp.usable>0
+          ?'<span class="tag ok">✓ '+grp.usable+' 账号</span>'
+          :'<span class="tag">未接入</span>'))
       +(grp.live?'<span class="tag info">实时清单</span>':'')
       +(grp.hint?'<span class="faint gm-hint">'+esc(grp.hint)+'</span>':'')
       +'</div>';
     if(grp.models.length){
       h+='<div class="gm-rows"'+(open?'':' style="display:none"')+'><div class="dtw" style="max-height:420px"><table><thead><tr>'
+        +'<th style="width:88px">启用</th>'
         +'<th>模型 ID（点击复制）</th><th>名称</th><th>倍率</th><th>上下文</th>'
         +'<th>输出</th><th>说明</th><th style="width:130px">连接测试</th>'
         +'</tr></thead><tbody>';
       for(const m of grp.models){
         const id=m.id||'';
-        h+='<tr data-s="'+esc((id+' '+(m.name||'')+' '+(m.desc||'')).toLowerCase())+'">'
+        const off = (m.on===false);
+        h+='<tr'+(off?' class="off" style="opacity:.45"':'')
+          +' data-s="'+esc((id+' '+(m.name||'')+' '+(m.desc||'')).toLowerCase())+'">'
+          +'<td class="nowrap"><button class="btn sm'+(off?'':' pri')
+          +'" title="'+(off?'当前已关闭：不进路由':'当前已启用：点一下关闭')
+          +'" onclick="event.stopPropagation();toggleModel(\''+gmJs(id)+'\')">'
+          +(off?'已关闭':'已启用')+'</button></td>'
           +'<td><span class="mono gm-id" title="点击复制" '
           +'onclick="copyText(\''+gmJs(id)+'\',()=>toast(\'已复制\',\'ok\'))">'
           +esc(id)+'</span></td>'
@@ -1812,7 +2733,7 @@ function viewModels(){
           +'</tr>';
       }
       h+='</tbody></table></div></div>';
-    }else if(!grp.models.length){
+    }else if(!grp.models.length && open){
       h+='<div class="gm-rows"><div class="empty" style="padding:14px">'
         +'该来源没有静态清单 —— 登录后用「接入源 → 详情 → 查看该源模型」动态拉取</div></div>';
     }
@@ -2145,19 +3066,24 @@ function viewRoute0(){
   </div>
 
   <div class="card">
-    <h2>候选上游明细</h2>
-    <div class="scroll" style="max-height:600px">
-      <table><thead><tr><th>自动模型</th><th>上游</th><th>端点</th><th>权重</th><th>优先级</th><th>最近延迟</th><th>状态</th></tr></thead><tbody>
-      ${names.length?names.flatMap(n=>(models[n].targets||[]).map(t=>`<tr>
-        <td class="mono">${esc(n)}</td>
-        <td>${esc(t.name)}<div class="faint mono" style="font-size:11px">${esc(t.upstream)}</div></td>
-        <td class="mono" style="font-size:11.5px">${esc(t.endpoint)}</td>
-        <td>${t.weight}</td><td>${t.priority}</td>
-        <td class="mono">${t.latency_ms!=null?t.latency_ms+'ms':'—'}</td>
-        <td>${tag(t.state==='closed'?'正常':(t.state==='open'?'熔断 '+t.cooldown_left+'s':'半开'),
-            t.state==='closed'?'ok':(t.state==='open'?'err':'warn'))}</td>
-      </tr>`)).join(''):'<tr><td colspan="7">'+empty('暂无候选')+'</td></tr>'}
-      </tbody></table>
+    <div class="flex" style="justify-content:space-between;cursor:pointer" onclick="toggleRouteDetail()">
+      <h2>候选上游明细 <span id="routeDetailCaret">▸</span></h2>
+      <span class="faint" style="font-size:12px">点击展开/收起</span>
+    </div>
+    <div id="routeDetailBody" style="display:none">
+      <div class="scroll" style="max-height:600px">
+        <table><thead><tr><th>自动模型</th><th>上游</th><th>端点</th><th>权重</th><th>优先级</th><th>最近延迟</th><th>状态</th></tr></thead><tbody>
+        ${names.length?names.flatMap(n=>(models[n].targets||[]).map(t=>`<tr>
+          <td class="mono">${esc(n)}</td>
+          <td>${esc(t.name)}<div class="faint mono" style="font-size:11px">${esc(t.upstream)}</div></td>
+          <td class="mono" style="font-size:11.5px">${esc(t.endpoint)}</td>
+          <td>${t.weight}</td><td>${t.priority}</td>
+          <td class="mono">${t.latency_ms!=null?t.latency_ms+'ms':'—'}</td>
+          <td>${tag(t.state==='closed'?'正常':(t.state==='open'?'熔断 '+t.cooldown_left+'s':'半开'),
+              t.state==='closed'?'ok':(t.state==='open'?'err':'warn'))}</td>
+        </tr>`)).join(''):'<tr><td colspan="7">'+empty('暂无候选')+'</td></tr>'}
+        </tbody></table>
+      </div>
     </div>
   </div>
 
@@ -2203,7 +3129,7 @@ function viewRoute0(){
 '}',
 '',
 '# 3) curl 实测',
-'curl '+location.origin+'v1/chat/completions \\',
+'curl '+location.origin+'/v1/chat/completions \\',
 '  -H "Content-Type: application/json" \\',
 '  -d \'{"model":"auto","messages":[{"role":"user","content":"ping"}]}\'',
 '',
@@ -2218,7 +3144,9 @@ async function probeRoute(){
   toast('探测中，各上游并发测 /models…');
   const r=await post('api/route?action=probe',{});
   S.data.routeOut=JSON.stringify(r.results||r,null,2);
-  S.data.route=r;
+  S.data.probe=r;
+  // 探测响应同样不含 config/in_route_sites：重新拉一次路由总览，别就地覆盖
+  await loadRoute().catch(()=>{});
   render();
   toast('探测完成，延迟已写入 EWMA','ok');
 }
@@ -2227,7 +3155,10 @@ async function testRoute(model){
   render();
   const r=await post('api/route?action=test_chat',{model,message:'ping'});
   S.data.routeOut=JSON.stringify(r,null,2);
-  S.data.route=r;
+  // ★ 2026-10-07：不能再把结果写进 S.data.route —— test_chat 的响应里没有
+  //   models/config/in_route_sites，覆盖后整张路由表会变成"路由表为空"、
+  //   KPI 全归零。试跑结果单独放 routeTest。
+  S.data.routeTest=r;
   render();
   const x=r.result||{};
   toast(x.choices?'试跑成功，走 '+(x._route||{}).upstream:'试跑失败：'+(x.message||'未知'),
@@ -2369,25 +3300,30 @@ let SET_TAB = "main";
 
 async function loadSettings(){
   // 设置页现在是 Tab 容器，数据一次性拉齐
-  await Promise.all([
+  // ★ 2026-10-07 修（设置页数据丢失）：原来 Promise.all 的返回值被直接丢弃，
+  //   而 S.data.settings 只在一处死代码（loadGateway）里被赋值 —— 于是
+  //   输入框显示硬编码默认值，点「保存设置」又把这些默认值 POST 回去，
+  //   静默覆盖用户已存的 lobster_server / proxy_url 等；日志 tab 也永远空白。
+  const [st, sites, nt, lg] = await Promise.all([
     api('api/settings').catch(()=>({settings:{}})),
     api('api/sites').catch(()=>({sites:[],catalog:[]})),
     api('api/notify').catch(()=>({config:{}})),
     api('api/logs').catch(()=>({lines:[]})),
   ]);
+  S.data.settings=st;
+  if(sites&&sites.sites)S.data.sites=sites.sites;
+  if(sites&&sites.catalog)S.data.siteCatalog=sites.catalog;
+  S.data.notify=nt;
+  S.data.logs=lg;
 }
 
 function viewSettings(){
-  const tabs=[['main','⚙ 基本设置'],['sites','☷ 资源站点'],
-              ['catalog','★ 免费资源'],['notify','✉ 通知'],['logs','≡ 日志']];
+  const tabs=[['main','🌐 代理设置'],['logs','≡ 日志']];
   let h='<div class="tabs">'
     +tabs.map(x=>'<button class="'+(SET_TAB===x[0]?'on':'')+'" '
       +'onclick="setSetTab(\''+x[0]+'\')">'+x[1]+'</button>').join('')
     +'</div>';
   if(SET_TAB==='main') h+=viewSettingsMain();
-  else if(SET_TAB==='sites') h+=viewSites();
-  else if(SET_TAB==='catalog') h+=viewCatalog();
-  else if(SET_TAB==='notify') h+=viewNotify();
   else if(SET_TAB==='logs') h+=viewLogs();
   return h;
 }
@@ -2421,6 +3357,26 @@ function viewSettingsMain(){
         <span class="faint">如果你只用 CodeBuddy/WorkBuddy，用不到 CLIProxyAPI：
         删掉 dist 目录里 data/cliproxy 那份二进制（或用轻量版打包）即可，
         其余功能不受影响。</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>网络代理</h2>
+      <label>代理模式</label>
+      <select id="sProxyMode" style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px">
+        <option value="direct" ${s.proxy_mode==='direct'?'selected':''}>全部直连（不用代理）</option>
+        <option value="bypass_cn" ${s.proxy_mode==='bypass_cn'?'selected':''}>绕过大陆（推荐）— 国内直连，海外走代理</option>
+        <option value="global" ${s.proxy_mode==='global'?'selected':''}>全局代理 — 所有请求都走代理</option>
+      </select>
+      <label style="margin-top:10px;display:block">代理地址</label>
+      <input id="sProxyUrl" class="mono" placeholder="例如：http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" value="${esc(s.proxy_url||'')}">
+      <div class="faint" style="font-size:11.5px;margin-top:4px">
+        支持 HTTP / HTTPS / SOCKS5 代理。
+      </div>
+      <div class="note" style="margin-top:10px">
+        <b>绕过大陆模式：</b><br>
+        · <b>直连：</b>Kimi、智谱、豆包、Trae、小浣熊、WorkBuddy 等国内平台<br>
+        · <b>走代理：</b>OpenAI、Claude、Google、Devin、xAI、Meta 等海外平台
       </div>
     </div>
   </div>
@@ -2459,6 +3415,8 @@ async function saveSettings(){
     auto_checkin:$('#sAC').checked,
     auto_growth:$('#sAG').checked,
     lobster_server:$('#sLob').value.trim(),
+    proxy_mode:$('#sProxyMode').value,
+    proxy_url:$('#sProxyUrl').value.trim(),
   };
   const r=await post('api/settings?action=save',p);
   toast(r.message||'已保存',r.ok?'ok':'err');
@@ -2479,6 +3437,33 @@ async function quitPanel(){
     },600);
   }
 }
+// ★ 2026-10-07：这两个函数被 6 处 onclick 引用，但**全文件从未定义** ——
+//   点「复制接入地址」「点模型 ID 复制」都是 ReferenceError（按钮毫无反应）。
+function copyText(text, done){
+  const s=String(text==null?'':text);
+  const after=(ok)=>{ try{ if(typeof done==='function') done(ok); else toast(ok?'已复制':'复制失败', ok?'ok':'err'); }catch(e){} };
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(s).then(()=>after(true)).catch(()=>after(fallbackCopy(s)));
+      return;
+    }
+  }catch(e){}
+  after(fallbackCopy(s));
+}
+function fallbackCopy(s){
+  try{
+    const ta=document.createElement('textarea');
+    ta.value=s; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    const ok=document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }catch(e){ return false; }
+}
+function copyEndpoint(){
+  copyText(panelBaseUrl(), (ok)=>toast(ok?('已复制 '+panelBaseUrl()):'复制失败', ok?'ok':'err'));
+}
+
 async function post(path,body){
   try{return await api(path,body||{});}
   catch(e){toast('请求失败：'+e.message,'err');return {ok:false,message:e.message};}
@@ -2503,13 +3488,17 @@ async function loadLogin(){
   render();
 }
 
-async function startLogin(pid,edition,headless){
+async function startLogin(pid,edition,headless,forceBrowser){
   // headless=1：不依赖你本机 Chrome/Edge，由服务器起无头浏览器打开登录页，
   // 二维码抓回面板里用手机扫，登录后 Cookie 自动捕捉入库（远程部署也全流程可用）
-  toast(headless?'正在启动服务端无头浏览器…':'正在发起登录…');
+  // forceBrowser=1：file 类平台走「跳转登录」——弹出浏览器打开登录页，
+  // 用户登录后面板自动抓取 Cookie/localStorage 凭据（2026-10-12 补第二方式）
+  toast(headless?'正在启动服务端无头浏览器…'
+    :(forceBrowser?'正在打开浏览器，请在里面完成登录…':'正在发起登录…'));
   const body={platform:pid};
   if(edition)body.edition=edition;
   if(headless)body.headless=1;
+  if(forceBrowser)body.force_browser=1;
   const r=await api('api/login?action=start',body).catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'发起登录失败','err');return;}
   S.data.loginSession=r.session||null;
@@ -2533,21 +3522,32 @@ async function startQrScan(pid){
 
 function startLoginPoll(){
   stopLoginPoll();
+  let lastSig='';
   LOGIN_TIMER=setInterval(async()=>{
     const s=S.data.loginSession;
     if(!s){stopLoginPoll();return;}
     const r=await api('api/login?action=poll',{id:s.id}).catch(()=>null);
     if(!r||!r.session){stopLoginPoll();return;}
     S.data.loginSession=r.session;
-    paintLoginSession();
+    // ★ 抽屉打开时只在会话状态**真的变化**时才全量重绘（状态/二维码/
+    //   授权链接/消息/倒计时桶）—— 无脑每 2 秒重绘会闪烁+费电。
+    const sig=[r.session.status, r.session.qr?'q':'', r.session.auth_url||'',
+               (r.session.seconds_left||0)>>4,
+               (r.session.message||'').slice(0,80)].join('|');
+    const changed = sig!==lastSig;
+    lastSig = sig;
+    if(SRC_EXPAND){ if(changed) render(); } else { paintLoginSession(); }
     if(r.session.status==='success'){
       stopLoginPoll();
       toast('登录成功，凭据已保存','ok');
+      // ★ 2026-10-12（用户要求）：登录完成后自动收回展开的接入面板
+      SRC_EXPAND=null;
       loadLogin();
+      loadSources();
     }else if(r.session.status==='error'||r.session.status==='expired'){
       stopLoginPoll();
       toast(r.session.message||r.session.error||'登录结束','err');
-      paintLoginSession();
+      if(SRC_EXPAND){ render(); } else { paintLoginSession(); }
     }
   },2000);
 }
@@ -2562,26 +3562,9 @@ function qrDataURL(text){
 }
 
 function qrOrLinkHTML(sess){
-  // 网关给过 qr 图就直接用；原生直连没有图时，用授权 URL / 远程扫码文本现场出码
-  if(sess.qr){
-    // 远程扫码（remotescan）/ cookie 类平台抓回的是登录页二维码截图：提示用手机扫
-    const cap = (sess.method==='remotescan'||sess.method==='cookie')
-      ? '<div class="faint" style="margin-top:6px;max-width:196px">↑ 用手机扫此二维码，'
-        +'登录成功后 Cookie 自动获取入库</div>'
-      : '';
-    return '<img src="'+sess.qr+'" alt="登录二维码" style="width:196px;height:196px;border-radius:10px;border:1px solid var(--line)">'+cap;
-  }
-  if(sess.qr_text){
-    const d=qrDataURL(sess.qr_text);
-    if(d)return '<img src="'+d+'" alt="远程扫码二维码" style="width:196px;height:196px;border-radius:10px;border:1px solid var(--line)">'
-      +'<div class="faint" style="margin-top:6px;max-width:220px">↑ 用手机相机 / 微信扫此码，'
-        +'在打开的页面输入验证码完成登录（无需本机浏览器）</div>';
-  }
-  if(sess.auth_url){
-    const d=qrDataURL(sess.auth_url);
-    if(d)return '<img src="'+d+'" alt="登录二维码（由授权链接生成）" style="width:196px;height:196px;border-radius:10px;border:1px solid var(--line)">'
-      +'<div class="faint" style="margin-top:6px;max-width:196px">用 CodeBuddy / WorkBuddy App 扫码，或点下方按钮在浏览器打开</div>';
-  }
+  // ★ 2026-10-12（用户拍板「取消所有扫码连接，全部改为跳转」）：本地**不再渲染任何
+  //   二维码**——扫码所需的无头浏览器已被判定为「麻烦」，跳转制下只用 auth_url 链接。
+  //   故此处恒返回空，旧调用点（viewLogin 等）也只会得到空内容，不会出码。
   return '';
 }
 
@@ -2592,7 +3575,9 @@ function paintLoginSession(){
   if(st)st.innerHTML=loginStatusTag(s);
   if(msg)msg.textContent=s.message||s.error||'';
   if(left)left.textContent=s.seconds_left?('剩余 '+s.seconds_left+' 秒'):'';
-  if(qr)qr.innerHTML=qrOrLinkHTML(s);
+  // ★ 2026-10-12（跳转制）：取消所有本地二维码渲染 —— 不再用 qrOrLinkHTML 覆盖
+  //   #lsQr（会在 auth_url 存在时现场出码，且会冲掉 oauth_device 的设备码）。
+  //   #lsQr 的静态内容由 viewLoginSession 初次渲染负责（仅 oauth_device 显示设备码）。
 }
 
 function loginStatusTag(s){
@@ -3157,11 +4142,16 @@ function loadAutocheckin(){
 
 async function acSave(){
   const st=S.data.autoCheckin||{};
-  const pls=(st.platforms||[]).map(p=>({
-    platform:p.platform,
-    on:!!(p._on!==undefined?p._on:p.on),
-    time:(p._time!==undefined?p._time:p.time),
-  }));
+  // ★ 2026-10-07 修：后端 api_autocheckin?action=save 只认 **dict**
+  //   （isinstance(b["platforms"], dict)），前端原来发的是数组 —— 平台级
+  //   开关/时间被整段静默忽略（顶层 enabled/notify 能存，平台级永远存不上）。
+  const pls={};
+  for(const p of (st.platforms||[])){
+    pls[p.platform]={
+      on:!!(p._on!==undefined?p._on:p.on),
+      time:(p._time!==undefined?p._time:p.time),
+    };
+  }
   const b={
     enabled:!!(st._enabled!==undefined?st._enabled:st.enabled),
     stagger_sec:st.stagger_sec, retry_times:st.retry_times,
@@ -3401,7 +4391,7 @@ const COPILOT_FAMILY=['wb-gateway','wb-gateway-intl','apk-codebuddy','apk-codebu
  *  onlyPid：来源平台 key。传入时只显示该平台的会话（copilot 卡匹配整族），
  *  防止 A 平台登录中、B 平台详情页串台显示 A 的二维码和取消按钮；
  *  不传（账号凭据→当前登录 tab）则始终显示。 */
-function viewLoginSession(onlyPid){
+function viewLoginSession(onlyPid, compact){
   const sess=S.data.loginSession;
   if(sess && onlyPid){
     const match = sess.platform===onlyPid
@@ -3411,13 +4401,54 @@ function viewLoginSession(onlyPid){
         +'与当前平台无关。可在「账号与凭据 → 当前登录」查看或取消。</div>';
     }
   }
+  if(!sess){
+    // 内联卡片模式：没有会话就什么都不渲染（旧详情页才显示引导文案）
+    if(compact) return '';
+    return '<div class="note">当前没有进行中的登录。去「登录与凭据」选一个平台点「去登录」。</div>';
+  }
   let h='';
-  if(sess){
+  // ★ 2026-10-12：成功态收敛成一行（按钮/粘贴框在成功后全是噪音）
+  if(compact && sess.status==='success'){
+    return '<div class="ls-compact"><div class="row n" style="align-items:center;gap:8px">'
+      +'<b style="font-size:12.5px">登录会话</b>'+loginStatusTag(sess)
+      +'<span class="faint" style="font-size:11.5px;margin-left:auto">凭据已入库，此面板可以收起了</span>'
+      +'</div></div>';
+  }
+  if(compact){
+    // 内联卡片：轻量容器，不带卡片头/探测/平台能力那些大块
+    // （★ 状态 tag 带 id="lsStatus"，轮询 paint 才能更新——之前漏了导致
+    //   抽屉里永远显示初始 pending）
+    h+='<div class="ls-compact"><div class="row n" style="align-items:center;gap:8px;margin-bottom:6px">'
+      +'<b style="font-size:12.5px">登录会话</b><span id="lsStatus">'+loginStatusTag(sess)+'</span>'
+      +'<span class="faint" style="margin-left:auto;font-size:11px">'
+        +(sess.seconds_left?('剩余 '+sess.seconds_left+' 秒'):'')+'</span></div>';
+  }else{
     h+='<div class="card" style="margin-bottom:14px"><div class="ch"><b>登录会话</b>'
       +'<span id="lsStatus">'+loginStatusTag(sess)+'</span></div><div class="cb">';
-    h+='<div class="row" style="align-items:flex-start">';
-    h+='<div class="n" id="lsQr">'+qrOrLinkHTML(sess)+'</div>';
-    h+='<div style="flex:1;min-width:220px">';
+  }
+    
+    // ★ 2026-10-12（用户拍板「取消所有扫码连接，全部改为跳转」）：
+    //   面板**不再渲染二维码/设备码**——点接入即跳转浏览器，用户在那里
+    //   完成登录；面板只展示等待态 + 倒计时 + 取消。
+    let leftCol = '';
+    if(sess.method==='oauth_device'){
+      // 设备码协议要求用户在浏览器里输码：只留一个可复制的码，不出大块 UI
+      leftCol = '<div style="padding:8px 10px;background:var(--panel-2);border-radius:8px;'
+        +'text-align:center"><div style="font-size:11px;color:var(--faint);margin-bottom:2px">'
+        +'设备码（复制到浏览器）</div>'
+        +'<div style="font-size:16px;font-weight:700;font-family:monospace;letter-spacing:2px">'
+        +esc(sess.user_code||'')+'</div></div>';
+    }
+    // qrcode / oauth_pkce / cookie / file / loomy：无左侧区域（纯跳转等待态）
+    
+    if(leftCol){
+      h+='<div class="row" style="align-items:flex-start">';
+      h+='<div class="n" id="lsQr">'+leftCol+'</div>';
+      h+='<div style="flex:1;min-width:220px">';
+    } else {
+      h+='<div>';
+    }
+    
     h+='<div style="font-weight:600;margin-bottom:6px">'+esc(sess.platform_name||sess.platform)+'</div>';
     h+='<div class="faint" id="lsMsg" style="margin-bottom:4px">'+esc(sess.message||sess.error||'')+'</div>';
     h+='<div class="faint" id="lsLeft">'+(sess.seconds_left?('剩余 '+sess.seconds_left+' 秒'):'')+'</div>';
@@ -3429,8 +4460,11 @@ function viewLoginSession(onlyPid){
       h+='<button class="btn n" onclick="pollCookieOnce()">我已登录，立即获取</button>';
     }
     h+='<button class="btn dgr n" onclick="cancelLogin()">取消</button>';
-    h+='</div></div></div>';
-    if(sess.method==='cookie'){
+    h+='</div></div>';
+    // ★ 2026-10-12：cookie/file 的会话内粘贴框在 compact（内联卡片）模式下
+    //   不再重复渲染 —— 下方「方式二」就是同一功能，两处同时出现即冗余。
+    //   pkce/lobster 的授权码输入保留（那是完成登录的必要入口）。
+    if(sess.method==='cookie' && !compact){
       const dg=S.data.browserDiag;
       let tip='自动获取会被浏览器加密策略挡住时，可直接粘贴 Cookie'
         +'（浏览器 F12 → Network → 复制 Request Headers 里的 cookie）';
@@ -3444,7 +4478,7 @@ function viewLoginSession(onlyPid){
         +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
         +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualCookie()">提交 Cookie</button></div>';
     }
-    if(sess.method==='file'){
+    if(sess.method==='file' && !compact){
       const ph=(S.data.loginPlatforms||[]).find(p=>p.id===sess.platform);
       const placeholder=(ph&&ph.placeholder)||'粘贴 API Key 或 refresh_token';
       h+='<div style="margin-top:12px">'
@@ -3452,12 +4486,37 @@ function viewLoginSession(onlyPid){
         +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
         +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualSecret()">提交凭据</button></div>';
     }
-    h+='</div></div>';
-  }else{
-    h+='<div class="note">当前没有进行中的登录。去「登录与凭据」选一个平台点「去登录」。</div>';
+    if(sess.method==='oauth_pkce'){
+      h+='<div style="margin-top:12px">'
+        +'<div class="faint" style="margin-bottom:5px">授权后，浏览器地址栏会跳转到带 code 的链接，复制 code 参数粘贴到这里：</div>'
+        +'<input id="manualCode" type="text" placeholder="粘贴授权码 code=..." '
+        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></input>'
+        +'<button class="btn pri sm" style="margin-top:6px" onclick="submitPkceCode()">提交授权码</button></div>';
+    }
+    // Lobster AI（有道）：后端起本地回调服务，正常会自动抓到 code；
+    // 回调被浏览器/防火墙挡住时，这里给手动粘贴的入口（2026-10-12 用户反馈「无填写栏」）。
+    if(sess.method==='oauth_lobster'){
+      const autoTip = sess.callback_port
+        ? ('面板已在 <code>127.0.0.1:'+esc(String(sess.callback_port))+'</code> 起本地回调服务，'
+           +'授权成功后通常会自动完成；若浏览器跳转后长时间没反应，请把地址栏里的 '
+           +'<code>code</code> 参数粘贴到下面。')
+        : '授权后浏览器地址栏会跳到 <code>http://127.0.0.1:端口/auth/callback?code=…</code>，'
+          +'把其中的 <code>code</code> 参数复制粘贴到下面。';
+      h+='<div style="margin-top:12px">'
+        +'<div class="faint" style="margin-bottom:5px">'+autoTip+'</div>'
+        +'<input id="manualLobsterCode" type="text" placeholder="粘贴回调地址里的 code（如 a83048ca-5128-4c35-9cfd-…）" '
+        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></input>'
+        +'<div class="row n" style="margin-top:6px;gap:8px">'
+        +'<button class="btn pri sm" onclick="submitLobsterCode()">提交授权码</button>'
+        +'<span class="faint" style="font-size:11.5px;align-self:center">整条回调地址也可以直接粘，面板会自动取 code</span>'
+        +'</div></div>';
+    }
+    h+= compact ? '</div>' : '</div></div>';
+  // 内联卡片模式不渲染旧详情页的「探测端点 / 平台内部能力」大块（排版乱的主因）
+  if(!compact){
+    h+=viewProbe();
+    h+=viewPlatformCaps(S.data.platformActions||{});
   }
-  h+=viewProbe();
-  h+=viewPlatformCaps(S.data.platformActions||{});
   return h;
 }
 
@@ -3670,20 +4729,253 @@ function viewLogin(){
   return h;
 }
 
-function copyEndpoint(){
+function showGatewayInfo(){
   const base=panelBaseUrl();
-  copyText(base+'\napi_key = admin',()=>toast('已复制：'+base,'ok'));
+  const models=(S.data.models||{}).models_enriched||[];
+  // ★ 2026-10-07：模型 id 来自上游清单（/v1/models、逆向中继），必须转义 ——
+  //   这段 HTML 最终走 innerHTML 注入，原来直接拼 m.id 就是一个 XSS 面。
+  const modelList=models.slice(0,30).map(m=>esc(m.id)).join('\n');
+  const more=models.length>30?`\n... 共 ${models.length} 个模型`:'';
+  
+  const html=`
+    <div style="padding:20px;max-width:560px">
+      <h3 style="margin:0 0 16px 0;font-size:18px">📡 接入配置</h3>
+      
+      <div style="margin-bottom:14px">
+        <div style="font-size:12px;color:#6b7280;margin-bottom:4px">Base URL</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <code style="flex:1;background:#f3f4f6;padding:8px 12px;border-radius:6px;font-size:13px">${base}</code>
+          <button class="btn sm" onclick="copyText('${base}')">复制</button>
+        </div>
+      </div>
+      
+      <div style="margin-bottom:14px">
+        <div style="font-size:12px;color:#6b7280;margin-bottom:4px">API Key</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <code style="flex:1;background:#f3f4f6;padding:8px 12px;border-radius:6px;font-size:13px">admin</code>
+          <button class="btn sm" onclick="copyText('admin')">复制</button>
+        </div>
+      </div>
+      
+      <div style="margin-bottom:14px">
+        <div style="font-size:12px;color:#6b7280;margin-bottom:4px">常用模型</div>
+        <pre style="background:#f3f4f6;padding:12px;border-radius:6px;font-size:12px;max-height:180px;overflow:auto;margin:0">auto
+${modelList}${more}</pre>
+      </div>
+      
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button class="btn" onclick="closeModal()">关闭</button>
+        <button class="btn pri" onclick="copyAllConfig()">一键复制全部</button>
+      </div>
+    </div>
+  `;
+  
+  openModal(html);
+}
+
+function copyAllConfig(){
+  const base=panelBaseUrl();
+  const models=(S.data.models||{}).models_enriched||[];
+  const text=`Base URL: ${base}/v1\nAPI Key: admin\n\n常用模型:\nauto\n${models.slice(0,20).map(m=>'  '+m.id).join('\n')}`;
+  copyText(text,()=>toast('已复制全部配置','ok'));
+}
+
+function openModal(html){
+  closeModal();
+  const mask=document.createElement('div');
+  mask.id='modalMask';
+  mask.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  mask.onclick=(e)=>{if(e.target===mask)closeModal()};
+  const box=document.createElement('div');
+  box.style.cssText='background:white;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,0.3);max-height:90vh;overflow:auto';
+  box.innerHTML=html;
+  mask.appendChild(box);
+  document.body.appendChild(mask);
+}
+
+function closeModal(){
+  const m=$('#modalMask');
+  if(m)m.remove();
 }
 
 const VIEWS={sources:viewSources,route:viewRoute,tools:viewTools,settings:viewSettings,
-  checkin:viewCheckin,growth:viewGrowth,tasks:viewTasks};
+  growth:viewGrowth,tasks:viewTasks};
 
 const LOADERS={sources:loadSources,route:loadRoute,tools:loadTools,settings:loadSettings,
-  checkin:loadCheckin,growth:loadGrowth,tasks:loadTasks};
+  growth:loadGrowth,tasks:loadTasks};
 
 function loadExtra(){
   const f=LOADERS[S.v];
   if(f)f();
+}
+
+// ============================================================
+// 自定义 API 操作函数
+// ============================================================
+
+/** 保存新的自定义 API */
+async function saveCustomApi(){
+  const name = document.getElementById('ca_name').value.trim();
+  const protocol = document.getElementById('ca_protocol').value;
+  const baseUrl = document.getElementById('ca_baseurl').value.trim();
+  const apiKey = document.getElementById('ca_apikey').value.trim();
+  const resultEl = document.getElementById('ca_result');
+  
+  if(!name || !baseUrl || !apiKey){
+    resultEl.innerHTML = '<div class="note err">请填写完整的名称、URL 和 Key</div>';
+    return;
+  }
+  
+  resultEl.innerHTML = '<div class="note">正在保存并同步模型…</div>';
+  
+  try {
+    // 先添加
+    // ★ 2026-10-07：改用 post(path, body)。原写法把 {method,body} 传给了只认
+    //   (path,body) 的 api()，后端收到的是嵌套对象 → 落一条"未命名"空记录。
+    const addRes = await post('api/custom_apis?action=add',
+      { name, protocol, base_url: baseUrl, api_key: apiKey });
+    
+    if(!addRes.ok){
+      resultEl.innerHTML = '<div class="note err">添加失败：'+esc(addRes.message||addRes.error||'')+'</div>';
+      return;
+    }
+    
+    const pid = addRes.id;
+    
+    // 自动同步模型
+    const syncRes = await post('api/custom_apis?action=sync', { id: pid });
+    
+    if(syncRes.ok){
+      resultEl.innerHTML = '<div class="note ok">✅ '+esc(syncRes.message)+'</div>';
+    } else {
+      resultEl.innerHTML = '<div class="note warn">✅ 已保存，但同步模型失败：'+esc(syncRes.error||'')+'</div>';
+    }
+    
+    // 刷新列表
+    await loadSources();
+    
+    // 2 秒后返回列表
+    setTimeout(()=>{ closeSrc(); }, 1500);
+    
+  } catch(e){
+    resultEl.innerHTML = '<div class="note err">出错了：'+esc(e.message)+'</div>';
+  }
+}
+
+/** 同步模型 */
+async function syncCustomApi(pid){
+  const resultEl = document.getElementById('ca_result');
+  resultEl.innerHTML = '<div class="note">正在同步模型…</div>';
+  
+  try {
+    const res = await post('api/custom_apis?action=sync', { id: pid });
+    
+    if(res.ok){
+      resultEl.innerHTML = '<div class="note ok">✅ '+esc(res.message)+'</div>';
+    } else {
+      resultEl.innerHTML = '<div class="note err">❌ '+esc(res.message||res.error||'')+'</div>';
+    }
+    
+    // 刷新列表
+    await loadSources();
+    // 重新渲染详情页
+    render();
+    
+  } catch(e){
+    resultEl.innerHTML = '<div class="note err">出错了：'+esc(e.message)+'</div>';
+  }
+}
+
+/** 编辑自定义 API */
+function editCustomApi(pid){
+  // 简化：暂时只支持删除，编辑后续完善
+  toast('编辑功能后续完善', 'warn');
+}
+
+/** 删除自定义 API */
+async function delCustomApi(pid){
+  if(!confirm('确定要删除这个自定义 API 吗？')) return;
+  
+  try {
+    // ★ 2026-10-07：原来不检查返回值就 toast「删除成功」（实际后端因收到嵌套
+    //   对象而返回"id 必填"）。
+    const r = await post('api/custom_apis?action=delete', { id: pid });
+    if(r.ok===false){ toast('删除失败：'+(r.message||r.error||''), 'err'); return; }
+    toast('删除成功', 'ok');
+    await loadSources();
+    closeSrc();
+  } catch(e){
+    toast('删除失败：'+e.message, 'err');
+  }
+}
+
+/** 提交 PKCE 授权码 */
+async function submitPkceCode(){
+  const code = document.getElementById('manualCode').value.trim();
+  const sess = S.data.loginSession;
+  
+  if(!code){
+    toast('请输入授权码', 'warn');
+    return;
+  }
+  
+  if(!sess || !sess.id){
+    toast('没有进行中的登录会话', 'err');
+    return;
+  }
+  
+  try {
+    // ★ 2026-10-07：这里是 P0 —— 原来把 {method,body} 传给只认 (path,body) 的
+    //   api()，后端拿到的是嵌套对象，b.get("id")=None → 走「手动添加」分支，
+    //   往账号池写一条 platform/name/secret 全空的垃圾记录，还回 ok:true，
+    //   前端于是提示「登录成功」并关闭弹窗 —— 真实授权码被丢弃。
+    const res = await post('api/login?action=submit', { id: sess.id, code: code });
+    
+    if(res.ok){
+      toast('登录成功', 'ok');
+      await loadSources();
+      closeSrc();
+    } else {
+      toast('提交失败：'+(res.error||''), 'err');
+    }
+    
+  } catch(e){
+    toast('提交失败：'+e.message, 'err');
+  }
+}
+
+/** 提交 Lobster AI（有道）授权码。
+ *  输入框里可以只粘 code，也可以粘整条回调地址 —— 面板自动取 code 参数。 */
+async function submitLobsterCode(){
+  const box=document.getElementById('manualLobsterCode');
+  const raw=(box?box.value:'').trim();
+  const sess=S.data.loginSession;
+  if(!raw){ toast('请先粘贴授权码','warn'); return; }
+  if(!sess||!sess.id){ toast('没有进行中的登录会话','err'); return; }
+  // 整条 URL → 取 code 参数；只给了 UUID 就用它本身
+  let code=raw;
+  try{
+    if(/^https?:/i.test(raw)){
+      const u=new URL(raw);
+      code=u.searchParams.get('code')||u.searchParams.get('authCode')||raw;
+    }else if(raw.includes('code=')){
+      code=raw.split('code=')[1].split('&')[0];
+    }
+  }catch(e){ /* 不是合法 URL 就按原样当 code */ }
+  code=(code||'').trim();
+  if(!code){ toast('没能从输入内容里解析出 code','err'); return; }
+  try{
+    const res=await post('api/login?action=submit',{id:sess.id, code:code});
+    if(res.ok){
+      toast('登录成功','ok');
+      await loadSources();
+      closeSrc();
+    }else{
+      toast('提交失败：'+(res.message||res.error||''),'err');
+    }
+  }catch(e){
+    toast('提交失败：'+e.message,'err');
+  }
 }
 
 window.addEventListener('DOMContentLoaded',()=>{

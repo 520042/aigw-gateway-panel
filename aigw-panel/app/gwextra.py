@@ -699,7 +699,7 @@ ACTIONS["web-glm"] = [
 #     （假 Key → 401，见 app/upstreams.py OFFICIAL 注释）。
 #     hint = 未配置 Key 时给用户的「官方常见模型」提示（来自 OFFICIAL.models_hint）。
 _API_OFFICIAL = {
-    "api-deepseek":    {"base": "https://api.deepseek.com", "name": "DeepSeek 官方",
+    "api-deepseek":    {"base": "https://api.deepseek.com/v1", "name": "DeepSeek 官方",
                         "hint": ["deepseek-chat", "deepseek-reasoner"]},
     "api-moonshot":    {"base": "https://api.moonshot.cn/v1", "name": "Kimi 月之暗面",
                         "hint": ["moonshot-v1-8k", "moonshot-v1-32k", "kimi-k2-turbo-preview"]},

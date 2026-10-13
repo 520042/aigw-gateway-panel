@@ -253,8 +253,12 @@ def all_sites():
     """把中转站 + 官方平台合并成统一的可管理站点列表"""
     out = []
     for s in RELAY_SITES:
+        # ★ 2026-10-13：公益中转站是 NewAPI/OneAPI 系，API 基地址 = 网站根址 + /v1。
+        #   前端抽屉预填的 endpoint 必须是可直连的 OpenAI 兼容前缀（router.py /
+        #   custom_apis.py 会往后拼 /chat/completions、/models），否则请求打错地址。
+        api_url = s["url"].rstrip("/") + "/v1"
         out.append({
-            "name": s["name"], "url": s["url"], "signup": s["signup"],
+            "name": s["name"], "url": s["url"], "api_url": api_url, "signup": s["signup"],
             "bonus": s["bonus"], "models": s["models"], "limit": s["limit"],
             "checkin": s["checkin"], "category": "relay", "region": "—",
             "endpoints": ["/api/user/checkin", "/api/user/checkin/status"],
