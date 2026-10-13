@@ -1,4 +1,4 @@
-/* 接入源 / 路由与模型 / 工具与集成 / 设置 四个视图的渲染测试 */
+/* 接入源 / 路由与模型 / 设置与日志 / 任务中心 四个视图的渲染测试 */
 
 let fail = 0;
 function ck(n, c, extra) {
@@ -7,13 +7,14 @@ function ck(n, c, extra) {
 }
 
 // ---------------------------------------------------------------- 架构
-ck('导航 7 项（EXE 网关管理已移除）',
-  Object.keys(VIEWS).length === 7 && !('gateway' in VIEWS),
+// ★ 2026-10-13：删掉「工具与集成」整栏、任务管理并入任务中心 → 4 个视图
+ck('导航 4 项（工具与集成/任务管理已移除）',
+  Object.keys(VIEWS).length === 4 && !('tools' in VIEWS) && !('tasks' in VIEWS),
   Object.keys(VIEWS).join(','));
 ck('VIEWS 注册 sources', typeof VIEWS.sources === 'function');
 ck('VIEWS 注册 route', typeof VIEWS.route === 'function');
-ck('VIEWS 注册 tools', typeof VIEWS.tools === 'function');
 ck('VIEWS 注册 settings', typeof VIEWS.settings === 'function');
+ck('VIEWS 注册 growth（任务中心）', typeof VIEWS.growth === 'function');
 ck('LOADERS 与 VIEWS 一一对应',
   Object.keys(LOADERS).sort().join() === Object.keys(VIEWS).sort().join(),
   Object.keys(LOADERS).sort().join() + ' vs ' + Object.keys(VIEWS).sort().join());
@@ -147,18 +148,21 @@ ROUTE_TAB = 'usage'; h = viewRoute();
 ck('用量 Tab 切过去了', !h.includes('模型总表'), h.length + ' 字节');
 ROUTE_TAB = 'models';
 
-// ---------------------------------------------------------------- 工具
-TOOLS_TAB = 'call';
-h = viewTools();
-ck('工具页声明是可选增强', h.includes('可选增强'));
-ck('工具页 4 个 Tab',
-  h.includes('工具调用') && h.includes('本地反代') && h.includes('签到计划') && h.includes('账号与凭据'));
-TOOLS_TAB = 'plan'; h = viewTools();
-ck('签到计划 Tab 有平台表', h.includes('每日时间') && h.includes('元宝'));
-ck('签到计划 Tab 有保存按钮', h.includes('acSave()'));
-TOOLS_TAB = 'acct'; h = viewTools();
-ck('账号池 Tab 显示凭据', h.includes('sessionid…7890'));
-ck('账号池 Tab 空态有引导', true);
+// ---------------------------------------------------------------- 工具（2026-10-13 已整栏删除）
+ck('工具页已删除（viewTools 不再存在）', typeof viewTools !== 'function');
+ck('任务管理已并入任务中心（viewTasks 不再存在）', typeof viewTasks !== 'function');
+
+// ---------------------------------------------------------------- 任务中心（2026-10-13 合并后）
+S.data.growth={growth:{platforms:[],summary:{done_today:0,on:0,sites:0,sites_done:0,ticks:0,last_tick:''},
+  checkin_summary:{total_checkin_sites:0,done_today:0},sites:[],enabled:true,hour:'09:10',retry_times:1}};
+S.data.tasks={tasks:[{id:'t1',name:'测试任务',done:false,runs:0,site:''}],total:1,done:0};
+S.data.sites=[];
+h = viewGrowth();
+ck('任务中心不崩（合并后）', h.length>0, h.length+' 字节');
+ck('任务中心含平台任务区', h.includes('平台任务'));
+ck('任务中心含手动任务区（原任务管理并入）', h.includes('手动任务'));
+ck('任务中心含新建任务表单', h.includes('tName') && h.includes('tSite'));
+ck('任务中心不再有「去任务管理」跳转', !h.includes("go('tasks')"));
 
 // ---------------------------------------------------------------- 设置
 SET_TAB = 'main';

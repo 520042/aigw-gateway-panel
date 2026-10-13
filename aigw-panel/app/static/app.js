@@ -194,10 +194,12 @@ function dtBindOnce(){
 }
 
 // ---------------------------------------------------------------- 路由
-const TITLES={sources:'接入源',route:'路由与模型',tools:'工具与集成',settings:'设置与日志',
-  growth:'成长任务',tasks:'任务管理'};
+// ★ 2026-10-13（用户要求）：删掉「工具与集成」整栏；「任务中心」并入原任务
+//   管理的手动任务，侧边栏只剩 设置与日志 / 任务中心 两个高级项。
+const TITLES={sources:'接入源',route:'路由与模型',settings:'设置与日志',
+  growth:'任务中心'};
 /* 高级（二级）菜单里的视图：默认折叠，进入其中任一项时自动展开分组 */
-const ADV=['tools','settings','growth','tasks'];
+const ADV=['settings','growth'];
 function toggleAdv(){
   const sub=$('#advSub'), t=$('#advToggle');
   const open=sub.classList.toggle('open');
@@ -578,109 +580,9 @@ function sourceList(){
   return out;
 }
 
-/* ================================================================
- * 工具与集成 —— 可选增强，不占主流程
- * ================================================================ */
-let TOOLS_TAB = 'call';
-
-async function loadTools(){
-  // ★ 2026-10-07：顺带拉账号池与自动签到配置 —— 工具页里的「签到计划」
-  //   「账号与凭据」两个 tab 依赖 S.data.autoCheckin / S.data.accounts，
-  //   原来只在 loadSources 里赋值，直接以 #tools 进入时这两块是全空的。
-  Promise.all([
-    api('api/localproxy').catch(()=>({})),
-    api('api/toolcall?action=list').catch(()=>({tools:[]})),
-    api('api/accounts').catch(()=>({accounts:[]})),
-    api('api/autocheckin?action=status').catch(()=>({platforms:[]})),
-  ]).then(([lp,tc,ac,au])=>{
-    S.data.lp=lp; S.data.toolList=tc.tools||[]; S.data.toolNames=tc.names||[];
-    S.data.accounts=ac.accounts||[];
-    S.data.autoCheckin=au;
-    render();
-  }).catch(()=>{});
-}
-
-function viewTools(){
-  let h='<div class="note">这些是<b>可选增强</b>。'
-    +'不接也完全不影响「接入源 → 统一反代 → 自动路由」这条主线。</div>';
-  h+='<div class="tabs">'
-    +[['call','⚒ 工具调用'],['proxy','⇅ 本地反代'],['plan','⏰ 签到计划'],['acct','⎔ 账号与凭据']]
-      .map(x=>'<button class="'+(TOOLS_TAB===x[0]?'on':'')+'" '
-        +'onclick="setToolsTab(\''+x[0]+'\')">'+x[1]+'</button>').join('')
-    +'</div>';
-  if(TOOLS_TAB==='call') h+=viewToolcall();
-  else if(TOOLS_TAB==='proxy') h+='<div class="card"><div class="cb">'+viewLocalproxy()+'</div></div>';
-  else if(TOOLS_TAB==='plan') h+=viewCheckinPlan();
-  else h+=viewAccountPool();
-  return h;
-}
-function setToolsTab(k){ TOOLS_TAB=k; render(); }
-
-function viewCheckinPlan(){
-  const au=S.data.autoCheckin||{};
-  const accP=au.platforms||[];
-  const onN=accP.filter(p=>(p._on!==undefined?p._on:p.on)).length;
-  let h='<div class="card"><div class="ch"><b>定时签到计划</b>'
-    +'<div class="flex n">'
-    +'<label style="margin:0;display:flex;align-items:center;gap:6px">'
-    +'<input type="checkbox" style="width:auto" '+(au.enabled?'checked':'')
-    +' onchange="acSet(\'enabled\',this.checked)">启用定时</label>'
-    +'<label style="margin:0;display:flex;align-items:center;gap:6px">'
-    +'<input type="checkbox" style="width:auto" '+(au.notify?'checked':'')
-    +' onchange="acSet(\'notify\',this.checked)">完成后通知</label>'
-    +'<input type="number" value="'+esc(au.stagger_sec)+'" style="width:88px" title="错峰秒数" onchange="acSet(\'stagger_sec\',+this.value)">'
-    +'<input type="number" value="'+esc(au.retry_times)+'" style="width:88px" title="重试次数" onchange="acSet(\'retry_times\',+this.value)">'
-    +'<input type="number" value="'+esc(au.retry_delay_min)+'" style="width:110px" title="重试间隔分钟" onchange="acSet(\'retry_delay_min\',+this.value)">'
-    +'<button class="btn pri" onclick="acSave()">保存</button>'
-    +'<button class="btn" onclick="acRun(false)">执行一轮</button>'
-    +'<button class="btn" onclick="acRun(true)">强制全部</button>'
-    +'</div></div><div class="cb">';
-  h+=dataTable({
-    key:'tPlan', rows:accP, size:20,
-    searchHint:'搜索平台…', searchKeys:['name','hint'],
-    cols:[
-      {k:'name',t:'平台',render:x=>'<b>'+esc(x.name)+'</b>'},
-      {k:'_on',t:'启用',render:x=>{
-        const v=x._on!==undefined?x._on:x.on;
-        return '<input type="checkbox" style="width:auto" '+(v?'checked':'')
-          +' onchange="acToggle(this,\''+esc(x.platform)+'\',this.checked)">';
-      }},
-      {k:'_time',t:'每日时间',render:x=>{
-        const v=x._time!==undefined?x._time:x.time;
-        return '<input type="time" style="width:120px" value="'+esc(v)+'" '
-          +'onchange="acTime(this,\''+esc(x.platform)+'\',this.value)">';
-      }},
-      {k:'logged_in',t:'凭据',render:x=>x.logged_in?tag('已登录','ok'):tag('未登录','warn')},
-      {k:'done_today',t:'今日',render:x=>x.done_today?tag('已跑','ok'):'—'},
-      {k:'_go',t:'',render:x=>'<button class="btn sm" onclick="acRunOne(\''+esc(x.platform)+'\')">执行</button>'},
-    ]});
-  h+='<div class="muted mt" style="font-size:12px">勾选 '+onN+' / '+accP.length
-    +' 个平台 · 同一天每平台只跑一次</div></div></div>';
-  return h;
-}
-
-function viewAccountPool(){
-  const accs=S.data.accounts||[];
-  let h='<div class="card"><div class="ch"><b>账号池（'+accs.length+'）</b>'
-    +'<span class="faint">凭据只存本机 data/ 目录，不外传</span></div><div class="cb">';
-  if(!accs.length){
-    h+=empty('还没有账号。去「接入源」点卡片接入。');
-  }else{
-    h+=dataTable({
-      key:'tAcc', rows:accs, size:20,
-      searchHint:'搜索平台 / 名称…', searchKeys:['platform','name','source'],
-      cols:[
-        {k:'platform',t:'平台',render:x=>'<span class="mono" style="font-size:12px">'+esc(x.platform)+'</span>'},
-        {k:'name',t:'名称'},
-        {k:'source',t:'来源',render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.source||'')+'</span>'},
-        {k:'secret',t:'凭据',render:x=>'<span class="mono faint">'+esc(x.secret||'')+'</span>'},
-        {k:'obtained_at',t:'获取时间',render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.obtained_at||'')+'</span>'},
-        {k:'_op',t:'',render:x=>'<button class="btn sm dgr" onclick="delAccount(\''+esc(x.id)+'\')">删除</button>'},
-      ]});
-  }
-  h+='</div></div>';
-  return h;
-}
+/* ★ 2026-10-13（用户要求：「工具集成一栏好像也没啥用了，可以不要了」）：
+   原「工具与集成」页（工具调用 / 本地反代 / 签到计划 / 账号与凭据四个 tab）
+   整栏删除。viewLocalproxy 仍被接入源抽屉引用，予以保留。 */
 
 /** 路由与模型：合并了原来的「智能路由」「模型与倍率」「上游档案」「用量看板」 */
 let ROUTE_TAB = 'models';
@@ -759,7 +661,7 @@ function srcCatCounts(items){
   return m;
 }
 function setSrcCat(c){ SRC_CAT = c; render(); }
-function srcToggleMod(k){ SRC_MOD_OPEN[k] = !SRC_MOD_OPEN[k]; render(); }
+function srcToggleMod(k){ SRC_MOD_OPEN[k] = !(SRC_MOD_OPEN[k] !== false); render(); }
 
 /** 懒拉某个源的模型清单（只有平台动作/内置表能给的才有），结果缓存在内存 */
 async function refreshSrcModels(pid){
@@ -869,7 +771,7 @@ function srcCards(items){
       +'<span class="sc-stat" title="模型（启用/总数）">模型 <b>'+(mods?(modOn+'/'+modTot):(s.models||0))+'</b></span>'
       +(bal?'<span class="sc-stat" title="实时积分余额">积分 <b>'+esc(bal)+'</b></span>'
         :(quota?'<span class="sc-stat" title="可用积分">积分 <b>'+esc(String(quota).slice(0,10))+'</b></span>':''))
-      +(creditHint?'<span class="sc-stat" title="模型积分倍率范围">倍率 <b>'+esc(creditHint)+'</b></span>':'')
+      +(creditHint?'<span class="sc-stat" title="模型积分范围（按 credits 倍率聚合）">积分 <b>'+esc(creditHint)+'</b></span>':'')
       +'<button class="btn sm gh" style="margin-left:auto" title="刷新账号状态与模型清单" onclick="event.stopPropagation();refreshSrcCard(\''+esc(s.key)+'\')">⟳</button>'
       +'</div>'
       +'</div>';
@@ -897,6 +799,8 @@ function srcDrawer(s, animate){
   const _bals=((S.data.grouped||{}).balances)||{};
   const bal=_bals[s.key] || (vpids.length ? (_bals[vpids[0]]||'') : '')
            || (grp&&grp.balance)||'';
+  // ★ 2026-10-13（用户要求）：模型清单默认展开，点「收起清单」才折起来
+  const modOpen = SRC_MOD_OPEN[s.key] !== false;
   let body='';
   // ★ 2026-10-12（用户反馈：公益中转站等 api_key 平台也被迫「先点接入再粘贴」，
   //   与开放平台 API 的「直接输入 Key」不一致，多此一举）：直接输入 Key 的判定
@@ -932,10 +836,10 @@ function srcDrawer(s, animate){
         +'<button class="btn sm dgr" onclick="delSrcAccount(\''+esc(a.id)+'\',\''+esc(a.name||'')+'\')">删除</button>'
         +'</div>').join(''):'<div class="faint" style="padding:6px 0;font-size:11.5px">还没有账号，完成上方登录后会自动出现在这里</div>')+'</div>'
       +'<div class="sc-sect"><i>模型（'+modOn+'/'+modTot+'）</i>'
-      +(mods?'<button class="btn sm gh" onclick="srcToggleMod(\''+esc(s.key)+'\')">'+(SRC_MOD_OPEN[s.key]?'收起清单':'展开清单')+'</button>'
+      +(mods?'<button class="btn sm gh" onclick="srcToggleMod(\''+esc(s.key)+'\')">'+(modOpen?'收起清单':'展开清单')+'</button>'
             :'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">拉取清单</button>')
       +'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">⟳ 刷新</button></div>'
-      +((SRC_MOD_OPEN[s.key]&&mods)?'<div class="sc-sub">'+mods.slice(0,40).map(m=>
+      +((modOpen&&mods)?'<div class="sc-sub">'+mods.slice(0,40).map(m=>
         '<div class="sc-row" title="'+(m.ctx?('上下文 '+Number(m.ctx).toLocaleString()+' / '):'')+(m.out?('输出 '+Number(m.out).toLocaleString()):'')+'">'
         +'<span class="mono">'+esc(m.id)+'</span>'
         +'<span class="faint" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.name||'')+'</span>'
@@ -1958,9 +1862,12 @@ function quickCheckin(){
 }
 
 // ---------------------------------------------------------------- 成长任务
+// ★ 2026-10-13：任务中心并入原「任务管理」的手动任务，一并加载
 async function loadGrowth(){
   const r=await api('api/growth');
   S.data.growth=r;
+  const t=await api('api/tasks').catch(()=>({tasks:[]}));
+  S.data.tasks=t;
   render();
 }
 function viewGrowth(){
@@ -1989,6 +1896,9 @@ function viewGrowth(){
   const siteTasks=g.sites||[];       // 外部站点（store.sites 里 checkin=true 的）
   const enabled=g.enabled;
   const sites=S.data.sites||[];
+  // ★ 2026-10-13：并入的手动任务（原「任务管理」页内容，随 loadGrowth 加载）
+  const tsk=S.data.tasks||{};
+  const taskList=tsk.tasks||[];
 
   // 兜底元数据：平台中文名 + 常用动作（动作 id 已与 gwextra.ACTIONS 核对过）
   const LEGACY_PLATFORMS=[
@@ -2104,6 +2014,7 @@ function viewGrowth(){
       <h2 style="margin:0">平台任务 <span class="faint" style="font-size:11.5px;font-weight:normal">（${platforms.length} 个平台 · ${actCount} 个可执行动作）</span></h2>
       <div class="flex">
         <button class="btn pri" onclick="runGrowth()">⚡ 一键执行全部</button>
+        <button class="btn" onclick="acRunFailed()">只补跑失败的</button>
         <button class="btn" onclick="loadGrowth()">刷新</button>
       </div>
     </div>
@@ -2176,18 +2087,44 @@ function viewGrowth(){
   </div>`:''}
 
   <div class="card">
-    <h2>执行方式</h2>
-    <table><tbody>
-      <tr><td>定时</td><td class="muted">每日 <b>${esc(g.hour||'09:10')}</b> 起错峰执行（${enabled?'<span class="tag ok">已启用</span>':'<span class="tag warn">已关闭</span>'}）</td></tr>
-      <tr><td>跳过规则</td><td class="muted">当天已成功的平台不再重复；失败自动重试 ${g.retry_times||0} 次（每次间隔 ${g.retry_delay_min||0} 分钟）</td></tr>
-      <tr><td>失败上限</td><td class="muted">连续失败 3 次 → 当天放弃该平台，不再反复打上游</td></tr>
-      <tr><td>通知</td><td class="muted">${g.notify?'执行结果推送到已配置的 webhook':'通知已关闭（设置→通知中心）'}</td></tr>
-      <tr><td>调度心跳</td><td class="muted">${nsum.ticks||0} 次 · 最近 ${esc(nsum.last_tick||'—')}</td></tr>
-    </tbody></table>
-    <div class="flex mt">
-      <button class="btn pri" onclick="runGrowth()">⚡ 一键执行全部</button>
-      <button class="btn" onclick="acRunFailed()">只补跑失败的</button>
-      <button class="btn gh" onclick="go('tasks')">去任务管理</button>
+    <div class="flex" style="justify-content:space-between;align-items:center">
+      <h2 style="margin:0">手动任务 <span class="faint" style="font-size:11.5px;font-weight:normal">（勾选=已完成，「执行未完成」会跳过；关联站点的任务会真的调签到接口）</span></h2>
+      <div class="flex">
+        <button class="btn pri" onclick="runAllTasks()">⚡ 执行未完成</button>
+        <button class="btn" onclick="loadGrowth()">刷新</button>
+      </div>
+    </div>
+    <div class="scroll sm" style="margin-top:8px">
+      <table><thead><tr><th style="width:44px">完成</th><th>任务</th><th>关联站点</th><th style="width:64px">次数</th><th>上次结果</th><th class="right">操作</th></tr></thead><tbody>
+      ${taskList.length?taskList.map(x=>{
+        const st=sites.find(s=>s.id===x.site);
+        return `<tr>
+        <td><input type="checkbox" ${x.done?'checked':''} style="width:auto" title="勾选后「执行未完成」会跳过它" onchange="tgTask('${esc(x.id)}')"></td>
+        <td>${esc(x.name)}${x.done?' <span class="tag">已完成</span>':''}</td>
+        <td>${x.site?(st?'<span class="tag acc">'+esc(st.name||x.site)+'</span>':'<span class="tag warn">站点已删除</span>'):'<span class="tag">手动</span>'}</td>
+        <td>${x.runs||0}</td>
+        <td class="muted">${x.last_run
+          ?(x.last_ok===false?'<span class="tag err">失败</span> ':'<span class="tag ok">成功</span> ')
+            +esc(String(x.last_note||'').slice(0,80))+' <span class="faint">'+ago(new Date(String(x.last_run).replace(/-/g,'/')).getTime()/1000)+'</span>'
+          :'<span class="faint">未执行过</span>'}</td>
+        <td class="right nowrap">
+          <button class="btn sm${x.last_ok===false?' pri':''}" onclick="runTask('${esc(x.id)}')">立即执行</button>
+          <button class="btn sm dgr" onclick="delTask('${esc(x.id)}')">删除</button>
+        </td></tr>`;
+      }).join('')
+      :'<tr><td colspan="6">'+empty('还没有手动任务。用下面的「新建任务」添加；关联站点的任务会真的去签到')+'</td></tr>'}
+      </tbody></table>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div><label>任务名</label><input id="tName" placeholder="例如：AnyRouter 每日签到"></div>
+      <div><label>关联站点（留空=手动任务）</label>
+        <select id="tSite"><option value="">— 不关联 —</option>
+        ${sites.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</select></div>
+      <div class="n"><label>&nbsp;</label><button class="btn pri" onclick="addTask()">添加</button></div>
+    </div>
+    <div class="note" style="margin-top:10px">
+      定时规则（每日 ${esc(g.hour||'09:10')} 起错峰执行 · 失败重试 ${g.retry_times||0} 次 ·
+      连败 3 次当天放弃）见「设置与日志 → 自动签到」。
     </div>
   </div>
 
@@ -2259,74 +2196,6 @@ async function loadTasks(){
   const r=await api('api/tasks');
   S.data.tasks=r;
   render();
-}
-function viewTasks(){
-  const t=S.data.tasks||{};
-  const tasks=t.tasks||[];
-  const sites=S.data.sites||[];
-  const pending=tasks.filter(x=>!x.done);
-  const runs=tasks.reduce((a,x)=>a+(x.runs||0),0);
-  const fails=tasks.filter(x=>x.last_ok===false);
-  const lastOne=tasks.filter(x=>x.last_run).sort((a,b)=>
-    String(b.last_run).localeCompare(String(a.last_run)))[0];
-  return `
-  <div class="grid g4 mb">
-    <div class="kpi"><div class="lb">待办任务</div><div class="vl">${pending.length}</div>
-      <div class="ex">共 ${t.total||0} 个 · 已完成 ${t.done||0}</div></div>
-    <div class="kpi"><div class="lb">上次失败</div>
-      <div class="vl" style="color:${fails.length?'var(--err)':'var(--ok)'}">${fails.length}</div>
-      <div class="ex">${lastOne?'最近执行 '+esc(lastOne.last_run):'还没有执行记录'}</div></div>
-    <div class="kpi"><div class="lb">关联站点</div><div class="vl">${tasks.filter(x=>x.site).length}</div>
-      <div class="ex">会调用真实签到接口，留空即手动任务</div></div>
-    <div class="kpi"><div class="lb">累计执行</div><div class="vl">${nfmt(runs)}</div>
-      <div class="ex">每次执行都记录结果与时间</div></div>
-  </div>
-
-  <div class="card">
-    <div class="flex" style="justify-content:space-between;align-items:center">
-      <h2 style="margin:0">任务清单 <span class="faint" style="font-size:11.5px;font-weight:normal">（勾选=已完成，会自动跳过）</span></h2>
-      <div class="flex">
-        <button class="btn pri" onclick="runAllTasks()">⚡ 执行未完成</button>
-        <button class="btn" onclick="loadTasks()">刷新</button>
-      </div>
-    </div>
-    <div class="scroll" style="margin-top:8px">
-      <table><thead><tr><th style="width:44px">完成</th><th>任务</th><th>关联站点</th><th style="width:64px">次数</th><th>上次结果</th><th class="right">操作</th></tr></thead><tbody>
-      ${tasks.length?tasks.map(x=>{
-        const st=sites.find(s=>s.id===x.site);
-        return `<tr>
-        <td><input type="checkbox" ${x.done?'checked':''} style="width:auto" title="勾选后「执行未完成」会跳过它" onchange="tgTask('${esc(x.id)}')"></td>
-        <td>${esc(x.name)}${x.done?' <span class="tag">已完成</span>':''}</td>
-        <td>${x.site?(st?'<span class="tag acc">'+esc(st.name||x.site)+'</span>':'<span class="tag warn">站点已删除</span>'):'<span class="tag">手动</span>'}</td>
-        <td>${x.runs||0}</td>
-        <td class="muted">${x.last_run
-          ?(x.last_ok===false?'<span class="tag err">失败</span> ':'<span class="tag ok">成功</span> ')
-            +esc(String(x.last_note||'').slice(0,80))+' <span class="faint">'+ago(new Date(String(x.last_run).replace(/-/g,'/')).getTime()/1000)+'</span>'
-          :'<span class="faint">未执行过</span>'}</td>
-        <td class="right nowrap">
-          <button class="btn sm${x.last_ok===false?' pri':''}" onclick="runTask('${esc(x.id)}')">立即执行</button>
-          <button class="btn sm dgr" onclick="delTask('${esc(x.id)}')">删除</button>
-        </td></tr>`;
-      }).join('')
-      :'<tr><td colspan="6">'+empty('还没有任务。点下面「新建任务」加一个；关联站点的任务会真的去签到')+'</td></tr>'}
-      </tbody></table>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>新建任务</h2>
-    <div class="row">
-      <div><label>任务名</label><input id="tName" placeholder="例如：AnyRouter 每日签到"></div>
-      <div><label>关联站点（留空=手动任务）</label>
-        <select id="tSite"><option value="">— 不关联 —</option>
-        ${sites.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</select></div>
-      <div class="n"><label>&nbsp;</label><button class="btn pri" onclick="addTask()">添加</button></div>
-    </div>
-    <div class="note" style="margin-top:10px">
-      关联站点的任务：执行时真的调用该站的签到接口，结果写回「上次结果」；
-      手动任务：点执行只是标记一次完成（可用来记录别处做过的事）。
-    </div>
-  </div>`;
 }
 /** ⚡ 执行全部未完成任务（后端 api/tasks?action=run_all：逐条真实执行并写回结果） */
 async function runAllTasks(){
@@ -2558,6 +2427,19 @@ function gmSaveOpen(){
     localStorage.setItem('aigw.gmOpen', JSON.stringify(on));
   }catch(e){}
 }
+// ★ 2026-10-13（用户要求）：模型总表按接入状态拆两栏 ——
+//   已接入默认展开、未接入默认收起；组内模型行仍默认折叠（GM_OPEN 不变）。
+let GM_SEC={on:true,off:false};
+function gmToggleSec(k){
+  GM_SEC[k]=!GM_SEC[k];
+  const sec=document.querySelector('.gm-sec[data-sec="'+k+'"]');
+  if(sec){
+    const head=sec.querySelector('.gm-head');
+    const body=sec.querySelector('.gm-sec-body');
+    if(head)head.classList.toggle('open',!!GM_SEC[k]);
+    if(body)body.style.display=GM_SEC[k]?'':'none';
+  }
+}
 function gmAll(open){
   document.querySelectorAll('.gm-group').forEach(grp=>{
     const pid=grp.getAttribute('data-pid');
@@ -2680,6 +2562,17 @@ function gmFilter(q){
     }
     n+=hit;
   });
+  // ★ 2026-10-13：搜索时两个分栏都展开（否则未接入栏默认收起，搜不到）；
+  //   清空搜索后恢复各自的默认/手动状态。
+  document.querySelectorAll('.gm-sec-body').forEach(b=>{
+    b.style.display = q ? '' : (GM_SEC[b.getAttribute('data-sec')] ? '' : 'none');
+  });
+  if(!q){
+    document.querySelectorAll('.gm-sec-head').forEach(h2=>{
+      const sec=h2.closest('.gm-sec');
+      h2.classList.toggle('open', !!(sec&&GM_SEC[sec.getAttribute('data-sec')]));
+    });
+  }
   const c=document.getElementById('gmCount');
   if(c)c.textContent=q?(n+' 个匹配'):'';
 }
@@ -2724,7 +2617,21 @@ function viewModels(){
     return h;
   }
   const groups=g.groups||[];
-  for(const grp of groups){
+  // ★ 2026-10-13（用户要求）：按接入状态拆两栏 —— 已接入默认展开、
+  //   未接入默认收起；组内模型行仍默认折叠（GM_OPEN 语义不变）。
+  const isAcc=(grp)=>grp.pid==='auto'||grp.free_lane||(grp.usable||0)>0;
+  for(const secKey of ['on','off']){
+    const list=groups.filter(secKey==='on'?isAcc:(x=>!isAcc(x)));
+    if(!list.length)continue;
+    const sOpen=!!GM_SEC[secKey];
+    h+='<div class="gm-sec" data-sec="'+secKey+'">'
+      +'<div class="gm-head gm-sec-head'+(sOpen?' open':'')+'" onclick="gmToggleSec(\''+secKey+'\')">'
+      +'<span class="caret">▸</span><b>'+(secKey==='on'?'已接入':'未接入')+'</b>'
+      +'<span class="tag">'+list.length+' 个来源</span>'
+      +'<span class="faint gm-hint">'+(secKey==='on'?'有账号 / 免凭据，可直接用':'登录后即可用')+'</span>'
+      +'</div>'
+      +'<div class="gm-sec-body"'+(sOpen?'':' style="display:none"')+'>';
+    for(const grp of list){
     // ★ 默认全部收起（2026-10-06 用户要求）：点组头展开，手动展开过的组
     //   记在 localStorage（GM_OPEN 初始化时读回）。行节点总是渲染，
     //   收起只切 display —— 否则点开时没有内容可显示。
@@ -2777,6 +2684,8 @@ function viewModels(){
         +'该来源没有静态清单 —— 登录后用「接入源 → 详情 → 查看该源模型」动态拉取</div></div>';
     }
     h+='</div>';
+    }
+    h+='</div></div>';
   }
   h+='<div class="dtfoot"><span>共 '+(g.total||0)+' 个模型 · '+groups.length
     +' 个来源 · 「测试」= 发一条极小真实请求验证连通（消耗极少额度）</span></div></div>'
@@ -3775,12 +3684,9 @@ function viewProbe(){
   return h;
 }
 
-/* ================================================================ 工具调用
- * 完整跑通 OpenAI 的 tools 协议往返：
- *   填问题 → 发请求 → 上游返回 tool_calls → 本地执行 → 回传 role=tool
- *   → 模型根据结果继续回答。
- */
-const TC = { messages: [], enabled: {}, result: null, execLog: [] };
+/* ★ 2026-10-13：原「工具调用测试台」随「工具与集成」整栏删除。
+   后端 api/toolcall 端点与本地执行器保留（OpenAI 兼容端点本身支持 tools
+   协议，客户端自带 tools 字段即可用），只是不再有面板内测试台。 */
 
 /* ================================================================ 本地反代上游
  * 把 CLIProxyAPI 集成进面板：启停、配置、OAuth 登录全在界面里完成，
@@ -4223,206 +4129,6 @@ async function acRunOne(platform){
   setTimeout(loadAutocheckin,4000);
 }
 
-function loadToolcall(){
-  api('api/toolcall?action=list').then(r=>{
-    S.data.toolList=r.tools||[];
-    S.data.toolNames=r.names||[];
-    if(!Object.keys(TC.enabled).length){
-      for(const n of S.data.toolNames) TC.enabled[n]=true;
-    }
-    render();
-  }).catch(e=>toast('加载工具失败：'+e.message,'err'));
-}
-
-async function tcSend(){
-  const q=$('#tcQuery');
-  const text=(q&&q.value||'').trim();
-  if(!text){toast('先写一句问题','err');return;}
-  const names=Object.keys(TC.enabled).filter(k=>TC.enabled[k]);
-  if(!names.length){toast('至少启用一个工具','err');return;}
-  TC.messages.push({role:'user',content:text});
-  if(q)q.value='';
-  TC.execLog=[]; TC.result=null;
-  render();
-  toast('正在请求（带 '+names.length+' 个工具）…');
-  const r=await api('api/toolcall?action=chat',{
-    messages:TC.messages, names:names,
-    tool_choice:($('#tcChoice')||{}).value||''
-  }).catch(e=>({ok:false,message:e.message}));
-  if(r.ok===false){toast(r.message||'请求失败','err');TC.result={error:r.message};render();return;}
-  TC.result=r;
-  const msg={role:'assistant',content:r.content||''};
-  if((r.tool_calls||[]).length)msg.tool_calls=r.tool_calls;
-  TC.messages.push(msg);
-  render();
-  if((r.tool_calls||[]).length)toast('模型请求调用 '+(r.tool_calls||[]).length+' 个工具','ok');
-  else toast(r.content?'模型直接回答了':'无返回内容', r.content?'ok':'');
-}
-
-async function tcExec(){
-  const tcs=(TC.result&&TC.result.tool_calls)||[];
-  if(!tcs.length){toast('没有待执行的 tool_calls','err');return;}
-  toast('本地执行 '+tcs.length+' 个工具…');
-  const r=await api('api/toolcall?action=exec',{tool_calls:tcs})
-    .catch(e=>({ok:false,message:e.message}));
-  if(r.ok===false){toast(r.message||'执行失败','err');return;}
-  TC.execLog=r.results||[];
-  for(const m of (r.tool_messages||[])) TC.messages.push(m);
-  render();
-  toast('已执行 '+TC.execLog.length+' 个，结果已回传', TC.execLog.every(x=>x.ok)?'ok':'err');
-}
-
-async function tcContinue(){
-  if(!TC.messages.length){toast('先发一次请求','err');return;}
-  const names=Object.keys(TC.enabled).filter(k=>TC.enabled[k]);
-  toast('把工具结果回传给模型…');
-  const r=await api('api/toolcall?action=chat',{
-    messages:TC.messages, names:names
-  }).catch(e=>({ok:false,message:e.message}));
-  if(r.ok===false){toast(r.message||'失败','err');return;}
-  TC.result=r;
-  TC.messages.push({role:'assistant',content:r.content||''});
-  render();
-  toast('模型已根据工具结果作答','ok');
-}
-
-function tcReset(){
-  TC.messages=[];TC.result=null;TC.execLog=[];
-  render();toast('已清空');
-}
-
-function viewToolcall(){
-  const names=S.data.toolNames||[];
-  const tools=S.data.toolList||[];
-  const byId={}; for(const t of tools) byId[t.function.name]=t.function;
-  const live=((S.data.overview||{}).gateway||{}).alive;
-
-  let h='';
-  if(!live){
-    h+='<div class="note warn">网关未运行。工具调用需要上游模型配合'
-      +'（先在「网关与账号」里登录账号），面板只能负责「执行工具」这一半。</div>';
-  }
-
-  // ---- 工具清单 ----
-  h+='<div class="card"><div class="ch"><b>可用工具（'+names.length+'）</b>'
-    +'<span class="faint">勾选后随请求一起发给模型</span></div><div class="cb">';
-  h+='<div class="grid g3">';
-  for(const n of names){
-    const f=byId[n]||{};
-    const props=Object.keys((f.parameters||{}).properties||{});
-    h+='<label style="border:1px solid var(--line);border-radius:10px;padding:10px;margin:0;cursor:pointer">'
-      +'<div style="display:flex;align-items:center;gap:8px">'
-      +'<input type="checkbox" style="width:auto;flex:0 0 auto" '+(TC.enabled[n]?'checked':'')
-      +' onchange="tcEnabled(\''+esc(n)+'\',this.checked)">'
-      +'<b class="mono" style="font-size:12.5px">'+esc(n)+'</b></div>'
-      +'<div class="faint" style="font-size:11.5px;margin:6px 0 4px;line-height:1.5">'+esc(f.description||'')+'</div>'
-      +(props.length?'<div class="faint mono" style="font-size:10.5px">参数：'+esc(props.join(', '))+'</div>':'')
-      +'</label>';
-  }
-  h+='</div>';
-  h+='<div class="muted mt" style="font-size:12px">'
-    +'沙箱目录：<code>'+esc(S.data.toolSandbox||'data/tools_sandbox')+'</code>'
-    +'（文件工具只能读写这里，防目录穿越）。'
-    +'<code>http_get</code> 默认关闭，<code>write_file</code> 需在设置里开写入权限。</div>';
-  h+='</div></div>';
-
-  // ---- 对话 ----
-  h+='<div class="card"><div class="ch"><b>工具调用测试台</b>'
-    +'<div class="flex n">'
-    +'<select id="tcChoice" style="width:auto"><option value="">tool_choice: auto</option>'
-    +'<option value="required">required（强制调工具）</option></select>'
-    +'<button class="btn sm" onclick="tcReset()">清空</button>'
-    +'</div></div><div class="cb">';
-
-  h+='<div class="scroll" style="max-height:300px;margin-bottom:10px">';
-  if(!TC.messages.length){
-    h+=empty('还没有对话。写一句需要用工具的话，比如「现在几点？帮我算 (12+8)*3」');
-  }else{
-    for(const m of TC.messages){
-      if(m.role==='user'){
-        h+='<div style="margin-bottom:8px"><span class="tag acc">user</span> <span>'+esc(m.content)+'</span></div>';
-      }else if(m.role==='assistant'){
-        h+='<div style="margin-bottom:8px"><span class="tag ok">assistant</span> <span>'+esc(m.content||'(空)')+'</span></div>';
-      }else if(m.role==='tool'){
-        h+='<div style="margin-bottom:8px"><span class="tag info">tool</span> '
-          +'<code style="word-break:break-all">'+esc(m.content)+'</code></div>';
-      }
-    }
-  }
-  h+='</div>';
-
-  h+='<div class="row n" style="gap:8px">'
-    +'<input id="tcQuery" placeholder="问一句需要用工具的问题…" '
-    +'onkeydown="if(event.key===\'Enter\')tcSend()" style="flex:1">'
-    +'<button class="btn pri" onclick="tcSend()">发送</button></div>';
-
-  // tool_calls
-  const r=TC.result;
-  if(r&&r.error){
-    h+='<div class="note err mt">请求失败：'+esc(r.error)+'</div>';
-  }else if(r&&(r.tool_calls||[]).length){
-    h+='<div class="card" style="margin:12px 0 0;box-shadow:none;background:var(--panel-2)">'
-      +'<div class="ch"><b>模型请求调用 '+r.tool_calls.length+' 个工具</b>'
-      +'<span class="faint">finish_reason='+esc(r.finish_reason||'—')+'</span></div>'
-      +'<div class="cb">';
-    for(const tc of r.tool_calls){
-      const fn=tc.function||{};
-      h+='<div style="border:1px solid var(--line);border-radius:8px;padding:9px;margin-bottom:7px">'
-        +'<div><b class="mono" style="font-size:12.5px">'+esc(fn.name)+'</b> '
-        +'<span class="faint mono" style="font-size:11px">id='+esc(tc.id||'—')+'</span></div>'
-        +'<pre style="margin-top:6px;max-height:120px">'+esc(fn.arguments||'{}')+'</pre></div>';
-    }
-    const done=TC.execLog.length;
-    h+='<div class="flex n">'
-      +'<button class="btn pri" onclick="tcExec()">'
-      +(done?'重新执行 '+TC.execLog.length+' 个':'执行这 '+r.tool_calls.length+' 个工具')+'</button>'
-      +(done?'<button class="btn" onclick="tcContinue()">把结果回传，让模型继续回答</button>':'')
-      +'</div>';
-    // 执行结果
-    if(TC.execLog.length){
-      h+='<div class="mt">'+dataTable({
-        key:'tcExec', rows:TC.execLog, size:10,
-        searchHint:'搜索执行结果…', searchKeys:['name','result','args'],
-        cols:[
-          {k:'name',t:'工具',render:x=>'<span class="mono" style="font-size:12px">'+esc(x.name)+'</span>'},
-          {k:'ok',t:'状态',render:x=>x.ok?tag('OK','ok'):tag('ERR','err')},
-          {k:'args',t:'入参',render:x=>'<code style="font-size:11px;word-break:break-all">'+esc(String(x.args||''))+'</code>'},
-          {k:'result',t:'结果',render:x=>'<code style="font-size:11px;word-break:break-all;color:'+(x.ok?'var(--ok)':'var(--err)')+'">'+esc(String(x.result||''))+'</code>'},
-        ]})+'</div>';
-    }
-    h+='</div></div>';
-  }else if(r&&r.content){
-    h+='<div class="note mt">模型直接回答（未调用工具）：<br>'+esc(r.content)+'</div>';
-  }
-  h+='</div></div>';
-
-  // ---- 协议说明 ----
-  h+='<div class="card"><h2>接入你自己的客户端</h2>'
-    +'<div class="note">面板本身也是一个 OpenAI 兼容端点。工具调用标准流程：'
-    +'① 请求带 <code>tools</code> → ② 响应 <code>message.tool_calls</code> → '
-    +'③ 执行函数 → ④ 以 <code>role:"tool"</code> 回传 → 模型继续回答。</div>'
-    +'<pre>'+esc([
-'POST http://127.0.0.1:<面板端口>/v1/chat/completions',
-'{"model":"default",',
-' "messages":[{"role":"user","content":"现在几点？"}],',
-' "tools":[{"type":"function","function":{',
-'   "name":"get_current_time",',
-'   "description":"获取当前时间",',
-'   "parameters":{"type":"object","properties":{}}}}],',
-' "tool_choice":"auto"}',
-'',
-'# 响应里会有：',
-'#   choices[0].message.tool_calls[] = {id, type, function:{name, arguments}}',
-'#   arguments 是 JSON 字符串，执行后按 role:"tool" + tool_call_id 回传。'
-].join('\n'))+'</pre></div>';
-
-  return h;
-}
-
-function tcEnabled(name, on){
-  TC.enabled[name]=on;
-}
-
 /** copilot 系平台 id —— 合并卡 key='copilot'，会话匹配要按这一族判断 */
 const COPILOT_FAMILY=['wb-gateway','wb-gateway-intl','apk-codebuddy','apk-codebuddy-cn'];
 
@@ -4771,15 +4477,16 @@ function viewLogin(){
 function showGatewayInfo(){
   const base=panelBaseUrl();
   const models=(S.data.models||{}).models_enriched||[];
-  // ★ 2026-10-07：模型 id 来自上游清单（/v1/models、逆向中继），必须转义 ——
-  //   这段 HTML 最终走 innerHTML 注入，原来直接拼 m.id 就是一个 XSS 面。
-  const modelList=models.slice(0,30).map(m=>esc(m.id)).join('\n');
-  const more=models.length>30?`\n... 共 ${models.length} 个模型`:'';
-  
+  // ★ 2026-10-13（用户要求）：常用模型从 <pre> 长列表改为下拉选择 ——
+  //   选中后点「复制」即拿走该模型 id，比在一长串里手动刮选更方便。
+  //   模型 id 来自上游清单，必须 esc()（这段 HTML 走 innerHTML 注入）。
+  const ids=['auto'].concat(models.map(m=>m.id).filter(Boolean));
+  const opts=ids.map(id=>'<option value="'+esc(id)+'">'+esc(id)+'</option>').join('');
+
   const html=`
     <div style="padding:20px;max-width:560px">
       <h3 style="margin:0 0 16px 0;font-size:18px">📡 接入配置</h3>
-      
+
       <div style="margin-bottom:14px">
         <div style="font-size:12px;color:#6b7280;margin-bottom:4px">Base URL</div>
         <div style="display:flex;gap:8px;align-items:center">
@@ -4787,7 +4494,7 @@ function showGatewayInfo(){
           <button class="btn sm" onclick="copyText('${base}')">复制</button>
         </div>
       </div>
-      
+
       <div style="margin-bottom:14px">
         <div style="font-size:12px;color:#6b7280;margin-bottom:4px">API Key</div>
         <div style="display:flex;gap:8px;align-items:center">
@@ -4795,21 +4502,30 @@ function showGatewayInfo(){
           <button class="btn sm" onclick="copyText('admin')">复制</button>
         </div>
       </div>
-      
+
       <div style="margin-bottom:14px">
-        <div style="font-size:12px;color:#6b7280;margin-bottom:4px">常用模型</div>
-        <pre style="background:#f3f4f6;padding:12px;border-radius:6px;font-size:12px;max-height:180px;overflow:auto;margin:0">auto
-${modelList}${more}</pre>
+        <div style="font-size:12px;color:#6b7280;margin-bottom:4px">常用模型（下拉选择，点复制 · 共 ${ids.length} 个）</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="cfgModel" style="flex:1;background:#f3f4f6;padding:8px 12px;border-radius:6px;font-size:13px;border:1px solid var(--line);min-width:0">${opts}</select>
+          <button class="btn sm" onclick="copyCfgModel()">复制</button>
+        </div>
       </div>
-      
+
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
         <button class="btn" onclick="closeModal()">关闭</button>
         <button class="btn pri" onclick="copyAllConfig()">一键复制全部</button>
       </div>
     </div>
   `;
-  
+
   openModal(html);
+}
+
+function copyCfgModel(){
+  const sel=document.getElementById('cfgModel');
+  const v=sel?String(sel.value||''):'';
+  if(!v){toast('没有可复制的模型','err');return;}
+  copyText(v,()=>toast('已复制模型 '+v,'ok'));
 }
 
 function copyAllConfig(){
@@ -4837,11 +4553,11 @@ function closeModal(){
   if(m)m.remove();
 }
 
-const VIEWS={sources:viewSources,route:viewRoute,tools:viewTools,settings:viewSettings,
-  growth:viewGrowth,tasks:viewTasks};
+const VIEWS={sources:viewSources,route:viewRoute,settings:viewSettings,
+  growth:viewGrowth};
 
-const LOADERS={sources:loadSources,route:loadRoute,tools:loadTools,settings:loadSettings,
-  growth:loadGrowth,tasks:loadTasks};
+const LOADERS={sources:loadSources,route:loadRoute,settings:loadSettings,
+  growth:loadGrowth};
 
 function loadExtra(){
   const f=LOADERS[S.v];
