@@ -48,9 +48,20 @@ import uuid
 CDP_PORT = 9333
 
 # platform 与 upstreams.GATEWAYS 的 id 对齐，另加若干「纯上游平台」
+
+# ★ copilot 家族：同一套腾讯授权（copilot.tencent.com），网关 EXE 不可达时
+#   一律回退面板原生扫码（app/tlogin.py 链路）。apk-trae 以前漏在这个集合外，
+#   导致「启动登录失败」（连不上已移除的 8317）。
+# ★ 2026-10-13：apk-trae 从这里移除 —— 它已改为 file+browser_capture 三方式
+#   （跳转 Trae 官网登录 / 读取本机 Trae 登录态 / 手动粘贴 x-ide-token），
+#   不再走 copilot 原生扫码（授权页是 WorkBuddy 登录页，张冠李戴；
+#   且拿到的 copilot accessToken 喂不饱 api.trae.cn 中继）。
+_COPILOT_NATIVE_FALLBACK = {"wb-gateway", "wb-gateway-intl", "apk-go"}
+
 PLATFORMS = {
     "wb-gateway": {
         "name": "WorkBuddy 账号 · 国内站（扫码 · 面板原生直连）",
+        "paste_type": "token",
         "method": "qrcode", "edition": "cn",
         "gateway": True,
         "upstream": "copilot.tencent.com",
@@ -65,6 +76,7 @@ PLATFORMS = {
     },
     "wb-gateway-intl": {
         "name": "WorkBuddy 账号 · 国际站（扫码 · 面板原生直连）",
+        "paste_type": "token",
         "method": "qrcode", "edition": "intl",
         "gateway": True,
         "upstream": "copilot.tencent.com",
@@ -77,19 +89,16 @@ PLATFORMS = {
     },
         "web-lobster": {
         "name": "网易 Lobster AI（有道龙虾 · 0.05 倍率）",
-        "method": "file",
+        "method": "oauth_lobster",
         "hosts": ["lobsterai.youdao.com"],
         "login_url": "https://lobsterai.youdao.com/#/index?keyfrom=invitation",
         "gateway": False,
         "upstream": "lobsterai.youdao.com",
-        "placeholder": "粘贴 accessToken（lobsterai2api 的 auths/lobsterai-*.json 里那个）",
         # ★ 协议逆向自社区项目 lobsterai2api：对话 /api/proxy/v1/chat/completions
         #   （OpenAI 兼容透传，Bearer accessToken）；模型 /api/models/available；
         #   每日签到 +100 credits（由 lobsterai2api 自带调度器做，面板暂不代签）。
-        "hint": "★ 客户端 0.05 倍率。接入两步：① 设置→「Lobster 上游地址」填 "
-                "lobsterai2api 的 LB2A_UPSTREAM_BASE（其登录页/抓包可得）；"
-                "② 运行其 login.exe 完成手机/微信登录，把 auths/lobsterai-*.json "
-                "里的 accessToken 粘到这里。粘好后：模型用「查看模型」动态拉，"
+        "hint": "★ 客户端 0.05 倍率。点击「启动登录」后，在浏览器打开授权链接，"
+                "完成手机/微信登录，面板会自动获取 token。"
                 "对话 model 写 模型id@web-lobster 即走面板原生中继。",
         # 验活：上游地址是用户在设置里填的（无静态域名），用 @lobster 哨兵——
         # verify_cookie 会换成 设置→Lobster 上游地址；未配置时明确说「未校验」。
@@ -124,6 +133,10 @@ PLATFORMS = {
         "method": "file",
         "hosts": ["trae-api-cn.mchost.guru", "trae.cn", "trae.com.cn"],
         "login_url": "https://www.trae.com.cn",
+        # ★ 2026-10-12：跳转+Cookie 自动链（一键登录）——登录页有扫码就抓码；
+        #   ⚠ 中继吃的是桌面端 x-ide-token，网页 Cookie 未必能过 verify，
+        #   过不了就按提示粘 token（两方式并存）。
+        "browser_capture": True,
         "gateway": False,
         "upstream": "trae-api-cn.mchost.guru",
         "placeholder": "粘贴 Trae x-ide-token（桌面端登录态 leveldb 或 OAuth refresh 换取）",
@@ -148,6 +161,7 @@ PLATFORMS = {
         "login_url": "https://chat.deepseek.com",
         "gateway": False,
         "upstream": "chat.deepseek.com",
+        "paste_type": "token",
         "placeholder": "粘贴 userToken（登录 chat.deepseek.com 后 F12 → Application → LocalStorage）",
         # ★ build38 对齐 deepseek-free-api(qiaojinxia) 一手源码：
         #   已实现 chat_session 创建 + create_pow_challenge 挑战 + 随包 Node/WASM
@@ -157,28 +171,58 @@ PLATFORMS = {
                 "LocalStorage 的 userToken 粘这里。对话 model 写 deepseek-chat@web-deepseek "
                 "或 deepseek-reasoner@web-deepseek（深度思考）。"
                 "首次对话需系统装有 node（用于解 POW 校验）。",
+        # ★ 2026-10-12 补「跳转登录」方式：登录页有扫码/手机号，登录后
+        #   userToken 在 **localStorage**（JSON，真值在 .value 字段，JWT）。
+        #   走 cookie 看守流程 + storage 提取（参照元宝的 storage_keys）。
+        "browser_capture": True,
+        "storage_keys": ["userToken"],
+        "storage_json_field": "value",     # localStorage['userToken'] = {"value": "<jwt>"}
+        # 登录页的扫码入口需要点开（与豆包/小浣熊同款看守点击逻辑）
+        "login_click": ["扫码登录", "登录", "手机号登录"],
         "verify": {"type": "bearer", "ok_keys": ["data", "choices", "id"]},
     },
     "apk-trae": {
-        "name": "Trae 国内版（aigw.app 网关，同一源）",
-        "method": "qrcode", "edition": "cn",
+        "name": "Trae 国内版",
+        "paste_type": "token",
+        # ★ 2026-10-13（用户三次反馈「Trae 登录打开的是 WorkBuddy 页，太离谱」）：
+        #   原 method=qrcode 走 copilot 原生扫码 —— 授权页是 WorkBuddy/CodeBuddy
+        #   登录页（张冠李戴），且拿到的 copilot accessToken 喂不饱 api.trae.cn
+        #   中继（中继吃的是 Trae IDE 的 x-ide-token，两套 token，见 native_relay
+        #   RELAY_SPECS apk-trae）。
+        #   现改为与 web-trae 同款的「三方式」：
+        #     ① 一键读取本机 Trae 登录态（trae_local，桌面端已登录时最快，
+        #        main.py api/tencent?action=trae_local，前端抽屉有按钮）
+        #     ② 跳转 www.trae.com.cn 官方登录页（browser_capture），面板自动
+        #        抓 Cookie/localStorage（ideToken/x-ide-token 在 storage_keys）
+        #     ③ 手动粘贴 x-ide-token（desktop leveldb 或 OAuth refresh 换）
+        "method": "file",
+        "hosts": ["trae.com.cn", "www.trae.com.cn", "trae.cn", "api.trae.cn"],
+        "login_url": "https://www.trae.com.cn",
+        # Trae 网页登录页有扫码/手机号入口，点开后才出码（与豆包/小浣熊同款逻辑）
+        "login_click": ["登录", "扫码登录", "立即登录"],
+        "browser_capture": True,
+        "storage_keys": ["ideToken", "x-ide-token", "iCubeAuthInfo", "authInfo"],
         "gateway": False,
         "upstream": "api.trae.cn",
-        "hint": "Trae 走同一套 copilot 授权，登录后可直连 api.trae.cn",
-        # ⚠ 2026-10-04 复测后修正：verify2.txt 记的
-        #     /cloudide/api/v3/trae/GetUserInfo 现在**两个域都不通**
-        #     （api.trae.cn → 404；www.trae.com.cn → 返回 HTML 页面）。
-        #     Trae 的 user_info / quota / 手机登录那一批已全部退化成网页路由，
-        #     活着的只剩挂在 /trae 前缀下的 5 条（见 app/gwextra.py::ACTIONS）。
-        #     Trae 与 CodeBuddy 共用授权，所以验活走 copilot 统一后端。
-        "verify": {"url": "https://copilot.tencent.com/console/account",
+        "hint": "Trae 国内版，三种方式任选：① 本机装着并登录过 Trae 桌面端 → "
+                "点「读取本机 Trae 登录态」一键提取入库；② 点「↗ 接入并打开登录页」"
+                "在 Trae 官网登录，面板自动抓取凭据；③ 手动粘贴桌面端 x-ide-token。"
+                "对话 model 写 模型id@apk-trae。",
+        "placeholder": "粘贴 Trae x-ide-token（桌面端 leveldb 或 OAuth refresh 换取）",
+        # 验活改打 api.trae.cn 活着的 /trae 前缀端点（gwextra 2026-10-04 实测
+        # verified），不再打 copilot /console/account —— 那是 CodeBuddy 的
+        # accessToken 验活口，Trae ide-token 打过去只会误报「未校验」。
+        # ⚠ 该端点无凭据时返回 200 + {"code":1001,"message":"...not able to
+        #   authenticate you..."} —— verify_cookie 的「业务码非 0 判无效」
+        #   天然能识别（实测 2026-10-13 探活）；ok_keys 用响应里真实存在的字段
+        #   （checked_in/enable），别用泛泛的 "code"（那是业务码不是标记）。
+        "verify": {"url": "https://api.trae.cn/trae/api/v2/ug/checkin_credits/status",
                    "type": "bearer",
-                   "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
-                   "ok_keys": ["uid", "nick", "userId"]},
+                   "ok_keys": ["checked_in", "enable", "credits", "data"]},
     },
     # ★ 2026-10-08 整理：apk-codebuddy 已合并到 wb-gateway-intl（同一账号体系）
     "apk-doubao": {
-        "name": "豆包 dev.doubao2api",
+        "name": "豆包 网页版",
         "method": "cookie",
         "hosts": ["doubao.com"],
         "login_url": "https://www.doubao.com/",
@@ -207,7 +251,7 @@ PLATFORMS = {
         # ✓ 参考 data/verify2.txt；chat / image_gen 无凭据也返 200，不能验活。
     },
     "apk-yuanbao": {
-        "name": "元宝 dev.yuanbao2api",
+        "name": "元宝 网页版",
         "method": "cookie",
         "hosts": ["yuanbao.tencent.com"],
         "login_url": "https://yuanbao.tencent.com/",
@@ -251,7 +295,10 @@ PLATFORMS = {
     },
     "apk-go": {
         "name": "Go 原生网关 com.joy4fire.wb2apimobile",
-        "method": "file",
+        "paste_type": "token",
+        # ★ 2026-10-12：与 CodeBuddy 共用同一套 copilot 授权 →
+        #   改走原生扫码（跳转+扫码+token 三方式齐备），不再只有粘贴。
+        "method": "qrcode", "edition": "cn",
         "gateway": False,
         "upstream": "copilot.tencent.com",
         "hint": "Go 版网关未提供网页授权入口，支持导入凭据文件 / 直接填 API Key",
@@ -264,24 +311,25 @@ PLATFORMS = {
     # ↓ 以下三个是从 base.apk（aigw.app）里挖出来的多供应商反代
     # APK 顶部串明写："Trae / Loomy / WorkBuddy / Antigravity"
     "apk-loomy": {
-        "name": "Loomy 讯飞（loomyad.xunfei.cn）",
-        "method": "cookie",
-        "hosts": ["xunfei.cn", "xfinfr.com"],
-        "login_url": "https://account.xfinfr.com/",
+        "name": "Loomy 讯飞（loomy.xunfei.cn）",
+        # ★ 2026-10-12 终版：走**账号服务签名 API**（短信/密码登录，参照
+        #   Patrick130306/loomy2api 的逆向协议）—— 不再需要浏览器！
+        #   之前走 CDP 浏览器登录会被讯飞设备绑定风控拦下
+        #   （device rebind requires explicit user action）。
+        #   登录三方式：短信验证码 / 密码 / 粘贴 session（32 字符，14 天）。
+        "method": "loomy",
+        "hosts": ["loomy.xunfei.cn", "xunfei.cn", "xfinfr.com"],
+        "login_url": "https://loomy.xunfei.cn/login",
+        "no_remote_scan": True,
         "gateway": False,
         "upstream": "loomyad.xunfei.cn",
-        "hint": "讯飞 Loomy。登录 account.xfinfr.com，面板取 Cookie 后调 "
-                "/api/v1/models（实测返回「缺少 token」说明接口通）",
-        # ★ 2026-10-06 补齐：多份 Loomy 上手教程一致写明「扫码登录讯飞账号，
-        #   或使用手机号+验证码」，所以登录入口是有的，只是之前没配点击词，
-        #   无头浏览器打开登录页后无从下手 → 抓不到码。
-        "login_click": ["扫码登录", "登录", "立即登录", "立即注册"],
+        "paste_type": "token",
+        "placeholder": "粘贴 session（32 字符，登录后服务端下发）",
+        "hint": "讯飞 Loomy。★ 支持三种登录（均无需浏览器）："
+                "① 手机号+短信验证码 ② 手机号+密码 ③ 粘贴 session。"
+                "登录后模型清单实时拉取（含倍率）。",
         "verify": {"url": "https://loomyad.xunfei.cn/api/v1/models",
-                   "type": "cookie",
-                   "ok_keys": ["data", "models", "code"]},
-        # ✓ 来自 data/verify2.txt
-        # ⚠ 无凭据也返 200（code=100002「缺少 token」）→ **models 不能当验活端点**，
-        #   它只能证明「接口通」。真正要判断登录态得看 models 里的 data 有没有内容。
+                   "type": "bearer", "ok_keys": ["data", "models", "id"]},
     },
     "apk-antigravity": {
         "name": "Antigravity / Google Cloud Code",
@@ -306,6 +354,7 @@ PLATFORMS = {
     # ★ 2026-10-08 整理：apk-codebuddy-cn 已合并到 wb-gateway（同一账号体系）
     # ==================== 办公 AI / Agent 平台（2026-10-04 调研） ====================
     "apk-coze": {
+        "browser_capture": True,
         "name": "扣子 Coze（api.coze.cn 官方 API）",
         # ★ 2026-10-04 审计修正：官方 API 用的是**控制台签发的 PAT**（pat_ 开头），
         #   不是浏览器 Cookie。之前配成 cookie 方式，扫出来的浏览器 Cookie 打过去
@@ -428,7 +477,23 @@ PLATFORMS = {
                    "type": "bearer", "ua": "opencode/1.18.31",
                    "ok_keys": ["data", "id", "model"]},
     },
+    # ★ 2026-10-07 新增（参照 dsh-our-free-model src/kilo.js）：
+    #   第二条"点一下就白嫖"的免凭据车道，与 anon-zen 共用 method=anon 流程。
+    "kilo": {
+        "name": "Kilo Gateway（免凭据免费池）",
+        "method": "anon",
+        "hosts": ["api.kilo.ai", "kilo.ai"],
+        "login_url": "https://kilo.ai",
+        "gateway": False,
+        "upstream": "api.kilo.ai",
+        "placeholder": "无需填写（免凭据车道，点接入即用）",
+        "hint": "★ 免登录、免 Key、免注册：Kilo 的免费池对匿名请求直接应答，"
+                "点「接入」只是把它登记进路由。清单取上游 models 的 isFree 切片。"
+                "⚠ 上游明确说明免费池的提示可能被记录用于改进其服务，"
+                "请勿用它处理敏感内容。",
+    },
     "web-qoder": {
+        "browser_capture": True,
         "name": "Qoder（直连模型端点 · qwen3.8-flash 免费）",
         "method": "file",
         "hosts": ["qoder.com", "api2-v2.qoder.sh"],
@@ -451,6 +516,7 @@ PLATFORMS = {
                    "ok_keys": ["data", "id", "model", "choices"]},
     },
     "apk-qoder": {
+        "browser_capture": True,
         "name": "Qoder（阿里桌面端，原通义灵码国际版）",
         "method": "file",
         "hosts": ["qoder.com", "lingma.aliyun.com"],
@@ -557,6 +623,46 @@ for _pid, (_nm, _lu, _vu, _ph, _hint) in _API_KEY_PLATFORMS.items():
         "verify": {"url": _vu, "type": "api_key"},
     }
 
+# ============ 2026-10-09 新增：订阅反代平台（原生实现，不需要外部 exe）============
+# 这些平台用 OAuth 登录（设备码/PKCE），不是填 API Key 的
+_SUBSCRIPTION_PLATFORMS = {
+    # pid: (名称, 登录方式, hint)
+    "sub-kimi": ("Kimi Code 国内站", "oauth_device",
+                 "Kimi Code 订阅登录。国内站 auth.kimi.com。"
+                 "设备码登录后自动获取 token，网关直接反代。"),
+    "sub-kimi-ai": ("Kimi Code 国际站", "oauth_device",
+                 "Kimi Code 订阅登录。国际站 auth.kimi.ai。"
+                 "设备码登录后自动获取 token，网关直接反代。"),
+    "sub-codex": ("OpenAI Codex", "oauth_pkce",
+                  "ChatGPT Plus/Pro 订阅登录。PKCE OAuth 流程，"
+                  "登录后自动获取 access_token，网关直接反代。"),
+    "sub-claude": ("Anthropic Claude Code", "oauth_pkce",
+                   "Claude Pro/Max 订阅登录。PKCE OAuth 流程，"
+                   "登录后自动获取 access_token，网关直接反代。"),
+    "sub-grok": ("xAI Grok", "oauth_device",
+                 "Grok Build 订阅登录。设备码 OAuth 流程，"
+                 "登录后自动获取 access_token，网关直接反代。"),
+    "sub-antigravity": ("Google Antigravity", "oauth_google",
+                        "Google Gemini 订阅登录。Google OAuth 流程：点「接入」生成"
+                        "授权链接 → 浏览器登录授权 → 地址栏跳 "
+                        "localhost:51121/callback?code=…（页面打不开是正常的）→ "
+                        "把 code= 后面那段粘贴到下方即完成登录，token 自动入库。"),
+    "sub-devin": ("Devin", "oauth_pkce",
+                  "Devin 订阅登录。PKCE OAuth 流程，"
+                  "登录后自动获取 session_token，网关直接反代。"),
+    "sub-meta": ("Meta Muse", "oauth_device",
+                 "Meta AI 订阅登录。设备码 OAuth 流程，"
+                 "登录后自动获取 access_token，网关直接反代。"),
+}
+for _pid, (_nm, _method, _hint) in _SUBSCRIPTION_PLATFORMS.items():
+    PLATFORMS[_pid] = {
+        "name": _nm, "method": _method, "type": "subscription",
+        "gateway": False, "hosts": [], "login_url": "",
+        "upstream": "",
+        "hint": _hint,
+        "verify": None,  # 暂时没有验活
+    }
+
 # 二维码登录的终态
 _QR_DONE = {"success", "failed", "expired", "error"}
 _QR_FAIL = {"failed", "expired", "error"}
@@ -573,6 +679,10 @@ def platform_list():
             "upstream": p.get("upstream", ""),
             "hint": p.get("hint", ""),
             "gateway": bool(p.get("gateway")),
+            "no_remote_scan": bool(p.get("no_remote_scan")),
+            "browser_capture": bool(p.get("browser_capture")),
+            "paste_type": p.get("paste_type", ""),
+            "placeholder": p.get("placeholder", ""),
             "qr": pid in _remote_qr_platforms(),
         })
     return out
@@ -624,6 +734,7 @@ class LoginSession:
                 "qr": self.qr, "qr_text": self.qr_text, "auth_url": self.auth_url,
                 "expires_at": self.expires_at,
                 "seconds_left": max(0, int(self.expires_at - time.time())) if self.expires_at else 0,
+                "callback_port": self.opts.get("lobster_callback_port", 0),
                 "result": _mask(self.result), "created_at": self.created_at,
             }
 
@@ -637,13 +748,24 @@ class LoginSession:
 
 
 def _mask(res):
-    """对外隐藏完整密钥，只留可辨识的指纹"""
+    """对外隐藏完整密钥，只留可辨识的指纹。
+
+    ★ 2026-10-07 修（凭据明文回传）：原来只匹配
+      secret / token / cookie / api_key / password 五个**精确**键名，
+      而三条 OAuth 链路的结果用的是 access_token / refresh_token /
+      accessToken / refreshToken —— 于是完整 JWT 原封不动地出现在
+      /api/login?action=start|poll 的响应里。现在按关键字模糊匹配所有
+      凭据类字段。"""
     if not isinstance(res, dict):
         return res
     out = dict(res)
-    for k in ("secret", "token", "cookie", "api_key", "password"):
-        v = out.get(k)
-        if isinstance(v, str) and len(v) > 12:
+    words = ("secret", "token", "cookie", "apikey", "api_key",
+             "password", "passwd", "credential", "authorization")
+    for k, v in list(out.items()):
+        if not isinstance(v, str) or len(v) <= 12:
+            continue
+        kl = str(k).lower()
+        if any(w in kl for w in words):
             out[k] = v[:6] + "…" + v[-4:]
             out[k + "_full_len"] = len(v)
     return out
@@ -1031,19 +1153,47 @@ def _qr_texture_grid(gray, w, h, dark):
 
 
 
-def _find_headless_chrome():
+def _find_headless_chrome(auto_download=True):
     """
     找服务端无头 Chromium（2026-10-06 新增，远程部署兜底）。
-    优先级：AIGW_HEADLESS_CHROME 环境变量 → Playwright 缓存的 Chrome for
-    Testing / headless_shell → 系统 PATH 里的 chromium / chrome。
+    优先级：AIGW_HEADLESS_CHROME 环境变量 → 系统 Chrome/Edge →
+    项目内置自动下载的 headless shell（data/browsers/）→
+    Playwright 缓存 → 系统 PATH 里的 chromium / chrome。
+    
+    auto_download=True 时，找不到会自动下载（首次约 80MB）。
     找不到返回 ""（上层据此报错并引导手动粘贴 Cookie）。
     """
     exe = os.environ.get("AIGW_HEADLESS_CHROME", "")
-    if exe and os.path.isfile(exe) and os.access(exe, os.X_OK):
+    if exe and os.path.isfile(exe):
         return exe
+    
+    # 系统安装的 Chrome / Edge
+    try:
+        from . import cdp
+        found = cdp.find_browser()
+        if found:
+            return found
+    except Exception:
+        pass
+    
+    # 项目内置自动下载的 headless shell
+    try:
+        from . import headless_dl
+        local = headless_dl.find_local()
+        if local:
+            return local
+        # 找不到就自动下载
+        if auto_download:
+            try:
+                return headless_dl.download()
+            except Exception as e:
+                # 下载失败就继续往下找
+                pass
+    except Exception:
+        pass
+    
     home = os.path.expanduser("~")
     pats = (
-        # 完整 chrome 支持 --headless=new，优先于 headless_shell
         home + "/.cache/ms-playwright/chromium-*/chrome-linux*/chrome",
         home + "/.cache/ms-playwright/chromium_headless_shell-*/chrome-linux*/headless_shell",
         "/usr/bin/chromium", "/usr/bin/chromium-browser",
@@ -1125,6 +1275,14 @@ class LoginManager:
                 sess._browser.close()
             except Exception:
                 pass
+        # Lobster 的常驻回调服务也要收掉，否则端口一直挂着
+        if sess.method == "oauth_lobster":
+            try:
+                from . import oauth_lobster
+                info = sess.opts.get("lobster_login_info") or {}
+                oauth_lobster.stop_callback_server(info.get("port"))
+            except Exception:
+                pass
         sess.finish("error", "已取消", "cancelled")
         return True
 
@@ -1150,10 +1308,334 @@ class LoginManager:
                 self._start_cookie(sess, spec)
             elif sess.method == "anon":
                 self._start_anon(sess, spec)
+            elif sess.method == "oauth_device":
+                self._start_oauth_device(sess, spec)
+            elif sess.method == "oauth_pkce":
+                self._start_oauth_pkce(sess, spec)
+            elif sess.method == "oauth_lobster":
+                self._start_oauth_lobster(sess, spec)
+            elif sess.method == "oauth_google":
+                # ★ 2026-10-13：Antigravity（Google OAuth）—— 原先没有分派，
+                #   点「接入」掉进 _start_file 只回「请粘贴」，授权根本发不起来
+                #   （用户反馈「登录不行」的又一处）。
+                self._start_oauth_google(sess, spec)
+            elif sess.opts.get("force_browser") and spec.get("browser_capture"):
+                # ★ 2026-10-12：file 类平台补「跳转登录」第二方式 ——
+                #   平台声明 browser_capture=True（有 hosts/login_url/verify/
+                #   storage_keys）时，前端可强制走 cookie 看守流程：开浏览器
+                #   → 用户在登录页登录 → 抓 Cookie/localStorage → 提取凭据。
+                #   （web-deepseek：userToken 在 localStorage，JSON 取 .value）
+                sess.method = "cookie"
+                self._start_cookie(sess, spec)
             else:
                 self._start_file(sess, spec)
         except Exception as e:
             sess.finish("error", "启动登录失败", "%s: %s" % (type(e).__name__, e))
+
+    # ---------------------------------------------------------- 设备码 OAuth
+    def _start_oauth_device(self, sess, spec):
+        """设备码 OAuth 登录（Kimi、Grok、Meta 等）"""
+        from . import oauth_device
+        
+        # 确定平台 pid（处理国内/国际变体）
+        pid = sess.platform
+        if pid == "sub-kimi":
+            # 国内/国际变体，由 opts 决定
+            edition = sess.opts.get("edition", "cn")
+            pid = "sub-kimi" if edition == "cn" else "sub-kimi-ai"
+        
+        try:
+            info = oauth_device.start_device_flow(pid)
+        except Exception as e:
+            sess.finish("error", "启动设备码登录失败", str(e))
+            return
+        
+        with sess.lock:
+            sess.opts["device_info"] = info
+            sess.opts["device_pid"] = pid
+            # 验证码和验证 URL
+            sess.qr_text = info.get("verification_uri_complete") or info.get("verification_uri")
+            sess.auth_url = info.get("verification_uri_complete") or info.get("verification_uri")
+            # 过期时间
+            expires_in = info.get("expires_in", 600)
+            sess.expires_at = time.time() + expires_in
+            # user_code 显示在消息里
+            user_code = info.get("user_code", "")
+        
+        sess.finish("waiting",
+                    "请在浏览器打开授权页，输入验证码 %s 完成登录" % user_code,
+                    result=None)
+        
+        # 开始后台轮询
+        self._poll_oauth_device(sess)
+
+    def _poll_oauth_device(self, sess):
+        """设备码 OAuth 后台轮询"""
+        from . import oauth_device
+        
+        # 从会话里取出设备码信息
+        device_info = sess.opts.get("device_info")
+        if not device_info:
+            return
+        
+        interval = device_info.get("interval", 5)
+        max_wait = 600  # 最多等 10 分钟
+        waited = 0
+        
+        while waited < max_wait:
+            if getattr(sess, "_stop", False):
+                return
+            
+            time.sleep(interval)
+            waited += interval
+            
+            try:
+                result = oauth_device.poll_token(device_info)
+            except Exception as e:
+                sess.finish("error", "轮询登录状态失败", str(e))
+                return
+            
+            if result is None:
+                # 还在等待用户授权
+                with sess.lock:
+                    left = max_wait - waited
+                    sess.message = "等待用户授权…（剩余 %d 秒）" % left
+                continue
+            
+            if "access_token" in result:
+                # 登录成功
+                pid = sess.opts.get("device_pid", sess.platform)
+                account = result.get("email") or result.get("username") or "已登录"
+                
+                sess.finish("success", "登录成功，凭据已保存",
+                            result={
+                                "type": "oauth_device",
+                                "pid": pid,
+                                "access_token": result.get("access_token"),
+                                "refresh_token": result.get("refresh_token"),
+                                "expires_in": result.get("expires_in"),
+                                "account": account,
+                            })
+                self._save(sess)
+                return
+            else:
+                # 登录失败
+                err = result.get("error_description") or result.get("error") or "登录失败"
+                sess.finish("error", err, "oauth_failed")
+                return
+        
+        # 超时
+        sess.finish("expired", "等待超时（10 分钟内未完成登录）", "expired")
+
+    # ---------------------------------------------------------- PKCE OAuth
+    def _start_oauth_pkce(self, sess, spec):
+        """PKCE OAuth 登录（Codex、Claude、Devin 等）"""
+        from . import oauth_pkce
+        
+        pid = sess.platform
+        
+        try:
+            auth_url, state, pkce = oauth_pkce.generate_auth_url(pid)
+        except Exception as e:
+            sess.finish("error", "生成授权链接失败", str(e))
+            return
+        
+        with sess.lock:
+            sess.opts["pkce"] = pkce
+            sess.opts["state"] = state
+            sess.auth_url = auth_url
+            sess.expires_at = time.time() + 600  # 10 分钟有效期
+        
+        sess.finish("waiting",
+                    "请在浏览器打开授权链接，登录并授权后，把授权码（code）粘贴回来",
+                    result=None)
+
+    def submit_pkce_code(self, sid, code):
+        """提交授权码，换 token"""
+        from . import oauth_pkce
+        
+        sess = self.get(sid)
+        if not sess:
+            return False, "会话不存在"
+        
+        pkce = sess.opts.get("pkce")
+        if not pkce:
+            return False, "PKCE 信息不存在"
+        
+        try:
+            result = oauth_pkce.exchange_code_for_token(sess.platform, code, pkce)
+        except Exception as e:
+            return False, "换 token 失败：%s" % str(e)
+        
+        if "access_token" in result:
+            account = result.get("email") or result.get("username") or "已登录"
+            sess.finish("success", "登录成功，凭据已保存",
+                        result={
+                            "type": "oauth_pkce",
+                            "pid": sess.platform,
+                            "access_token": result.get("access_token"),
+                            "refresh_token": result.get("refresh_token"),
+                            "expires_in": result.get("expires_in"),
+                            "account": account,
+                        })
+            self._save(sess)
+            return True, "登录成功"
+        else:
+            err = result.get("error_description") or result.get("error") or "登录失败"
+            return False, err
+
+    # ---------------------------------------------------------- Google OAuth
+    def _start_oauth_google(self, sess, spec):
+        """Google OAuth 登录（Antigravity / Cloud Code）。
+        协议取自 app/relays/antigravity.py（CLIProxyAPI 翻译版）：
+        generate_auth_url → 用户授权 → 地址栏跳 localhost:51121/callback?code=…
+        → 用户复制 code 回来 → exchange_code_for_tokens 换 token。
+        redirect_uri 是 localhost 固定端口（Google 对已安装应用的约定），
+        授权成功后浏览器必然跳一个连不上的地址 —— 所以手动粘 code 是主路径，
+        不是兜底（与 lobster 的常驻回调服务不同，这里不起本地服务）。"""
+        from app.relays import antigravity as _AG
+        try:
+            auth_url, state = _AG.generate_auth_url()
+        except Exception as e:
+            sess.finish("error", "生成授权链接失败", str(e))
+            return
+        with sess.lock:
+            sess.opts["state"] = state
+            sess.auth_url = auth_url
+            sess.expires_at = time.time() + 600  # 10 分钟有效期
+        sess.finish("waiting",
+                    "请在浏览器打开授权链接并用 Google 账号登录授权；授权后地址栏会跳到 "
+                    "localhost:51121/callback?code=…（页面打不开是正常的），"
+                    "把其中 code= 后面那一段粘贴到下方即可。",
+                    result=None)
+
+    def submit_google_code(self, sid, code):
+        """提交 Google 授权码，换 token"""
+        from app.relays import antigravity as _AG
+        sess = self.get(sid)
+        if not sess:
+            return False, "会话不存在"
+        try:
+            result = _AG.exchange_code_for_tokens(code)
+        except Exception as e:
+            return False, "换 token 失败：%s" % str(e)
+        if "access_token" in result:
+            # Google 不直接回 email；有 id_token 就解一下 payload，否则用占位名
+            account = "Google 账号"
+            try:
+                import base64 as _b64
+                idt = result.get("id_token") or ""
+                if idt.count(".") == 2:
+                    payload = idt.split(".")[1]
+                    payload += "=" * (-len(payload) % 4)
+                    claims = json.loads(_b64.urlsafe_b64decode(payload).decode("utf-8", "replace"))
+                    account = claims.get("email") or claims.get("name") or account
+            except Exception:
+                pass
+            sess.finish("success", "登录成功，凭据已保存",
+                        result={
+                            "type": "oauth_google",
+                            "pid": sess.platform,
+                            "access_token": result.get("access_token"),
+                            "refresh_token": result.get("refresh_token"),
+                            "expires_in": result.get("expires_in"),
+                            "account": account,
+                        })
+            self._save(sess)
+            return True, "登录成功"
+        err = result.get("error_description") or result.get("error") or "登录失败"
+        return False, str(err)[:200]
+
+    # ---------------------------------------------------------- Lobster AI OAuth
+    def _start_oauth_lobster(self, sess, spec):
+        """Lobster AI OAuth 登录（有道龙虾）"""
+        from . import oauth_lobster
+
+        # ★ 2026-10-07：把面板设置里的「Lobster 上游地址」传下去。
+        #   原实现是空参调用 → 换 token 恒用硬编码域名，而同一平台的验活
+        #   读的是 settings.lobster_server，两处会打到不同主机。
+        settings = None
+        try:
+            if self.accounts is not None and getattr(self.accounts, "store", None):
+                settings = self.accounts.store.get("settings")
+        except Exception:
+            settings = None
+
+        # ★ 2026-10-12：起真正的本地回调服务（旧实现绑完端口就关，授权后
+        #   浏览器跳回 127.0.0.1 必然 connection refused）。拿到 code 直接换
+        #   token；前端也保留手动粘贴入口做兜底。
+        def _on_code(code):
+            try:
+                ok, msg = self.submit_lobster_code(sess.id, code)
+                if not ok:
+                    sess.finish("error", msg, "lobster_failed")
+            except Exception as e:
+                sess.finish("error", "回调处理失败", str(e))
+            finally:
+                info = sess.opts.get("lobster_login_info") or {}
+                oauth_lobster.stop_callback_server(info.get("port"))
+
+        try:
+            login_info = oauth_lobster.start_login(settings, on_code=_on_code)
+        except Exception as e:
+            sess.finish("error", "生成登录链接失败", str(e))
+            return
+
+        login_url = login_info["login_url"]
+
+        with sess.lock:
+            sess.opts["lobster_login_info"] = login_info
+            sess.auth_url = login_url
+            sess.expires_at = time.time() + 600  # 10 分钟有效期
+            # 前端提示用：告诉用户面板已经在哪个端口等他回调
+            sess.opts["lobster_callback_port"] = login_info.get("port")
+
+        sess.finish("waiting",
+                    "已在本地 127.0.0.1:%s 起回调服务。在浏览器打开登录链接，"
+                    "完成手机/微信登录后会自动返回并完成授权；"
+                    "若长时间没反应，请把地址栏里的 code 参数粘贴到下方。"
+                    % login_info.get("port"),
+                    result=None)
+    
+    def submit_lobster_code(self, sid, code):
+        """提交 Lobster AI 授权码，换 token"""
+        from . import oauth_lobster
+
+        sess = self.get(sid)
+        if not sess:
+            return False, "会话不存在"
+
+        login_info = sess.opts.get("lobster_login_info")
+        if not login_info:
+            return False, "Lobster 登录信息不存在"
+
+        # 无论成败都收掉常驻回调服务，别把端口留在监听状态
+        try:
+            oauth_lobster.stop_callback_server(login_info.get("port"))
+        except Exception:
+            pass
+
+        try:
+            result = oauth_lobster.exchange_code(code, login_info)
+        except Exception as e:
+            return False, "换 token 失败：%s" % str(e)
+        
+        if "accessToken" in result:
+            user = result.get("user", {})
+            account = user.get("nickname") or user.get("userId") or "已登录"
+            sess.finish("success", "登录成功，凭据已保存",
+                        result={
+                            "type": "oauth_lobster",
+                            "pid": sess.platform,
+                            "access_token": result.get("accessToken"),
+                            "refresh_token": result.get("refreshToken"),
+                            "expires_in": result.get("expiresIn"),
+                            "account": account,
+                        })
+            self._save(sess)
+            return True, "登录成功"
+        else:
+            return False, "换 token 失败：%s" % result.get("msg", "unknown")
 
     # ---------------------------------------------------------- 匿名车道
     def _start_anon(self, sess, spec):
@@ -1178,9 +1660,19 @@ class LoginManager:
         try:
             r = c.start_login(edition)
         except Exception as e:
-            if spec.get("gateway"):
+            # ★ 网关 EXE 已彻底移除（build26 起纯原生模式）：任何 copilot 家族
+            #   平台（wb-gateway / wb-gateway-intl / apk-trae）都改走面板原生
+            #   扫码（tlogin 链路），不再要求先启动 EXE。
+            #   ⚠ 旧代码只判 spec.get("gateway")，而 apk-trae 标的是 False ——
+            #     于是它连不上 8317 就直接报「启动登录失败」，用户根本登不进去
+            #     （2026-10-12 用户实测反馈）。
+            if spec.get("gateway") or sess.platform in _COPILOT_NATIVE_FALLBACK:
+                # ★ 2026-10-13：message 改人话 —— 原句「网关 EXE 未运行
+                #   （unreachable…由于目标计算机积极拒绝）」把没启动外部组件的
+                #   正常状态说成故障，用户被吓到（截图反馈「登录不行」）。
+                #   EXE 早已彻底移除（build26 起纯原生模式），这就是默认路径。
                 with sess.lock:
-                    sess.message = "网关 EXE 未运行（%s），改走面板原生直连扫码" % e
+                    sess.message = "已自动切换为面板原生扫码（无需任何外部组件）"
                 return self._start_native_qrcode(sess, spec)
             sess.finish("error", "启动登录失败", "%s: %s" % (type(e).__name__, e))
             return
@@ -1220,11 +1712,27 @@ class LoginManager:
             sess.auth_url = url
             sess.qr = ""          # 前端用 auth_url 现场出码
             sess.expires_at = time.time() + 300
+        # ★★★ 2026-10-13（用户明确要求：「不要再单独开一个浏览器窗口了，
+        #   只允许打开一个新建标签」）：原先这里起一个 minimized 的独立
+        #   Chrome 当「令牌通道」（token 只能由 tlogin.exchange_in_page 在
+        #   面板控制的页面上下文里 POST /console/login/enterprise 拿到，
+        #   纯 HTTP 打该端点会被 APISIX 拦）。
+        #   现在改为：只在你自己的浏览器里打开授权页标签，不拉任何面板
+        #   控制的窗口。代价是没有页面上下文 → 拿不到自动 token，登录引导
+        #   改为手动粘贴 accessToken（F12 → Network → /console/login/
+        #   enterprise 响应里的 accessToken；抽屉「手动粘贴」已支持）。
+        #   ⚠ 因此不再进 _poll_native 空转 300 秒（没有通道，轮询必然超时）。
+        import webbrowser
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            sess.opts["native_browser_error"] = "%s: %s" % (type(e).__name__, e)
         sess.finish("waiting",
-                    "请用 CodeBuddy / WorkBuddy App 扫码授权；"
-                    "或在手机/电脑浏览器打开授权页完成登录"
-                    "（面板原生直连，未启动网关 EXE）", result=None)
-        self._poll_native(sess, spec)
+                    "已在你自己的浏览器里打开授权页（新标签页，没有额外窗口）。"
+                    "请在标签页里完成登录；登录成功后，按 F12 → Network 找到 "
+                    "/console/login/enterprise 请求，把响应里的 accessToken "
+                    "粘贴到下方「手动粘贴 accessToken」即可入库。",
+                    result=None)
 
     def _poll_native(self, sess, spec):
         """原生扫码的收尾线程：纯 HTTP 轮询 token 端点 → 落账号池。"""
@@ -1234,7 +1742,10 @@ class LoginManager:
             sess.finish("error", "轮询登录状态失败", "no_state")
             return
         try:
-            d = tlogin.poll_token(state=state, timeout=300)
+            # ★ 2026-10-07：把会话端口传下去 —— poll_token(port, state, …)
+            #   的 port 原来被写死成 CDP 默认端口，会话自己的端口配了也白配。
+            port = int(sess.opts.get("port") or CDP_PORT)
+            d = tlogin.poll_token(port=port, state=state, timeout=300)
         except Exception as e:
             if getattr(sess, "_stop", False):
                 return
@@ -1243,17 +1754,30 @@ class LoginManager:
             return
         if getattr(sess, "_stop", False):
             return
-        if d.get("accessToken"):
-            sess.finish("success", "登录成功（面板原生直连，token 已入账号池）",
-                        result={"type": "token",
-                                "secret": d["accessToken"],
-                                "account": d.get("userId") or "原生登录",
-                                "uid": d.get("userId") or "",
-                                "edition": spec.get("edition", ""),
-                                "source": "原生登录"})
-            self._save(sess)
-        else:
-            sess.finish("expired", "等待超时（5 分钟内未完成登录）", "expired")
+        try:
+            if d.get("accessToken"):
+                sess.finish("success", "登录成功（面板原生直连，token 已入账号池）",
+                            result={"type": "token",
+                                    "secret": d["accessToken"],
+                                    "account": d.get("userId") or "原生登录",
+                                    "uid": d.get("userId") or "",
+                                    # ★ 2026-10-12（对齐 L0NE-6/WorkBuddy-Daily）：
+                                    #   把 refreshToken 一起落库 —— 账号池保活线程
+                                    #   靠它做 RT 轮换续期，没有它「永续」无从谈起。
+                                    "refresh_token": d.get("refreshToken") or "",
+                                    "edition": spec.get("edition", ""),
+                                    "source": "原生登录"})
+                self._save(sess)
+            else:
+                sess.finish("expired", "等待超时（5 分钟内未完成登录）", "expired")
+        finally:
+            # 收尾：关掉为本次登录开的调试浏览器，别把窗口留在用户桌面上
+            br = sess.opts.get("native_browser")
+            if br is not None:
+                try:
+                    br.close()
+                except Exception:
+                    pass
 
     def _poll_qrcode(self, sess):
         c = self._client_factory()
@@ -1310,6 +1834,15 @@ class LoginManager:
         if sess.opts.get("manual_cookie"):
             self._finish_cookie(sess, spec, sess.opts["manual_cookie"], "手动粘贴")
             return
+        # ★ 2026-10-13（E2E 实测：从点「接入」到浏览器起来要 10~20 秒——
+        #   附加用户浏览器失败重试 + 单端口回收等待 + Chrome 冷启动）：
+        #   入口只设 message、**保持 pending**（不能 finish("waiting")——poll 的
+        #   cookie 分支一见 waiting 就打 _poll_cookie，而 _browser 还没设上，
+        #   会误判「浏览器会话已丢失」把会话打死，2026-10-13 实测踩中）。
+        #   pending 态 UI 同样显示 message（viewLoginSession 渲染 lsMsg），
+        #   用户看得到「正在打开登录页，请稍候…」，不再面对空白 pending。
+        with sess.lock:
+            sess.message = "正在打开登录页，请稍候…"
         # ★ 2026-10-06：headless=1 → 跳过本机浏览器，直接用服务端无头 Chromium
         #   打开登录页。二维码由看守线程抓回面板，手机扫完 Cookie 自动落库——
         #   远程部署（面板跑在服务器上）不再被「需要本机 Chrome」卡死。
@@ -1331,54 +1864,49 @@ class LoginManager:
                              args=(sess, spec, b), daemon=True).start()
             return
         # 先试直读本机浏览器（老版本 Chromium 才有效）
-        try:
-            from . import browser_cookie
-            got = browser_cookie.fetch(hosts)
-            if got.get("ok") and got.get("cookie"):
-                self._finish_cookie(sess, spec, got["cookie"],
-                                    "本机浏览器（%s）" % got.get("source", ""))
-                return
-        except Exception as e:
-            sess.message = "直读浏览器失败：%s" % e
-        # 再走 CDP：开一个调试浏览器让用户在里面登录
-        try:
-            from . import cdp
-        except Exception as e:
-            sess.finish("error", "CDP 模块不可用", str(e))
+        # ★ 2026-10-12：storage_json_field 平台（deepseek userToken 等）**跳过直读**
+        #   —— 凭据在 localStorage，磁盘 Cookie 直读只能拿到匿名/设备 Cookie，
+        #   而 verify 没有在线端点时会「未校验」放行 → 没登录却显示登录成功
+        #   （2026-10-12 用户实测踩中）。这类平台必须等到 storage token 出现。
+        if not spec.get("storage_json_field"):
+            try:
+                from . import browser_cookie
+                got = browser_cookie.fetch(hosts)
+                if got.get("ok") and got.get("cookie"):
+                    self._finish_cookie(sess, spec, got["cookie"],
+                                        "本机浏览器（%s）" % got.get("source", ""))
+                    return
+            except Exception as e:
+                sess.message = "直读浏览器失败：%s" % e
+        # ★★★ 2026-10-13（用户明确要求：「不要再单独开一个浏览器窗口了，
+        #   只允许打开一个新建标签」）：
+        #   旧链路有两处「单独开窗口」—— default_profile 附加本质是拿用户
+        #   profile 起一个新 Chrome 进程（用户浏览器在跑就移交失败），失败后
+        #   又退隔离 profile 独立窗口，用户看到的就是凭空多一个浏览器窗口。
+        #   现在非 headless 模式**只做一件事**：用系统默认方式在用户自己的
+        #   浏览器里打开登录页（已在跑 → 新标签页；没在跑 → 启动他自己的
+        #   浏览器，都不是面板拉的窗口）。凭据回收改两条路：
+        #     ① 用户登录完点「我已登录，立即获取」→ _poll_cookie 直读本机
+        #        浏览器 Cookie（纯本地 SQLite，不需要调试端口；Chrome127+
+        #        app-bound 解不开时会明确提示）；
+        #     ② 手动粘贴（抽屉里已有粘贴框）。
+        import webbrowser
+        login_url = spec.get("login_url") or ("https://" + (hosts[0] if hosts else ""))
+        if not login_url or login_url == "https://":
+            sess.finish("error", "该平台没有配置登录页地址", "no_login_url")
             return
-        # 单一固定端口 + owner 归属校验（详见 _try_headless 注释）：
-        # 不再散列端口，靠 cdp.Browser 的归属校验保证不串台。
-        _owner = "%s-%s" % (sess.platform, sess.id[:6])
-        port = int(sess.opts.get("port") or CDP_PORT)
-        b = cdp.Browser(port=port, owner=_owner)
+        with sess.lock:
+            sess.message = "正在你的浏览器里打开登录页…"
         try:
-            b.start(url=spec.get("login_url") or ("https://" + (hosts[0] if hosts else "")))
+            webbrowser.open(login_url)
         except Exception as e:
-            # ★ 本机没有可用 Chrome / Edge 时不再直接判死：自动回退到
-            #   服务端无头浏览器（远程部署的标配路径），找不到才报错。
-            b = self._try_headless(sess, spec, port)
-            if b is None:
-                sess.finish("error",
-                            "本机没有可用的 Chrome / Edge（%s），服务端也无头浏览器可用；"
-                            "请改用下方的「手动粘贴 Cookie」。" % e,
-                            "no_browser")
-                return
-            sess._browser = b
-            sess.finish("waiting",
-                        "本机浏览器不可用，已改用服务端无头浏览器打开登录页："
-                        "二维码会抓到下方，用手机扫即可，登录成功后 Cookie 自动入库。",
-                        result=None)
-            threading.Thread(target=self._watch_cookie,
-                             args=(sess, spec, b), daemon=True).start()
+            sess.finish("error", "打开登录页失败：%s" % e, "open_failed")
             return
-        sess._browser = b
         sess.finish("waiting",
-                    "已打开浏览器登录页，请用手机扫描页面上的二维码完成登录；"
-                    "面板也会把二维码抓到下方方便你扫。登录成功会自动捕捉，"
-                    "或点「我已登录，立即获取」手动获取。", result=None)
-        # ★ 强化：后台线程抓登录页二维码进面板 + 自动检测登录完成
-        threading.Thread(target=self._watch_cookie,
-                         args=(sess, spec, b), daemon=True).start()
+                    "已在你自己的浏览器里打开登录页（新标签页，没有额外窗口）。"
+                    "请在标签页里完成登录，然后点「我已登录，立即获取」，"
+                    "或把登录后的 Cookie 粘贴到下方。",
+                    result=None)
 
     # ------------------------------------------------- 服务端无头浏览器兜底
     def _try_headless(self, sess, spec, port):
@@ -1413,17 +1941,26 @@ class LoginManager:
                                        or spec.get("hosts") or [""])[0])))
         except Exception as e:
             # ★ 端口被别的登录会话占用（单端口策略下的正常情况，不是缺陷）：
-            #   自动清掉上一个会话的浏览器再重试一次，用户无需手动干预。
-            if self._recycle_port(sess, b):
+            #   ① 先回收「活动会话」的浏览器；
+            #   ② 就算没有活动会话，也可能上一个 Chrome 刚被 cancel、进程还在
+            #     退出中（close() 返回 ≠ 端口立即释放，实测要 1~3s）——
+            #     等端口真正空出来再重试一次，而不是直接报错踢给用户。
+            #     （2026-10-12 实测：cancel 完 2s 内起无头必报
+            #       「调试端口 9333 已被其它登录会话占用」。）
+            self._recycle_port(sess, b)
+            for _ in range(20):
                 try:
-                    b.start(url=spec.get("login_url")
-                            or ("https://" + ((sess.opts.get("hosts")
-                                               or spec.get("hosts") or [""])[0])))
-                except Exception as e2:
-                    sess.message = "无头浏览器启动失败：%s" % e2
-                    return None
-            else:
-                sess.message = "无头浏览器启动失败：%s" % e
+                    if not b.is_up():
+                        break
+                except Exception:
+                    break
+                time.sleep(0.5)
+            try:
+                b.start(url=spec.get("login_url")
+                        or ("https://" + ((sess.opts.get("hosts")
+                                           or spec.get("hosts") or [""])[0])))
+            except Exception as e2:
+                sess.message = "无头浏览器启动失败：%s" % e2
                 return None
         sess.opts["_cdp_port"] = b.port      # 便于诊断 / 取消时清理
         sess.opts["_cdp_owner"] = owner
@@ -1462,40 +1999,48 @@ class LoginManager:
         hosts = sess.opts.get("hosts") or spec.get("hosts") or []
         b = sess._browser
         if not b:
-            sess.finish("error", "浏览器会话已丢失", "no_browser")
-            return
-        try:
-            header, rows = b.cookie_header(hosts)
-        except Exception as e:
-            sess.finish("error", "读取 Cookie 失败", str(e))
-            return
-        if not header:
-            with sess.lock:
-                sess.message = "未检测到 %s 的登录 Cookie，请先在浏览器里登录" % "/".join(hosts)
-            return
-        # ★ 登录态不在 Cookie 的站点（实测元宝）：补读 localStorage，
-        #   以 `__ls_<key>=<urlencoded json>` 形式并进凭据串，落库后可原样还原。
-        skeys = spec.get("storage_keys") or []
-        if skeys and b:
+            # ★ 2026-10-13「只开标签」模式：非 headless 会话没有 CDP 浏览器，
+            #   「我已登录，立即获取」改走**直读本机浏览器 Cookie**
+            #   （browser_cookie.fetch 纯本地 SQLite，不需要调试端口）。
+            #   解不开（Chrome 127+ app-bound 加密）就提示手动粘贴，
+            #   并把「未检测到」说清楚，别误报成会话丢失。
+            if spec.get("storage_json_field"):
+                # 凭据在 localStorage（deepseek userToken 等），磁盘直读拿不到，
+                # 但 storage 提取只在 CDP 看守链路里做——这里只能引导手动粘贴。
+                with sess.lock:
+                    sess.message = ("该平台的凭据在浏览器 localStorage 里，自动读取不到。"
+                                    "请按 F12 → Application → Local Storage 找到后粘贴到下方。")
+                return
             try:
-                import urllib.parse as _up
-                parts = []
-                for k in skeys:
-                    v = b.storage_item(k, match=(hosts[0] if hosts else None))
-                    if v:
-                        parts.append("__ls_%s=%s" % (k, _up.quote(str(v), safe="")))
-                if parts:
-                    header = (header + "; " + "; ".join(parts)).strip("; ")
-            except Exception:
-                pass
-        if not header:
+                from . import browser_cookie
+                got = browser_cookie.fetch(hosts)
+                if got.get("ok") and got.get("cookie"):
+                    self._finish_cookie(sess, spec, got["cookie"],
+                                        "本机浏览器（%s）" % got.get("source", ""))
+                    return
+                _why = got.get("error") or "未找到登录 Cookie"
+            except Exception as e:
+                _why = "读取失败：%s" % e
+            with sess.lock:
+                sess.message = ("还没检测到登录态（%s）。若已在浏览器标签页登录成功，"
+                                "再点一次「我已登录，立即获取」；"
+                                "Chrome 127+ 的 Cookie 有加密保护、面板可能读不到，"
+                                "这时请直接把 Cookie 粘贴到下方。" % str(_why)[:80])
+            return
+        # ★ 2026-10-12（用户实测「没登录却显示登录成功」的真凶）：
+        #   这条轮询路径原来**自己拼凭据串**（Cookie + __ls_ 原样合并），
+        #   没走 _collect_browser_cred —— storage_json_field 提取和
+        #   「没提到 token 返回空串继续等」的守卫全被绕过，匿名 Cookie +
+        #   「未校验」直接假成功。现在统一走同一个出口，两路判定一致。
+        cred = self._collect_browser_cred(sess, spec, b)
+        if not cred:
             with sess.lock:
                 sess.message = ("未检测到 %s 的登录态（Cookie/localStorage），"
                                 "请先在浏览器里登录" % "/".join(hosts))
             return
         # 浏览器会话来源：验活失败只提示、不打死会话（登录页本来就有
         # 未登录 Cookie，401 ≠ 登录失败）；手动粘贴路径才 strict。
-        self._verify_and_finish(sess, spec, header,
+        self._verify_and_finish(sess, spec, cred,
                                 "服务端无头浏览器" if sess.opts.get("headless") else "CDP 浏览器",
                                 strict=False)
 
@@ -1505,6 +2050,9 @@ class LoginManager:
         _poll_cookie 与 _watch_cookie 共用，保证两边判断口径一致
         （2026-10-06 修正：看守线程以前只查 Cookie，漏掉元宝这类
         登录态在 localStorage 的平台，永远验不过）。
+        ★ 2026-10-12：storage_json_field —— localStorage 值是 JSON、真值在
+        某个字段里（deepseek：userToken={"value":"<jwt>"}）。命中时直接返回
+        该字段值（Bearer 可用），并把类型标记写进 sess.opts（落库 type=token）。
         """
         hosts = sess.opts.get("hosts") or spec.get("hosts") or []
         try:
@@ -1524,7 +2072,39 @@ class LoginManager:
                     header = ((header or "") + "; " + "; ".join(parts)).strip("; ")
             except Exception:
                 pass
+        # storage JSON 提取（deepseek userToken 等）
+        tok = self._extract_storage_token(spec, header)
+        if tok:
+            with sess.lock:
+                sess.opts["_force_type"] = "token"
+            return tok
+        # ★ 2026-10-12：声明了 storage_json_field 的平台，凭据**只能**来自
+        # localStorage —— Cookie 里那点匿名/设备标记不算登录态。没提到 token
+        # 就返回空串，让看守线程继续等（否则「未校验」会放行假成功）。
+        if spec.get("storage_json_field"):
+            return ""
         return header or ""
+
+    def _extract_storage_token(self, spec, cred):
+        """spec.storage_json_field：遍历凭据串里的 __ls_* 段，值为 JSON 时取
+        指定字段（如 value）。命中返回字段值，否则 None。"""
+        field = spec.get("storage_json_field")
+        if not field or "__ls_" not in (cred or ""):
+            return None
+        import urllib.parse as _up
+        for seg in str(cred).split(";"):
+            seg = seg.strip()
+            if not seg.startswith("__ls_") or "=" not in seg:
+                continue
+            _k, v = seg.split("=", 1)
+            try:
+                obj = json.loads(_up.unquote(v))
+            except Exception:
+                continue
+            val = obj.get(field) if isinstance(obj, dict) else None
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return None
 
     def _verify_and_finish(self, sess, spec, cookie, source, strict=True):
         """
@@ -1550,10 +2130,16 @@ class LoginManager:
         extract_key = spec.get("extract_secret_from_cookie")
         final_secret = cookie
         final_type = "cookie"
+        # ★ 2026-10-12：storage_json_field 提取路径（deepseek userToken 等）
+        #   由 _collect_browser_cred 预先标记 —— 凭据本身已是 Bearer 可用的
+        #   token，落库 type=token 而不是 cookie。
+        ft = sess.opts.pop("_force_type", None)
+        if ft:
+            final_type = ft
         account = info
         if extract_key and cookie:
             import re as _re
-            m = _re.search(r"(?:^|;\s*)" + re.escape(extract_key) + r"=([^;]+)", cookie)
+            m = _re.search(r"(?:^|;\s*)" + _re.escape(extract_key) + r"=([^;]+)", cookie)
             if m:
                 final_secret = m.group(1)
                 final_type = "bearer"
@@ -1589,11 +2175,33 @@ class LoginManager:
         qr_tries = 0
         qr_done = False
         last_cred = ""
+        last_page_msg = ""
         while time.time() - t0 < timeout:
             if getattr(sess, "_stop", False) \
                     or sess.status in ("success", "error", "expired"):
                 return
             tab = b._first_page_ws()
+            # ★ 2026-10-12 页面级报错感知（Loomy 讯飞实测）：登录页自身被
+            #   后端风控拦下（如「device rebind requires explicit user
+            #   action」——CDP 调试浏览器是全新设备，讯飞要求设备重绑必须
+            #   用户显式确认）时，把页面上的报错透传成可操作指引，
+            #   别让用户对着一个干等的会话猜。
+            if tab:
+                try:
+                    from . import cdp as _cdp
+                    _s = _cdp.Session(tab["webSocketDebuggerUrl"])
+                    _r = _s.call("Runtime.evaluate", {"expression":
+                        '(document.body?document.body.innerText:"").slice(0,1200)',
+                        "returnByValue": True}, timeout=8)
+                    _s.close()
+                    _txt = ((_r.get("result") or {}).get("value")) or ""
+                    _msg = _page_blocker(_txt)
+                    if _msg and _msg != last_page_msg:
+                        last_page_msg = _msg
+                        with sess.lock:
+                            sess.message = "登录页提示：" + _msg
+                except Exception:
+                    pass
             # 二维码：前 ~56 秒每 4 秒试一次（有的站要点「扫码登录」才出码）
             if not qr_done and tab and qr_tries < 14:
                 qr_tries += 1
@@ -1703,6 +2311,41 @@ class LoginManager:
         if not sess:
             return None
         spec = PLATFORMS.get(sess.platform, {})
+        
+        # PKCE 类型：提交授权码换 token
+        if sess.method == "oauth_pkce":
+            code = kv.get("code") or kv.get("secret") or ""
+            if not code:
+                sess.finish("error", "授权码不能为空", "empty")
+                return sess
+            ok, msg = self.submit_pkce_code(sid, code)
+            if not ok:
+                sess.finish("error", msg, "pkce_failed")
+            return sess
+        
+        # ★ 2026-10-07：Lobster（有道）此前没有分支 —— 用户提交的授权码会落进
+        #   下面的 file/api_key 分支，被当成 api_key 明文入库（或报"内容不能为空"）。
+        if sess.method == "oauth_lobster":
+            code = kv.get("code") or kv.get("secret") or ""
+            if not code:
+                sess.finish("error", "授权码不能为空", "empty")
+                return sess
+            ok, msg = self.submit_lobster_code(sid, code)
+            if not ok:
+                sess.finish("error", msg, "lobster_failed")
+            return sess
+
+        # ★ 2026-10-13：Google OAuth（Antigravity）授权码提交
+        if sess.method == "oauth_google":
+            code = kv.get("code") or kv.get("secret") or ""
+            if not code:
+                sess.finish("error", "授权码不能为空", "empty")
+                return sess
+            ok, msg = self.submit_google_code(sid, code)
+            if not ok:
+                sess.finish("error", msg, "google_failed")
+            return sess
+
         if sess.method == "cookie":
             ck = kv.get("cookie") or ""
             if not ck:
@@ -1732,16 +2375,41 @@ class LoginManager:
         if not sess.result:
             return
         try:
+            # 设备码 / PKCE / Lobster 登录：用 pid 作为 platform，
+            # 用 access_token 作为 secret
+            platform = sess.platform
+            secret = sess.result.get("secret", "")
+            # ★ 刷新令牌键名统一：OAuth 结果里是蛇形 refresh_token，
+            #   而这里原来读驼峰 refreshToken —— 除设备码分支外全部落成 ""，
+            #   注释宣称的"到期前自动刷新"对 PKCE/Lobster/扫码都失效。
+            refresh_token = (sess.result.get("refresh_token")
+                             or sess.result.get("refreshToken") or "")
+            rtype = sess.result.get("type")
+            if rtype in ("oauth_device", "oauth_pkce", "oauth_lobster",
+                         "oauth_google"):
+                # ★ 原来只有 oauth_device 做了 access_token→secret 映射，
+                #   PKCE / Lobster 因此 secret 恒为 "" —— 账号池里出现空账号，
+                #   而且 add() 总是带 secret 键，会把已有有效密钥覆盖成空。
+                platform = sess.result.get("pid", platform)
+                secret = (sess.result.get("access_token")
+                          or sess.result.get("accessToken") or secret)
+            # ★ 网关扫码成功时 secret 本来就是空的 —— 凭据在网关进程侧
+            #   （type "gateway"），账号池里只记一条占位行。空守卫只拦
+            #   "凭据应该在面板侧"的类型，别把网关登录也挡掉。
+            if not secret and rtype != "gateway":
+                sess.result["save_error"] = "凭据为空，未写入账号池"
+                return
+            
             self.accounts.add({
-                "platform": sess.platform,
+                "platform": platform,
                 "name": sess.result.get("account") or PLATFORMS.get(
-                    sess.platform, {}).get("name", sess.platform),
+                    platform, {}).get("name", platform),
                 "type": sess.result.get("type", ""),
-                "secret": sess.result.get("secret", ""),
+                "secret": secret,
                 "source": sess.result.get("source", "面板登录"),
                 "edition": sess.result.get("edition", ""),
                 # ★ 保存 refreshToken：账号池保活线程到期前自动刷新（社区标配）
-                "refresh_token": sess.result.get("refreshToken", ""),
+                "refresh_token": refresh_token,
                 # copilot 风控头（X-User-Id）与 token 必须同账号，登录响应里就有
                 "uid": sess.result.get("uid", ""),
             })
@@ -1753,6 +2421,18 @@ class LoginManager:
 
 
 # ------------------------------------------------------------------ 校验
+
+def _page_blocker(text):
+    """登录页自身的拦截性报错 → 可操作指引（透传给用户）。"""
+    t = (text or "").lower()
+    if "rebind" in t or "设备重绑" in text or "重新绑定设备" in text:
+        return ("讯飞检测到新设备，要求「设备重绑」且必须由你显式确认 —— "
+                "请在 Loomy 官方客户端（手机 App）或网页里完成一次设备确认，"
+                "然后回到本浏览器重新登录（登录态会持久保存，下次不用重登）")
+    if "验证设备" in text or "新设备登录" in text or "设备验证" in text:
+        return "讯飞检测到新设备登录，请按页面/手机上的提示完成设备验证"
+    return None
+
 
 def verify_cookie(spec, cookie):
     """
@@ -1833,14 +2513,14 @@ def verify_cookie(spec, cookie):
     if data is not None:
         hdrs["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+    # ★ 2026-10-07：恢复证书校验（这里发的是用户的 Cookie/API Key/JWT），
+    #   并改用 ProxyHandler({}) 直连，不再全局删除进程的 *_PROXY。
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    for k in list(os.environ):
-        if k.upper().endswith("_PROXY"):
-            os.environ.pop(k, None)
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=ctx))
     try:
-        with urllib.request.urlopen(req, timeout=12, context=ctx) as r:
+        with opener.open(req, timeout=12) as r:
             raw = r.read().decode("utf-8", "replace")
             code = r.status
     except urllib.error.HTTPError as e:
@@ -1875,7 +2555,9 @@ def verify_cookie(spec, cookie):
             return False, "接口返回 %d，凭据无效或已过期" % e.code
         return True, "校验接口返回 %d（未判定为无效）" % e.code
     except Exception as e:
-        return True, "校验请求未完成（%s），按可用处理" % type(e).__name__
+        # 网络层失败不是"凭据有效"的证据，但也不是"凭据无效"的证据：
+        # 保持可用（宁可放过），但措辞必须让用户知道这是**未校验**。
+        return True, "未校验（校验请求未完成：%s）—— 以实际对话为准" % type(e).__name__
 
     if code >= 400:
         return False, "接口返回 %d" % code
@@ -1891,7 +2573,9 @@ def verify_cookie(spec, cookie):
     try:
         d = json.loads(raw)
     except json.JSONDecodeError:
-        return True, "接口返回非 JSON，按可用处理"
+        # ★ 200 + 非 JSON 不能当作"已登录"：很多网关用 200 + 业务错误体
+        #   表达鉴权失败。这里保持可用（不误杀），但必须标成未校验。
+        return True, "未校验（接口返回非 JSON，无法判定登录态）"
     if isinstance(d, dict) and d.get("code") not in (0, None):
         # 业务码非 0 = 未登录/无权限（实测 nano 是 110001、metaso 也有业务码）
         return False, "业务码 %s：%s" % (d.get("code"),

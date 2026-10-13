@@ -423,9 +423,16 @@ def load_route_config(router, store, client):
                         | {"auto", "free"})
 
 
-# ★ 2026-10-13：有「积分余额」端点的平台 → gwextra 动作 id，供接入源卡片
-#   显示「实时积分」。WorkBuddy 实测无余额 API（/billing、/console 全 404/403），
-#   不列；有账号才拉，15 分钟 TTL 缓存防抖。
+# ★ 2026-10-13：账号级「积分余额」—— 抽屉详情里每个账号行显示各自的剩余
+#   积分（用户要求：卡片外面不显示，只在自己的详情里看）。
+#   · WorkBuddy/CodeBuddy（copilot 系）：POST /v2/billing/meter/get-user-resource
+#     （必须 POST，GET 404；Bearer JWT + CLI UA），取 CapacityRemain 合计。
+#   · 其余平台走 gwextra 已实测的余额动作。
+#   有账号、有端点才拉；store.account_balances 15 分钟 TTL 缓存防抖。
+_WB_BALANCE_HOST = {
+    "wb-gateway": "https://copilot.tencent.com",
+    "wb-gateway-intl": "https://www.codebuddy.ai",
+}
 _BALANCE_ACTION = {
     "apk-raccoon": "points_balance",      # 小浣熊 /api/web/points/v1/balance
     "apk-wps": "credits_balance",         # WPS 灵犀 AI 智点
@@ -434,6 +441,80 @@ _BALANCE_ACTION = {
     "apk-codebuddy-cn": "points_balance",
 }
 _BALANCE_TTL = 900
+
+
+def _wb_credits_balance(token, base):
+    """copilot 系账号剩余积分：POST /v2/billing/meter/get-user-resource。
+    返回 CapacityRemain 合计（单位 credits）；取不到返回 None。"""
+    import urllib.request as _uq
+    url = base.rstrip("/") + "/v2/billing/meter/get-user-resource"
+    req = _uq.Request(url, method="POST", data=b"{}")
+    req.add_header("Authorization", "Bearer " + token)
+    req.add_header("User-Agent", "CLI/2.143.1 CodeBuddy/2.143.1")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    with _uq.urlopen(req, timeout=15) as r:
+        d = json.loads(r.read().decode("utf-8", "replace"))
+    rows = (((d.get("data") or {}).get("Response") or {})
+            .get("Data") or {}).get("Accounts") or []
+    tot = 0
+    hit = False
+    for x in rows:
+        if not isinstance(x, dict):
+            continue
+        if str(x.get("CapacityUnit") or "").lower() != "credits":
+            continue
+        tot += x.get("CapacityRemain") or 0
+        hit = True
+    return tot if hit else None
+
+
+def _account_balance(acc, force=False):
+    """单个账号的实时积分余额。有端点 + 有可用凭据才拉，15 分钟 TTL。
+    返回 ''（没有/取不到）或数字串。force=True 绕过 TTL 强刷。"""
+    if not isinstance(acc, dict):
+        return ""
+    pid = acc.get("platform") or ""
+    aid = acc.get("id") or ""
+    token = str(acc.get("secret") or "")
+    host = _WB_BALANCE_HOST.get(pid)
+    act = _BALANCE_ACTION.get(pid)
+    if not aid or not token or not (host or act):
+        return ""
+    try:
+        cache = APP["store"].get("account_balances") or {}
+    except Exception:
+        cache = {}
+    hit = cache.get(aid) or {}
+    if not force:
+        try:
+            if hit.get("value") and \
+                    time.time() - float(hit.get("ts") or 0) < _BALANCE_TTL:
+                return hit["value"]
+        except Exception:
+            pass
+    val = ""
+    try:
+        if host:
+            if not token.startswith("eyJ"):
+                return ""       # 只认 JWT 型 accessToken
+            v = _wb_credits_balance(token, host)
+        else:
+            from app import gwextra
+            okk, data = gwextra.call(APP.get("accounts"), pid, act, {}, aid)
+            v = _dig_balance(data) if okk else None
+        if v is not None:
+            fv = float(v)
+            val = ("%d" % fv) if fv == int(fv) else ("%.2f" % fv)
+    except Exception:
+        val = ""
+    if val:
+        try:
+            cache[aid] = {"value": val, "ts": time.time()}
+            APP["store"].put("account_balances", cache)
+        except Exception:
+            pass
+    return val
 
 
 def _resuffix(pid, models):
@@ -470,51 +551,6 @@ def _dig_balance(o, depth=0):
     elif isinstance(o, list) and o:
         return _dig_balance(o[0], depth + 1)
     return None
-
-
-def _group_balance(pid, free_lane=False):
-    """接入源卡片「实时积分」：有余额端点 + 有可用账号才拉，15 分钟 TTL。"""
-    if free_lane or pid not in _BALANCE_ACTION:
-        return ""
-    acc = APP.get("accounts")
-    if not acc:
-        return ""
-    try:
-        if not acc.usable(pid):
-            return ""
-    except Exception:
-        return ""
-    try:
-        cache = APP["store"].get("platform_balances") or {}
-    except Exception:
-        cache = {}
-    hit = cache.get(pid) or {}
-    try:
-        if hit.get("value") and \
-                time.time() - float(hit.get("ts") or 0) < _BALANCE_TTL:
-            return hit["value"]
-    except Exception:
-        pass
-    try:
-        from app import gwextra
-        okk, data = gwextra.call(acc, pid, _BALANCE_ACTION[pid], {})
-        v = _dig_balance(data) if okk else None
-    except Exception:
-        v = None
-    val = ""
-    if v is not None:
-        try:
-            fv = float(v)
-            val = ("%d" % fv) if fv == int(fv) else ("%.2f" % fv)
-        except Exception:
-            val = ""
-    if val:
-        try:
-            cache[pid] = {"value": val, "ts": time.time()}
-            APP["store"].put("platform_balances", cache)
-        except Exception:
-            pass
-    return val
 
 
 def _load_merged_routes(router, store, keep=()):
@@ -828,7 +864,8 @@ def api_tencent(action=None, body=None):
             return fail("起浏览器失败：%s" % e, code="browser_failed")
         APP.setdefault("tencent_login", {})["state"] = state
         return ok({"state": state, "url": url,
-                   "note": "在弹出的浏览器里完成扫码/账密登录"})
+                   "note": "已在你自己的浏览器里打开登录页（新标签页，没有额外窗口），"
+                           "请在标签页里完成扫码/账密登录"})
 
     if action == "poll":
         state = b.get("state") or (APP.get("tencent_login") or {}).get("state")
@@ -916,11 +953,17 @@ def api_tencent(action=None, body=None):
                    "code": code, "msg": msg or ("签到成功" if okk else "失败")})
 
     if action == "trae_local":
-        # ★ 2026-10-06 新增：自动读取**本机**已登录 Trae 的 token，落库为 web-trae
-        #   账号，解决 web-trae「手动从 leveldb / LocalStorage 抠 x-ide-token」的痛点
+        # ★ 2026-10-06 新增：自动读取**本机**已登录 Trae 的 token，解决 Trae
+        #   「手动从 leveldb / LocalStorage 抠 x-ide-token」的痛点
         #   （对齐 trae-minimax-client / Trae-Account-Manager 的本地登录态提取思路）。
         #   仅在运行面板的那台电脑上有效（Trae 必须本机装过并登录过）。
+        # ★ 2026-10-13：支持按调用方落库到对应平台 —— apk-trae 与 web-trae 的
+        #   中继都吃 x-ide-token（native_relay RELAY_SPECS / web_relays
+        #   _trae_headers），用户在哪个抽屉点按钮就落哪个平台。
         from app import trae_local as _TL
+        _pf = b.get("platform") or "apk-trae"
+        if _pf not in ("apk-trae", "web-trae"):
+            _pf = "apk-trae"
         okk, info = _TL.read_trae_token()
         if not okk:
             return ok({"found": False, "candidates": info.get("candidates", []),
@@ -932,12 +975,12 @@ def api_tencent(action=None, body=None):
         name = info.get("account") or "Trae 本机登录态"
         try:
             if acc:
-                acc.add({"platform": "web-trae", "name": name, "type": "token",
+                acc.add({"platform": _pf, "name": name, "type": "token",
                          "secret": secret,
                          "source": info.get("source", "本机 Trae"), "edition": "cn"})
                 return ok({"found": True, "account": name,
                            "source": info.get("source"),
-                           "note": "已写入 web-trae 账号，刷新账号页即可见"})
+                           "note": "已写入 %s 账号，刷新账号页即可见" % _pf})
         except Exception as e:
             return fail("落库失败：%s" % e, code="save_failed")
         return fail("账号池不可用，无法落库", code="no_accounts")
@@ -1271,9 +1314,7 @@ def api_models(action=None, body=None):
                            "live": live, "usable": n, "models": models,
                            # ★ 免凭据车道：不需要账号也能用，前端据此显示
                            #   "免凭据直连" 而不是误导性的"未接入"
-                           "free_lane": bool(free_lane),
-                           # ★ 2026-10-13：实时积分余额（有余额端点的平台才非空）
-                           "balance": _group_balance(pid, bool(free_lane))})
+                           "free_lane": bool(free_lane)})
 
         # ① 自动路由（统一接口的推荐入口）
         router = APP.get("router")
@@ -1405,21 +1446,9 @@ def api_models(action=None, body=None):
             g["models_total"] = len(g["models"])
             g["models_on"] = sum(1 for m in g["models"] if m.get("on"))
         total = sum(len(g["models"]) for g in groups)
-        # ★ 2026-10-13：卡片「实时积分」。部分平台（如 apk-wps）在 grouped 里
-        #   没有模型分组但接入源有卡片，per-group 的 balance 它取不到；统一在
-        #   顶层下发 balances（pid → 值），前端按卡片 key / variants pid 取。
-        balances = {}
-        for _bpid in _BALANCE_ACTION:
-            try:
-                _bv = _group_balance(_bpid)
-                if _bv:
-                    balances[_bpid] = _bv
-            except Exception:
-                pass
         return ok({"groups": groups, "total": total,
                    "enabled_total": sum(g["models_on"] for g in groups),
-                   "disabled": sorted(disabled)[:200],
-                   "balances": balances})
+                   "disabled": sorted(disabled)[:200]})
 
     if action == "test_model":
         # ★ 连接测试：对单个模型发一条极小请求，回 {ok, latency_ms, reply/error}
@@ -2494,8 +2523,25 @@ def api_accounts(action=None, body=None):
             return fail("账号不存在", status=404)
         return ok({"account": acc._mask(item)})
 
+    # ★ 2026-10-13（用户要求）：抽屉详情里每个账号行显示各自的实时积分余额
+    #   （有余额端点的账号才拉，15 分钟 TTL；refresh=1 强刷）。
+    #   拉余额要用**未脱敏**凭据副本，展示仍走脱敏后的 rows。
+    rows = acc.list(b.get("platform"))
+    force = bool(b.get("refresh"))
+    try:
+        real = {a.get("id"): a
+                for a in (acc.list(b.get("platform"), mask=False) or [])}
+        for a in rows:
+            ra = real.get(a.get("id"))
+            if not ra:
+                continue
+            v = _account_balance(ra, force=force)
+            if v:
+                a["balance"] = v
+    except Exception:
+        pass
     return ok({
-        "accounts": acc.list(b.get("platform")),
+        "accounts": rows,
         "stats": acc.stats(),
     })
 

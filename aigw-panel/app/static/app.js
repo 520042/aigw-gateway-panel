@@ -1422,7 +1422,33 @@ function srcDetail(){
 
 function srcLogin(pid){
   const p=(S.data.loginPlatforms||[]).find(x=>x.id===pid);
-  startLogin(pid,(p&&p.edition)||'');
+  // ★ 2026-10-13（用户「登录不行」根因之一）：file 类但声明了 browser_capture
+  //   的平台（web-trae / web-deepseek / apk-trae）必须带 force_browser=1，
+  //   否则后端 _run 分派走 _start_file，只回一句「请粘贴凭据」——
+  //   「↗ 接入并打开登录页」点了什么都不发生，浏览器根本不打开。
+  //   cookie 类平台无需此参（_start_cookie 自己就会开浏览器）。
+  const bc = !!(p && p.browser_capture);
+  startLogin(pid, (p&&p.edition)||'', 0, bc?1:0);
+}
+
+/** ★ 2026-10-13：一键读取**本机** Trae 桌面端登录态（trae_local）。
+ *  后端 api/tencent?action=trae_local 读 Trae userData 里的 x-ide-token
+ *  并按传入 platform 落库（apk-trae / web-trae 中继都吃这个 token）。 */
+async function traeReadLocal(pid){
+  toast('正在读取本机 Trae 登录态…');
+  let r;
+  try{
+    r=await post('api/tencent?action=trae_local',{platform:pid||'apk-trae'});
+  }catch(e){ toast('读取失败：'+e.message,'err'); return; }
+  if(r.ok===false){ toast(r.message||'读取失败','err'); return; }
+  if(r.found===false){
+    let m=r.error||'本机未找到 Trae 登录态';
+    if(r.candidates&&r.candidates.length)m+='（候选目录：'+r.candidates[0]+'）';
+    toast(m,'warn');
+    return;
+  }
+  toast('已读取本机 Trae 登录态并写入账号：'+(r.account||''),'ok');
+  await loadSources();
 }
 
 /** 抽出「登录路径」UI，供卡片内联展开共用。
@@ -1524,7 +1550,14 @@ function srcLoginPanel(s, compact){
     //   不摆方式一/二表单；手动粘贴降级为 <details> 里的低调兜底。
     h+=viewLoginSession(s.key, compact);
     const _sess=S.data.loginSession;
-    const _sessActive=_sess&&(_sess.status==='pending'||_sess.status==='waiting');
+    // ★ 2026-10-13（用户截图实锤：Lobster 登录中时，智谱/小浣熊抽屉的登录按钮
+    //   整个消失，抽屉里只剩说明文字）：原先 _sessActive 只看**全局**有没有
+    //   活跃会话 —— 别的平台在登录，本平台的「接入并打开登录页」就被吞了。
+    //   现在必须本平台（合并卡含 variants pid / copilot 家族）的会话才算活跃。
+    const _sessMine=_sess&&(_sess.platform===s.key
+      ||(s.variants&&s.variants.some(v=>v.pid===_sess.platform))
+      ||(s.key==='copilot'&&COPILOT_FAMILY.indexOf(_sess.platform)>=0));
+    const _sessActive=!!(_sessMine&&(_sess.status==='pending'||_sess.status==='waiting'));
     if(!_sessActive){
       h+='<div class="note" style="margin:8px 0 0">点「接入」即打开官方登录页——'
         +'在浏览器里完成登录，凭据会自动入库（无需在面板里扫码）。</div>';
@@ -1536,6 +1569,14 @@ function srcLoginPanel(s, compact){
       if(s.login_url){
         h+='<a class="btn" href="'+esc(s.login_url)+'" target="_blank" rel="noreferrer" '
           +'title="在「我自己的浏览器」里打开登录页">我自己打开</a>';
+      }
+      // ★ 2026-10-13：Trae 系（apk-trae / web-trae）加「读取本机 Trae 登录态」
+      //   一键按钮 —— 桌面端 Trae 已登录时这是最快路径，无需开浏览器
+      //   （trae_local 读 Trae userData 的 x-ide-token，后端按 platform 落库）。
+      if(s.key==='apk-trae'||s.key==='web-trae'){
+        h+='<button class="btn" onclick="event.stopPropagation();traeReadLocal(\''+esc(s.key)+'\')" '
+          +'title="读取本机已登录 Trae 桌面端的 x-ide-token，一键入库'
+          +'（需面板与 Trae 在同一台电脑运行）">⌂ 读取本机 Trae 登录态</button>';
       }
       h+='<button class="btn" onclick="event.stopPropagation();platformProbe(\''+esc(s.key)+'\')">先探测端点</button>'
         +'</div>';
@@ -4283,9 +4324,12 @@ function viewLoginSession(onlyPid, compact){
         +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
         +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualSecret()">提交凭据</button></div>';
     }
-    if(sess.method==='oauth_pkce'){
+    // oauth_pkce（Codex/Claude/Devin）与 oauth_google（Antigravity）都是
+    // 「授权 URL → 地址栏跳 localhost 回调 → 复制 code 回来」的同款流程，
+    // 共用 manualCode 输入框 + submitPkceCode（后端按 sess.method 分派）。
+    if(sess.method==='oauth_pkce'||sess.method==='oauth_google'){
       h+='<div style="margin-top:12px">'
-        +'<div class="faint" style="margin-bottom:5px">授权后，浏览器地址栏会跳转到带 code 的链接，复制 code 参数粘贴到这里：</div>'
+        +'<div class="faint" style="margin-bottom:5px">授权后，浏览器地址栏会跳转到带 code 的链接（localhost 页面打不开是正常的），复制 code 参数粘贴到这里：</div>'
         +'<input id="manualCode" type="text" placeholder="粘贴授权码 code=..." '
         +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></input>'
         +'<button class="btn pri sm" style="margin-top:6px" onclick="submitPkceCode()">提交授权码</button></div>';

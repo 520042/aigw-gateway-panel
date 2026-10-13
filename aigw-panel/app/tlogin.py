@@ -83,19 +83,23 @@ def login_url(state, platform="CLI"):
 # --------------------------------------------------------------- 浏览器侧
 
 def open_login(state, port=CDP_PORT, user_data_dir=PROFILE, wait=6):
+    """★ 2026-10-13（用户明确要求：「不要再单独开一个浏览器窗口了，只允许
+    打开一个新建标签」）：旧实现起一个带调试端口的独立 Chrome（哪怕用
+    default profile 也是新进程）—— 用户看到的就是凭空多一个浏览器窗口。
+    现在只用系统默认方式打开授权页：用户浏览器已在运行 → 新标签页；
+    没在运行 → 启动他自己的浏览器。两种都不是「面板拉的窗口」。
+    保留签名兼容旧调用方；不再返回 Browser 实例（没有面板控制的浏览器了）。
+    ⚠ 连带影响：没有 CDP 页面上下文，exchange_in_page / poll_token 的自动
+    换 token 链路不可用 —— 登录完成后请用户手动粘贴 accessToken
+    （F12 → Network → /console/login/enterprise 响应里的 accessToken）。
     """
-    起一个带调试端口的 Chrome 打开登录页，返回 Browser 对象。
-    已经有浏览器在跑就直接复用（避免 profile 锁冲突）。
-    """
-    from app.cdp import Browser, find_browser
-    br = Browser(port=port, exe=find_browser(), user_data_dir=user_data_dir)
-    if not br.is_up():
-        br.start(login_url(state))
-        time.sleep(wait)
-    else:
-        br.open_tab(login_url(state))
-        time.sleep(3)
-    return br
+    import webbrowser
+    try:
+        webbrowser.open(login_url(state))
+    except Exception:
+        pass
+    time.sleep(max(1, int(wait or 1)))
+    return None
 
 
 def exchange_in_page(port=CDP_PORT, state=None, timeout=45):
