@@ -43,6 +43,14 @@ class Store:
             "autocheckin": os.path.join(data_dir, "autocheckin.json"),
             # 工具调用（function calling）的执行选项
             "toolcall": os.path.join(data_dir, "toolcall.json"),
+            # ★ 2026-10-13：接入源页「拉取清单」结果需要跨重启保留。
+            #   此前 platform_models 由 put() 动态注册路径，但 Store.__init__
+            #   只从硬编码 paths 加载，导致重启后动态注册丢失、文件存在却读不到，
+            #   用户看到的永远是内置/静态老数据。这里显式注册并给默认值。
+            "platform_models": os.path.join(data_dir, "platform_models.json"),
+            # 接入源卡片「实时积分」余额缓存（pid → {value, ts}，15 分钟 TTL）。
+            #   与 platform_models 同理：必须注册进 paths，否则重启后读不到。
+            "platform_balances": os.path.join(data_dir, "platform_balances.json"),
             # 面板侧用量事件（原生中继/路由调用，保留 90 天）
             "usage_events": os.path.join(data_dir, "usage_events.json"),
         }
@@ -67,6 +75,9 @@ class Store:
                 "auto_start_gateway": False,
                 "theme": "light",
                 "refresh_interval": 15,
+                # ★ 面板访问令牌：留空=本机回环不校验；填写或对外监听(AIGW_PANEL_HOST
+                #   非回环)时，/api/* 必须带 X-AIGW-Token（首页会自动下发 Cookie）
+                "panel_token": "",
             },
             "notify": {
                 "webhooks": [],     # [{type, url, enabled, events}]
@@ -78,6 +89,12 @@ class Store:
             "accounts": [],
             "model_rates": {},
             "selected_models": [],
+            # ★ 用户在模型总表里手动关掉的模型（空 = 全部启用）
+            "disabled_models": [],
+            # 接入源页各平台「拉取清单」的缓存（pid → {models, live, ts}）
+            "platform_models": {},
+            # 接入源卡片「实时积分」余额缓存（pid → {value, ts}）
+            "platform_balances": {},
             "autocheckin": {},   # 实际默认值在 app/autocheckin.DEFAULT_CFG
             "toolcall": {},
             "usage_events": [],  # 面板侧用量事件（原生中继/路由调用，90 天剪枝）
@@ -115,21 +132,39 @@ class Store:
 
     def get(self, key):
         with _LOCK:
+            # ★ 2026-10-07：新增的键（如 disabled_models）在**老用户的目录**里
+            #   没有对应文件 —— _cache 里就没有这个键，直接 KeyError 会让
+            #   整个面板起不来。兜底返回默认值深拷贝，并顺手把键补进缓存。
+            if key not in self._cache:
+                dft = self.defaults.get(key)
+                if dft is None:
+                    raise KeyError(key)
+                self._cache[key] = json.loads(json.dumps(dft))
             return json.loads(json.dumps(self._cache[key]))
 
     def put(self, key, value):
         with _LOCK:
             self._cache[key] = value
+            # ★ 2026-10-07：没注册进 paths 的新键（如 disabled_models）也
+            #   要能落盘，否则重启就丢。落到 data/<key>.json。
+            if key not in self.paths:
+                self.paths[key] = os.path.join(self.dir, key + ".json")
             self._flush(key)
             return json.loads(json.dumps(value))
 
-    def update(self, key, mutator):
+    def update(self, key, mutator, flush=True):
+        """读-改-写（持锁）。flush=False 只改内存，由调用方限频落盘。"""
         with _LOCK:
             cur = json.loads(json.dumps(self._cache[key]))
             out = mutator(cur) or cur
             self._cache[key] = out
-            self._flush(key)
+            if flush:
+                self._flush(key)
             return json.loads(json.dumps(out))
+
+    def flush(self, key):
+        with _LOCK:
+            return self._flush(key)
 
     # ------------------------------------------------------------ 站点
     def upsert_site(self, site):

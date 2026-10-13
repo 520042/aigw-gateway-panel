@@ -825,11 +825,32 @@ function srcCards(items){
       vpids.length ? (vpids.indexOf(a.platform)>=0) : (a.platform===s.key));
     const grp=((S.data.grouped||{}).groups||[]).find(gr=>
       vpids.length ? (vpids.indexOf(gr.pid)>=0) : (gr.pid===s.key));
-    const lazy=(S.data.srcModels||{})[vpids[0]||s.key];
+    // ★ 2026-10-13：refreshSrcModels 按**卡片 key**（合并卡是 'copilot'）存，
+    //   这里必须优先按 s.key 读、再回落 variants[0] 的 pid —— 此前只读
+    //   vpids[0]（'wb-gateway'）与写入键（'copilot'）不一致，拉到的清单
+    //   永远显示不出来，卡片/抽屉只能回落 grouped 的老数据。
+    const _sm=S.data.srcModels||{};
+    const lazy=_sm[s.key] || (vpids.length ? _sm[vpids[0]] : null);
     const mods=lazy||(grp?grp.models:null);
     const modTot=mods?mods.length:0;
     const modOn=mods?mods.filter(m=>m.on!==false).length:0;
     const quota=accts.map(a=>a.quota).filter(Boolean)[0]||'';
+    // ★ 2026-10-13：实时积分余额（顶层 balances 按卡片 key / variants pid 取；
+    //   apk-wps 等平台在 grouped 里没有模型分组，余额走顶层字典）
+    const _bals=((S.data.grouped||{}).balances)||{};
+    const bal=_bals[s.key] || (vpids.length ? (_bals[vpids[0]]||'') : '')
+             || (grp&&grp.balance)||'';
+    // ★ 2026-10-13：来源卡片补充积分倍率摘要（从模型清单里聚合）。
+    //   优先取账号 quota；没有账号 quota 时，若模型带 credits（如 WorkBuddy
+    //   在线目录），显示最小~最大倍率范围。
+    const creditNums=(mods||[]).map(m=>{
+      const s=String(m.credits||'');
+      const m2=s.match(/x?([0-9]+(?:\.[0-9]+)?)/);
+      return m2?parseFloat(m2[1]):NaN;
+    }).filter(v=>!isNaN(v)&&v>=0);
+    const creditHint=creditNums.length
+      ?('x'+Math.min(...creditNums).toFixed(2)+'~x'+Math.max(...creditNums).toFixed(2))
+      :'';
     // ★ 2026-10-12 终版（new-api 渠道列表范式）：所有源统一一行 ——
     //   两段式紧凑卡：上行=状态+名称+分类；下行=详情+账号+模型+积分+⟳。
     //   外层 .src-list 是 auto-fill 网格 —— 宽度/缩放不同，列数自动变。
@@ -846,7 +867,9 @@ function srcCards(items){
       +'<button class="btn sm'+(on?'':' pri')+'" onclick="event.stopPropagation();expandSrc(\''+esc(s.key)+'\')">'+(expanded?'收起':(on?'详情':'接入'))+'</button>'
       +'<span class="sc-stat" title="账号数">账号 <b>'+accts.length+'</b></span>'
       +'<span class="sc-stat" title="模型（启用/总数）">模型 <b>'+(mods?(modOn+'/'+modTot):(s.models||0))+'</b></span>'
-      +(quota?'<span class="sc-stat" title="可用积分">积分 <b>'+esc(String(quota).slice(0,10))+'</b></span>':'')
+      +(bal?'<span class="sc-stat" title="实时积分余额">积分 <b>'+esc(bal)+'</b></span>'
+        :(quota?'<span class="sc-stat" title="可用积分">积分 <b>'+esc(String(quota).slice(0,10))+'</b></span>':''))
+      +(creditHint?'<span class="sc-stat" title="模型积分倍率范围">倍率 <b>'+esc(creditHint)+'</b></span>':'')
       +'<button class="btn sm gh" style="margin-left:auto" title="刷新账号状态与模型清单" onclick="event.stopPropagation();refreshSrcCard(\''+esc(s.key)+'\')">⟳</button>'
       +'</div>'
       +'</div>';
@@ -864,10 +887,16 @@ function srcDrawer(s, animate){
     vpids.length ? (vpids.indexOf(a.platform)>=0) : (a.platform===s.key));
   const grp=((S.data.grouped||{}).groups||[]).find(gr=>
     vpids.length ? (vpids.indexOf(gr.pid)>=0) : (gr.pid===s.key));
-  const lazy=(S.data.srcModels||{})[vpids[0]||s.key];
+  // ★ 2026-10-13：与 srcCards 同键修复 —— 按 s.key 读（拉取时按它存）
+  const _sm=S.data.srcModels||{};
+  const lazy=_sm[s.key] || (vpids.length ? _sm[vpids[0]] : null);
   const mods=lazy||(grp?grp.models:null);
   const modOn=mods?mods.filter(m=>m.on!==false).length:0;
   const modTot=mods?mods.length:0;
+  // ★ 2026-10-13：实时积分（顶层 balances 优先，回落分组自带）
+  const _bals=((S.data.grouped||{}).balances)||{};
+  const bal=_bals[s.key] || (vpids.length ? (_bals[vpids[0]]||'') : '')
+           || (grp&&grp.balance)||'';
   let body='';
   // ★ 2026-10-12（用户反馈：公益中转站等 api_key 平台也被迫「先点接入再粘贴」，
   //   与开放平台 API 的「直接输入 Key」不一致，多此一举）：直接输入 Key 的判定
@@ -894,6 +923,7 @@ function srcDrawer(s, animate){
   }else{
     body=srcLoginPanel(s, true)
       +'<div class="sc-sect"><i>账号（'+accts.length+'）</i>'
+      +(bal?'<span class="tag acc" title="实时积分余额（15 分钟缓存）">积分 '+esc(bal)+'</span>':'')
       +'<button class="btn sm gh" onclick="refreshSrcAccounts(\''+esc(s.key)+'\')">⟳ 刷新状态</button></div>'
       +'<div class="sc-sub">'+(accts.length?accts.map(a=>
         '<div class="sc-row">'
@@ -906,10 +936,10 @@ function srcDrawer(s, animate){
             :'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">拉取清单</button>')
       +'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">⟳ 刷新</button></div>'
       +((SRC_MOD_OPEN[s.key]&&mods)?'<div class="sc-sub">'+mods.slice(0,40).map(m=>
-        '<div class="sc-row">'
+        '<div class="sc-row" title="'+(m.ctx?('上下文 '+Number(m.ctx).toLocaleString()+' / '):'')+(m.out?('输出 '+Number(m.out).toLocaleString()):'')+'">'
         +'<span class="mono">'+esc(m.id)+'</span>'
-        +'<span class="faint">'+esc(m.name||'')+'</span>'
-        +'<button class="btn sm'+(m.on===false?'':' pri')+'" onclick="toggleModel(\''+gmJs(m.id)+'\')">'+(m.on===false?'已关闭':'已启用')+'</button>'
+        +'<span class="faint" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.name||'')+'</span>'
+        +(m.credits?'<span class="tag acc" title="积分倍率">'+esc(gmCred(m.credits))+'</span>':'<span class="faint">—</span>')
         +'</div>').join('')+'</div>':'');
   }
   return '<div class="sc-mask" onclick="closeSrcPop()"></div>'
@@ -2546,6 +2576,12 @@ function gmJs(s){                 // 模型 id 只含 [\w.@:/ -]，兜底替换�
   //   '/' 在单引号 JS 串 + 双引号 HTML 属性里是安全字符，无需替换。
   return String(s==null?'':s).replace(/[^\w.@:\/-]/g,'_');
 }
+function gmCred(c){               // 积分倍率显示：'x2.00 credits' → 'x2.00'
+  const s=String(c==null?'':c).trim();
+  if(!s) return '';
+  const m=s.match(/x?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  return m?('x'+m[1]):s;
+}
 function gmShort(s){
   s=String(s||'');
   return s.length>34?s.slice(0,34)+'…':s;
@@ -2727,7 +2763,7 @@ function viewModels(){
           +'onclick="copyText(\''+gmJs(id)+'\',()=>toast(\'已复制\',\'ok\'))">'
           +esc(id)+'</span></td>'
           +'<td>'+esc(m.name||'')+'</td>'
-          +'<td>'+(m.credits?'<span class="tag acc">'+esc(String(m.credits))+'</span>'
+          +'<td>'+(m.credits?'<span class="tag acc">'+esc(gmCred(m.credits))+'</span>'
             :'<span class="faint">—</span>')+'</td>'
           +'<td class="muted">'+(m.ctx?Number(m.ctx).toLocaleString():'—')+'</td>'
           +'<td class="muted">'+(m.out?Number(m.out).toLocaleString():'—')+'</td>'

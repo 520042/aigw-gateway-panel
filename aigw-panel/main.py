@@ -3,7 +3,7 @@
 AI 资源整合网关面板 — 主程序 / EXE 入口
 =======================================
 功能：
-  1. 网关进程托管（自动探测 + 拉起 workbuddy-gateway）
+  1. 上游网关为可选组件：只探测健康度，默认不自动拉起（面板自身即端点）
   2. 账号池管理（读取 gateway credentials + 外部中转站账号）
   3. 每日签到中心（本地账号池 + NewAPI 系中转站 + 补签/抽奖/旅行）
   4. 任务中心（自定义任务 + 内置任务一键执行）
@@ -15,9 +15,11 @@ AI 资源整合网关面板 — 主程序 / EXE 入口
 单文件运行：aigw-panel.exe
 """
 
+import hmac
 import json
 import mimetypes
 import os
+import re
 import socket
 import sys
 import threading
@@ -25,6 +27,8 @@ import time
 import urllib.error
 import urllib.request
 import uuid        # ★ _sse_text_chunks / _proxy_messages 生成 msg_/chatcmpl- id 依赖
+import shutil
+import subprocess
 import webbrowser
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,7 +62,14 @@ def log(msg):
 
 
 def base_dir():
-    """打包成 exe 后数据目录放在 exe 同级，便于用户直接编辑配置"""
+    """数据目录（data/ 的父目录）。
+    - 源码运行：项目根目录。
+    - 冻结运行（onedir/onefile 一致）：exe 所在目录。
+      ★ 2026-10-12 起正式安装位置是 %LOCALAPPDATA%\\aigw-panel\\（onedir），
+        公司 TSD 过滤驱动只加密「用户文档类目录」（Downloads 等）里落盘的
+        python 字节码档案——AppData\\Local 豁免（实测 10 分钟稳定），所以
+        应用连同 data/ 都住在那里；构建暂存区也在 AppData（见 build.spec），
+        重构建只清空 aigw-panel-build，不会碰 data/。"""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
@@ -105,24 +116,29 @@ def init_app():
         env = os.environ.get("AIGW_GATEWAY_PATH")
         if env and os.path.exists(env):
             gw_path = env
-    if gw_path is None:
-        # 兜底：在工作区内做一次浅层搜索
-        try:
-            for dirpath, dirnames, filenames in os.walk(root):
-                if dirpath.count(os.sep) - root.count(os.sep) > 3:
-                    dirnames[:] = []
-                    continue
-                for fn in filenames:
-                    if fn.startswith("workbuddy-gateway") and fn.endswith(".exe"):
-                        gw_path = os.path.join(dirpath, fn)
-                        break
-                if gw_path:
-                    break
-        except Exception:
-            pass
+    # ★ 2026-10-07：删掉"在工作区浅层搜索网关 EXE"的兜底 —— 它会在每次启动
+    #   遍历 data/（含 450MB+ 的浏览器采集 profile），而网关早已是可选组件。
+    #   显式路径（上面 5 层 + AIGW_GATEWAY_PATH）足够。
 
     store = Store(data_dir)
     s = store.get("settings")
+
+    # ---- 面板访问令牌（★ 2026-10-07 安全加固）----
+    # 本机回环默认不启用（不打断既有客户端与自测脚本）；一旦对外监听，
+    # 自动生成并强制校验，避免"任何网页/任何人都能读走明文密码与账号池"。
+    try:
+        bind_host = os.environ.get("AIGW_PANEL_HOST") or "127.0.0.1"
+        if bind_host not in ("127.0.0.1", "localhost", "::1") and not s.get("panel_token"):
+            import secrets as _secrets
+            cur_st = store.get("settings")
+            cur_st["panel_token"] = _secrets.token_urlsafe(24)
+            store.put("settings", cur_st)
+            s = store.get("settings")
+            log("★ 面板对外监听（%s）：已生成访问令牌，客户端需带 "
+                "X-AIGW-Token（设置页可查看/重置）" % bind_host)
+    except Exception as e:
+        log("生成面板令牌失败：%s" % e)
+    APP["panel_token"] = (store.get("settings") or {}).get("panel_token") or ""
 
     client = GatewayClient(
         addr=s.get("gateway_addr", "127.0.0.1"),
@@ -131,6 +147,10 @@ def init_app():
         admin_user=s.get("gateway_admin_user", "admin"),
         admin_password=s.get("gateway_admin_password", ""))
 
+    # 初始化自定义 API 管理器
+    from app.custom_apis import CustomAPIManager
+    custom_api_mgr = CustomAPIManager(data_dir)
+    
     APP.update({
         "root": root,
         "data_dir": data_dir,
@@ -140,6 +160,7 @@ def init_app():
         "gateway_path": gw_path,
         "started": now_ts(),
         "version": "1.0.0",
+        "custom_api_mgr": custom_api_mgr,
     })
 
     if s.get("gateway_admin_password"):
@@ -150,8 +171,17 @@ def init_app():
 
     sched = Scheduler(store, gw_path, log)
     APP["scheduler"] = sched
-    # ★ 网关 EXE 已彻底移除（2026-10-05）：调度器只管 APP 平台签到等原生任务，
-    #   不再有任何"托管网关"路径。
+    # ★★ 2026-10-07 修（定时任务全死）：Scheduler 是 threading.Thread 子类，
+    #   原来只构造、**从不 start()** —— run() 永不执行，于是：
+    #     · 外部公益站（sites 里 checkin=true 的）永不自动签到
+    #     · 定时成长任务永不执行
+    #     · /api/overview 的 scheduler.ticks 恒 0（前端一直显示"调度 0 次"）
+    #   APP 平台那部分已由 AutoCheckin 独立线程覆盖，这里补上站点与心跳。
+    try:
+        sched.start()
+        log("调度器线程已启动（外部站点签到 / 成长任务 / 心跳）")
+    except Exception as e:
+        log("调度器线程启动失败：%s" % e)
 
     # ---- APP 平台自动签到：独立线程，不依赖网关是否被托管 ----
     # 之前它藏在 scheduler.run() 里，一旦「不自动拉起网关」就跟着停，
@@ -167,12 +197,35 @@ def init_app():
     except Exception as e:
         log("自动签到线程启动失败：%s" % e)
 
+    # ---- 免密车道清单后台温习（anon-zen / kilo…）----
+    # ★ 2026-10-10 修（启动卡死 + 缺失 ANON 的根因）：
+    #   原来「模型总表」在**每次请求时现场拉**上游清单，上游不可达就阻塞 timeout 秒，
+    #   且失败不缓存 → 每次加载都重连阻塞 → 主界面卡在「正在加载面板…」，
+    #   anon-zen 组还因此变空（「缺失 ANON 等 AI」）。
+    #   现改为：后端只回缓存/兜底（anon-zen 永不失联），由本后台线程定时温习。
+    try:
+        from app import native_relay as NR
+        threading.Thread(target=NR.refresh_free_lanes,
+                        args=(NR.FREE_REFRESH_INTERVAL,), daemon=True).start()
+        log("免密车道清单后台刷新线程已启动（间隔 %d 秒）" % NR.FREE_REFRESH_INTERVAL)
+    except Exception as e:
+        log("免密车道后台刷新启动失败：%s" % e)
+
     # ---- copilot token 保活（对齐社区 2api 标配：到期前主动刷新）----
     # ★ 2026-10-06 扩展：原仅覆盖 wb-gateway/wb-gateway-intl，导致 CodeBuddy
     #   国内·国际版、Trae 的 accessToken 过期后静默 401、必须重扫。
     #   现把整个 copilot 家族 + Trae 一并纳入（同一套腾讯接口、同一 refresh 机制）。
+    # ★ 2026-10-12（对齐 L0NE-6/WorkBuddy-Daily）：
+    #   a) 收编 apk-go（与 CodeBuddy 同套授权）；
+    #   b) 续期策略对齐：AT 距过期 <7 天 **或** 距上次刷新 >10 天即刷新 ——
+    #      只盯「30 分钟内到期」的话，RT（离线会话 30 天失效）会在面板长期
+    #      关闭后死掉，参考项目靠 ≤10 天轮换 RT 保持永续；
+    #   c) 刷新成功把轮换出的新 RT + last_refreshed_at 一起落库。
     KEEPALIVE_PLATFORMS = ("wb-gateway", "wb-gateway-intl",
-                           "apk-codebuddy", "apk-codebuddy-cn", "apk-trae")
+                           "apk-codebuddy", "apk-codebuddy-cn", "apk-trae",
+                           "apk-go")
+    RT_ROTATE_DAYS = 10        # 距上次刷新超过 N 天 → 主动轮换 RT
+    AT_REFRESH_DAYS = 7        # AT 距过期不足 N 天 → 刷新
 
     def _copilot_keepalive():
         import base64
@@ -194,15 +247,21 @@ def init_app():
                         exp = int(payload.get("exp") or 0)
                     except Exception:
                         continue
-                    if exp and exp - now < 1800:   # 30 分钟内到期 → 主动刷新
+                    last = float(a.get("last_refreshed_at") or 0)
+                    need = ((exp and exp - now < AT_REFRESH_DAYS * 86400)
+                            or (last and now - last > RT_ROTATE_DAYS * 86400)
+                            or not last)
+                    if need:
                         try:
                             from app import tlogin as TL
                             d = TL.refresh(rt)
                             if d.get("accessToken"):
                                 a["secret"] = d["accessToken"]
                                 a["refresh_token"] = d.get("refreshToken") or rt
+                                a["last_refreshed_at"] = now
                                 changed = True
-                                log("copilot token 已自动刷新（%s）" % a.get("name", ""))
+                                log("copilot token 已自动刷新（%s，RT 已轮换）"
+                                    % a.get("name", ""))
                         except Exception as e:
                             log("copilot token 刷新失败（%s）：%s" % (a.get("name", ""), e))
                 if changed:
@@ -242,6 +301,7 @@ def init_app():
         return c
 
     APP["login_manager"] = LoginManager(client_factory, accounts)
+    sched.accounts = accounts   # ★ 成长任务原生化后需要账号池（wb-gateway token）
 
     # 恢复线上模型倍率缓存（登录后拉取过的）
     APP["model_rate_cache"] = store.get("model_rates") or {}
@@ -275,7 +335,11 @@ DEFAULT_AUTO_MODELS = [
 
 
 def load_route_config(router, store, client):
-    """从 settings/sites 重建路由表"""
+    """从 settings/sites 重建路由表（★ 先清空：删掉的模型不再残留在路由表）"""
+    try:
+        router.clear()
+    except Exception:
+        pass
     cfg = store.get("settings").get("routes") or {}
     models_cfg = cfg.get("models") or DEFAULT_AUTO_MODELS
     s = store.get("settings")
@@ -359,6 +423,100 @@ def load_route_config(router, store, client):
                         | {"auto", "free"})
 
 
+# ★ 2026-10-13：有「积分余额」端点的平台 → gwextra 动作 id，供接入源卡片
+#   显示「实时积分」。WorkBuddy 实测无余额 API（/billing、/console 全 404/403），
+#   不列；有账号才拉，15 分钟 TTL 缓存防抖。
+_BALANCE_ACTION = {
+    "apk-raccoon": "points_balance",      # 小浣熊 /api/web/points/v1/balance
+    "apk-wps": "credits_balance",         # WPS 灵犀 AI 智点
+    "web-glm": "score_balance",           # 智谱清言积分
+    "apk-codebuddy": "points_balance",
+    "apk-codebuddy-cn": "points_balance",
+}
+_BALANCE_TTL = 900
+
+
+def _resuffix(pid, models):
+    """platform_models 存的是平台接口返回的**裸 id**；模型总表/卡片约定是
+    「id@平台」（test_model / 对话按 @ 后缀路由），消费时补回后缀。
+    豆包 / auto / anon-zen 本就是裸名，不补。"""
+    if pid in ("auto", "anon-zen", "apk-doubao"):
+        return models
+    out = []
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id") or "")
+        if mid and "@" not in mid:
+            m = dict(m, id="%s@%s" % (mid, pid))
+        out.append(m)
+    return out
+
+
+def _dig_balance(o, depth=0):
+    """从任意嵌套结构里抠第一个像余额的数字（优先 total_balance/balance…）。"""
+    if depth > 4:
+        return None
+    if isinstance(o, dict):
+        for k in ("total_balance", "balance", "points", "score",
+                  "credits", "remain", "available", "total"):
+            v = o.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return v
+        for v in o.values():
+            r = _dig_balance(v, depth + 1)
+            if r is not None:
+                return r
+    elif isinstance(o, list) and o:
+        return _dig_balance(o[0], depth + 1)
+    return None
+
+
+def _group_balance(pid, free_lane=False):
+    """接入源卡片「实时积分」：有余额端点 + 有可用账号才拉，15 分钟 TTL。"""
+    if free_lane or pid not in _BALANCE_ACTION:
+        return ""
+    acc = APP.get("accounts")
+    if not acc:
+        return ""
+    try:
+        if not acc.usable(pid):
+            return ""
+    except Exception:
+        return ""
+    try:
+        cache = APP["store"].get("platform_balances") or {}
+    except Exception:
+        cache = {}
+    hit = cache.get(pid) or {}
+    try:
+        if hit.get("value") and \
+                time.time() - float(hit.get("ts") or 0) < _BALANCE_TTL:
+            return hit["value"]
+    except Exception:
+        pass
+    try:
+        from app import gwextra
+        okk, data = gwextra.call(acc, pid, _BALANCE_ACTION[pid], {})
+        v = _dig_balance(data) if okk else None
+    except Exception:
+        v = None
+    val = ""
+    if v is not None:
+        try:
+            fv = float(v)
+            val = ("%d" % fv) if fv == int(fv) else ("%.2f" % fv)
+        except Exception:
+            val = ""
+    if val:
+        try:
+            cache[pid] = {"value": val, "ts": time.time()}
+            APP["store"].put("platform_balances", cache)
+        except Exception:
+            pass
+    return val
+
+
 def _load_merged_routes(router, store, keep=()):
     """
     同模型跨源聚合路由（metapi 思路）：把同一模型 id 在所有可用源里的实例
@@ -380,6 +538,8 @@ def _load_merged_routes(router, store, keep=()):
     # native://，会在下面被清掉重建；算进保留名就会出现「先清后不再注册」。
     from app.doubao_relay import MODE_FLAGS as _DB_FLAGS
     reserved = set(keep) | set(_DB_FLAGS)
+    # ★ 2026-10-07：用户手动关掉的模型不再进路由（模型总表可逐个开关）
+    disabled = set(store.get("disabled_models") or [])
 
     index = {}   # mid -> [(pid, spec)]
     for pid, spec in NR.RELAY_SPECS.items():
@@ -394,16 +554,16 @@ def _load_merged_routes(router, store, keep=()):
             mid = (m.get("id") if isinstance(m, dict) else str(m)) or ""
             if mid and mid != "auto":
                 mids.append(mid)
-        if pid == "anon-zen" and spec.get("models_anon"):
-            # 匿名车道以动态清单为准（zen_models 内置 TTL 缓存，不额外出站）
+        if spec.get("models_anon"):
+            # 免凭据车道以动态清单为准（内置 TTL 缓存，不额外出站）
             try:
-                _ok, _zm = NR.zen_models()
+                _ok, _zm = NR.free_models(pid)
                 if _ok and isinstance(_zm, list):
                     mids = [m["id"] for m in _zm if m.get("id")]
             except Exception:
                 pass
         for mid in mids:
-            if mid in reserved:
+            if mid in reserved or mid in disabled:
                 continue
             index.setdefault(mid, []).append((pid, spec))
 
@@ -523,7 +683,7 @@ def _gw_alive():
         admin_user=s.get("gateway_admin_user", "admin"),
         admin_password=s.get("gateway_admin_password", ""))
     try:
-        r = c._request("/v1/models", auth="bearer", retries=0, timeout=2)
+        r = c._request("/v1/models", auth="bearer", retries=0, timeout=0.5)
         ca = {"ts": now, "alive": True,
               "models": len((r or {}).get("data") or [])}
     except GatewayError as e:
@@ -644,7 +804,7 @@ def api_tencent(action=None, body=None):
         for pid in ("wb-gateway", "wb-gateway-intl", "apk-codebuddy",
                     "apk-codebuddy-cn"):
             try:
-                a = acc.get(pid)
+                a = acc.first_of(pid)   # ★ 按平台取；get() 是按记录 id 查
             except Exception:
                 a = None
             if a and a.get("secret"):
@@ -845,7 +1005,7 @@ def api_autocheckin(action=None, body=None):
                 else:
                     # 线程还没起来（静默观察期），临时造一个跑
                     from app import autocheckin as AC
-                    tmp = AC.AutoCheckin(store, lambda: acc, APP.get("log"))
+                    tmp = AC.AutoCheckin(store, lambda: acc, log)
                     result["r"] = tmp.run_round(force=force, only=only,
                                                 options=(b.get("options") or {}))
             except Exception as e:
@@ -973,12 +1133,16 @@ def api_models(action=None, body=None):
     action=select           读写用户勾选的模型
     """
     b = body or {}                      # 各分支共用，别在分支里重复定义
-    c = new_client()
-    # ★ 网关不活就别硬调 c.models()（本机拒绝 ~2s/次，拖慢每个 action）
-    if (_gw_alive() or {}).get("alive"):
-        m, st = safe(lambda: c.models())    # 网关自己的模型（platform_models 用）
+    # ★ 只有需要网关模型的 action 才做存活探测，其他直接跳过（省 2 秒超时）
+    need_gw = action in (None, "platform_models")
+    if need_gw:
+        c = new_client()
+        if (_gw_alive() or {}).get("alive"):
+            m, st = safe(lambda: c.models())    # 网关自己的模型（platform_models 用）
+        else:
+            m, st = None, 502
     else:
-        m, st = None, 502
+        m, st = None, None
     if action == "catalog":
         from app import gwextra
         platform = b.get("platform", "apk-codebuddy")
@@ -1019,6 +1183,32 @@ def api_models(action=None, body=None):
             "summary": SRC.summary(),
         })
 
+    if action == "toggle_model":
+        # ★ 2026-10-07 新增：模型总表逐个开关（写进 store.disabled_models；
+        #   关闭的模型立即从路由表与 /v1/models 消失，重启后仍生效）
+        store = APP["store"]
+        mid = str(b.get("id") or "").strip()
+        if not mid:
+            return fail("id 必填")
+        # ★ 2026-10-07：模型总表里的 id 有两种形态 —— 自动路由/豆包是裸名，
+        #   中继平台是 "模型id@平台id"。路由表按**裸名**注册，所以这里统一
+        #   剥掉 @平台 后缀再记账，否则关掉的模型照样在路由里。
+        key = mid.rpartition("@")[0] or mid
+        cur = set(store.get("disabled_models") or [])
+        if key in cur:
+            cur.discard(key)
+            on = True
+        else:
+            cur.add(key)
+            on = False
+        store.put("disabled_models", sorted(cur)[:2000])
+        try:
+            load_route_config(APP["router"], store, new_client())
+        except Exception as e:
+            log("重建路由表失败（模型开关）：%s" % e)
+        return ok({"id": mid, "key": key, "on": on,
+                   "disabled": sorted(cur)[:200]})
+
     if action == "select":
         # 持久化用户勾选的模型（前端用来生成客户端配置）
         store = APP["store"]
@@ -1051,11 +1241,39 @@ def api_models(action=None, body=None):
         acc = APP.get("accounts")
         groups = []
 
-        def _g(pid, name, models, hint="", live=False):
+        def _g(pid, name, models, hint="", live=False, free_lane=False):
             n = len(acc.usable(pid)) if (acc and pid not in ("auto", "anon-zen")) \
                 else (len(acc.usable("anon-zen")) if acc and pid == "anon-zen" else 0)
+            # ★ 2026-10-12（用户反馈「获取完模型后路由与模型页没更新」）：
+            #   接入源卡片「拉取清单」的结果此前只存在前端内存 —— 本页永远看
+            #   不到。现在 platform_models 会把结果持久化到
+            #   store.platform_models（pid → models/live/ts），这里优先消费，
+            #   7 天内有效，过期回落内置清单。
+            saved = None
+            try:
+                # Store.get 对不存在的键会 raise KeyError（无默认值机制）
+                saved = (APP["store"].get("platform_models") or {}).get(pid)
+            except Exception:
+                saved = None
+            if pid in ("auto", "anon-zen"):
+                saved = None
+            if saved and saved.get("models"):
+                age = time.time() - float(saved.get("ts") or 0)
+                if age < 7 * 86400:
+                    # ★ 2026-10-13：存的是裸 id，补回「id@平台」后缀，
+                    #   否则总表里复制出来的 id 对话时路由不到该平台。
+                    models = _resuffix(pid, saved["models"])
+                    live = True
+                    hint = (hint + "；" if hint else "") + \
+                        "在线清单（%s 拉取）" % time.strftime(
+                            "%m-%d %H:%M", time.localtime(saved.get("ts") or 0))
             groups.append({"pid": pid, "name": name, "hint": hint,
-                           "live": live, "usable": n, "models": models})
+                           "live": live, "usable": n, "models": models,
+                           # ★ 免凭据车道：不需要账号也能用，前端据此显示
+                           #   "免凭据直连" 而不是误导性的"未接入"
+                           "free_lane": bool(free_lane),
+                           # ★ 2026-10-13：实时积分余额（有余额端点的平台才非空）
+                           "balance": _group_balance(pid, bool(free_lane))})
 
         # ① 自动路由（统一接口的推荐入口）
         router = APP.get("router")
@@ -1069,13 +1287,13 @@ def api_models(action=None, body=None):
                                   router.config.get(name, "fastest"), name),
                               "desc": "%d 个上游候选 · 当前健康 %d"
                                       % (len(info["targets"]), info["healthy"])})
-        _g("auto", "自动路由（推荐：一个模型名自动挑最快上游）", autos,
+        _g("auto", "自动路由", autos,
            "对话 model 填 auto（最快优先）/ free（免费优先）")
 
         # ② 豆包（samantha 原生中继，裸名直出）
         db = [{"id": mid, "name": "豆包 · " + mid, "desc": "原生中继"}
               for mid in _DBF if mid != "auto"]
-        _g("apk-doubao", "豆包（Cookie 登录 · 原生中继）", db,
+        _g("apk-doubao", "豆包", db,
            "model 直接写 doubao-pro 等，无需 @后缀", live=False)
 
         # ③★ WorkBuddy 账号（wb-gateway）：模型总表原本**漏了这个分组**
@@ -1115,21 +1333,17 @@ def api_models(action=None, body=None):
         #     国际站 www.workbuddy.ai（品牌：WorkBuddy 国际 / CodeBuddy 国际，
         #       workbuddy.ai 与 codebuddy.ai 两个域名都属国际版）
         #   凭据按站点隔离（edition），两站账号独立但积分共享。
-        _g("wb-gateway", "copilot 接口 · 国内站（WorkBuddy/CodeBuddy 国内 · 实时）",
+        _g("wb-gateway", "WorkBuddy 国内",
            _wb_rows,
-           "★ 国内站 copilot.tencent.com；与下方「国际站」是同一套接口的两个站点，"
-           "凭据隔离、积分共享。已接入则显示实时清单（带倍率）",
+           "国内站 copilot.tencent.com；凭据隔离、积分共享",
            live=_wb_live)
 
         # ③ 各中继平台的静态/内置清单
         _SRC = [
-            ("apk-trae", "Trae 国内版（aigw.app 网关）", BT.MODELS),
-            ("apk-go", "Go 网关（libgojni 内嵌清单）", BG.MODELS),
-            #   ↓ 国际站分组：www.workbuddy.ai（workbuddy.ai / codebuddy.ai 两个品牌
-            #     域名都属国际版）。未接入国际站账号 → 暂用内置清单，标注清楚。
-            ("apk-codebuddy", "copilot 接口 · 国际站（WorkBuddy/CodeBuddy 国际 · 内置清单）",
-             BM.MODELS),
-            ("apk-yuanbao", "元宝（APK 内置清单）", BY.MODELS),
+            ("apk-trae", "Trae 国内", BT.MODELS),
+            ("apk-go", "Go 网关", BG.MODELS),
+            ("wb-gateway-intl", "WorkBuddy 国际", BM.MODELS),
+            ("apk-yuanbao", "元宝", BY.MODELS),
         ]
         for pid, name, models in _SRC:
             rows = [{"id": "%s@%s" % (m.get("id"), pid),
@@ -1145,12 +1359,12 @@ def api_models(action=None, body=None):
 
         # ④ 中继平台上运行时才组装清单的（如实说明）
         #   ★ 补入 build38 三个网页版反代（此前漏列 → 总表看不到它们）
-        for pid, name in (("web-qoder", "Qoder（直连模型端点）"),
-                          ("web-lobster", "网易 Lobster AI"),
+        for pid, name in (("web-qoder", "Qoder"),
+                          ("web-lobster", "Lobster AI"),
                           ("apk-raccoon", "小浣熊"),
-                          ("web-glm", "智谱清言网页版"),
-                          ("web-trae", "Trae 国内版（直连）"),
-                          ("web-deepseek", "DeepSeek 网页版")):
+                          ("web-glm", "智谱清言"),
+                          ("web-trae", "Trae 直连"),
+                          ("web-deepseek", "DeepSeek")):
             spec = NR.relay_of(pid) or {}
             rows = [{"id": "%s@%s" % (m.get("id"), pid),
                      "name": m.get("name") or m.get("id"),
@@ -1160,22 +1374,52 @@ def api_models(action=None, body=None):
                rows and "静态清单（社区逆向）" or
                "清单由上游运行时下发：登录后「查看该源模型」动态拉取")
 
-        # ⑤ anon-zen 免登录车道（动态 86 个）
-        zen_rows = []
-        if NR.RELAY_SPECS.get("anon-zen"):
-            okz, zm = NR.zen_models()
-            if okz:
-                zen_rows = [{"id": "%s@anon-zen" % m["id"],
-                             "name": m.get("name") or m["id"],
-                             "ctx": m.get("ctx"), "desc": m.get("desc") or ""}
-                            for m in zm]
-        _g("anon-zen", "Our Free Model（OpenCode Zen 匿名车道 · 免登录）",
-           zen_rows, "无需任何账号；2026-10-05 实测上游 chat 已开始要求真实 Key"
-                     "（401 Missing API key），模型清单仍免登录可拉",
-           live=okz if zen_rows else False)
+        # ⑤ 免凭据车道（anon-zen / kilo…）：跟随上游的动态清单
+        #   ★ 2026-10-07：从"写死 anon-zen"改为遍历规格，新增车道自动进总表
+        for _fpid, _fspec in NR.RELAY_SPECS.items():
+            if not _fspec.get("models_anon"):
+                continue
+            _frows, _flive = [], False
+            try:
+                # ★ 非阻塞：绝不现场拉网。冷缓存回兜底（anon-zen 永不缺失），
+                #   实时清单由后台刷新线程填充。否则上游不可达时整张总表卡在「加载中」。
+                _fok, _fm, _flive = NR.free_models_cached(_fpid)
+                if _fok and isinstance(_fm, list):
+                    _frows = [{"id": "%s@%s" % (m["id"], _fpid),
+                               "name": m.get("name") or m["id"],
+                               "ctx": m.get("ctx"),
+                               "desc": m.get("desc") or ""} for m in _fm]
+            except Exception as e:
+                log("总表免凭据车道 %s 失败：%s" % (_fpid, e))
+            _g(_fpid, _fspec.get("name") or _fpid, _frows,
+               "免凭据直连：无需登录/注册/填 Key（点「接入」只是登记进路由）",
+               live=_flive, free_lane=True)
 
+        # ★ 2026-10-07（参照 dsh-our-free-model「选择器只给真能用的模型」）：
+        #   每个模型带启用状态、分组带 已启用/总数，来源卡片一眼看清
+        #   "账号 n / 模型 n"；手动关掉的模型不进路由也不出现在 /v1/models。
+        disabled = set(APP["store"].get("disabled_models") or [])
+        for g in groups:
+            for m in g["models"]:
+                m["on"] = str(m.get("id") or "") not in disabled
+            g["models_total"] = len(g["models"])
+            g["models_on"] = sum(1 for m in g["models"] if m.get("on"))
         total = sum(len(g["models"]) for g in groups)
-        return ok({"groups": groups, "total": total})
+        # ★ 2026-10-13：卡片「实时积分」。部分平台（如 apk-wps）在 grouped 里
+        #   没有模型分组但接入源有卡片，per-group 的 balance 它取不到；统一在
+        #   顶层下发 balances（pid → 值），前端按卡片 key / variants pid 取。
+        balances = {}
+        for _bpid in _BALANCE_ACTION:
+            try:
+                _bv = _group_balance(_bpid)
+                if _bv:
+                    balances[_bpid] = _bv
+            except Exception:
+                pass
+        return ok({"groups": groups, "total": total,
+                   "enabled_total": sum(g["models_on"] for g in groups),
+                   "disabled": sorted(disabled)[:200],
+                   "balances": balances})
 
     if action == "test_model":
         # ★ 连接测试：对单个模型发一条极小请求，回 {ok, latency_ms, reply/error}
@@ -1252,7 +1496,8 @@ def api_models(action=None, body=None):
         if model in _DBF:
             from app import doubao_relay as DR, acct_pool
 
-            def _db(secret, name):
+            def _db(secret, name, row=None):
+                # acct_pool.try_accounts 固定三参调用；少一个 row 会 TypeError
                 return DR.chat(msgs, secret, model=model, timeout=45)
 
             okk, payload, acct = acct_pool.try_accounts(
@@ -1277,6 +1522,25 @@ def api_models(action=None, body=None):
             return fail("platform 必填")
         acc = APP.get("accounts")
 
+        def _ret(payload):
+            # ★ 2026-10-12（用户反馈「获取完模型后路由与模型页没更新」）：
+            #   拉取结果持久化到 store.platform_models（pid→models/live/ts），
+            #   grouped 页优先消费（7 天有效）；此前结果只在前端内存里，
+            #   「路由与模型」页永远看不到。
+            try:
+                if isinstance(payload, dict) and payload.get("models"):
+                    try:
+                        cache = APP["store"].get("platform_models") or {}
+                    except Exception:
+                        cache = {}
+                    cache[pid] = {"models": payload["models"],
+                                  "live": bool(payload.get("live")),
+                                  "ts": time.time()}
+                    APP["store"].put("platform_models", cache)
+            except Exception:
+                pass
+            return ok(payload)
+
         # 元宝 / 豆包：策略一致 —— 已登录优先拉云端实时清单，失败回退内置。
         if pid in ("apk-yuanbao", "apk-doubao"):
             from app import model_extract as ME
@@ -1284,12 +1548,12 @@ def api_models(action=None, body=None):
             real, live, note = ME.live_models(
                 acc, pid, gwextra.call, gwextra.action_spec)
             if live and real:
-                return ok({"platform": pid, "name": pid,
+                return _ret({"platform": pid, "name": pid,
                            "models": real, "live": True, "note": note})
             # 回退内置
             if pid == "apk-yuanbao":
                 from app import bundled_yuanbao as BY
-                return ok({"platform": pid, "name": "元宝（内置清单）",
+                return _ret({"platform": pid, "name": "元宝（内置清单）",
                            "models": BY.MODELS, "live": False,
                            "note": "元宝不提供公开模型接口，这 %d 个来自 APK 内置；"
                                    "登录后可拉 /api/agent/model/list 实时刷新（%s）"
@@ -1299,7 +1563,7 @@ def api_models(action=None, body=None):
             models = list(BD.MODELS) + [
                 dict(m, desc="APK 网关 id：" + (m.get("desc") or ""))
                 for m in getattr(BD, "APK_GATEWAY_MODELS", [])]
-            return ok({"platform": pid, "name": "豆包（网页版菜单 + APK 网关）",
+            return _ret({"platform": pid, "name": "豆包（网页版菜单 + APK 网关）",
                        "models": models, "live": False,
                        "note": "网页版「模型选择」%d 个 + dev.doubao2api 本地网关"
                                "自有 id %d 个；登录后可拉 /alice/basic/launch"
@@ -1312,7 +1576,7 @@ def api_models(action=None, body=None):
         # Trae / Go 网关：APK 本身就是网关，模型清单打在 dex/.so 里（已逐条验证）
         if pid == "apk-trae":
             from app import bundled_trae as BT
-            return ok({"platform": pid, "name": "Trae aigw.app（APK 网关清单）",
+            return _ret({"platform": pid, "name": "Trae aigw.app（APK 网关清单）",
                        "models": BT.MODELS, "live": False,
                        "note": "这 %d 个模型 id 逐条验证自 base.apk dex；"
                                "aigw.app 本地网关暴露 /v1/models 与"
@@ -1322,7 +1586,7 @@ def api_models(action=None, body=None):
                        "custom_slots": getattr(BT, "CUSTOM_SLOTS", [])})
         if pid == "apk-go":
             from app import bundled_go as BG
-            return ok({"platform": pid, "name": "Go 原生网关（APK 内嵌能力表）",
+            return _ret({"platform": pid, "name": "Go 原生网关（APK 内嵌能力表）",
                        "models": BG.MODELS, "live": False,
                        "note": "这 %d 个模型含上下文/输出上限，提取自"
                                " libgojni.so 内嵌 JSON（自带 /panel 管理页）"
@@ -1334,21 +1598,38 @@ def api_models(action=None, body=None):
         #    这就是前端 WorkBuddy 卡片看不到模型的根因）。
         #   有 token → 在线目录 /console/enterprises/personal/models（带倍率）；
         #   拉不到/未登录 → 回退内置 bundled_models（36 个），界面永不空表。
-        if pid in ("gateway", "wb-gateway", "wb-gateway-intl"):
+        if pid in ("gateway", "wb-gateway", "wb-gateway-intl", "copilot"):
+            from app.acct_pool import pick_secret
+            # 前端 WorkBuddy 合并卡 key='copilot'，需要映射到真实站点
+            if pid == "copilot":
+                has_dom = bool(acc and acc.usable("wb-gateway"))
+                has_intl = bool(acc and acc.usable("wb-gateway-intl"))
+                if has_dom:
+                    pid = "wb-gateway"
+                elif has_intl:
+                    pid = "wb-gateway-intl"
+                else:
+                    pid = "wb-gateway"  # 都未登录也走国内站，回退内置清单
             nm = {"wb-gateway": "WorkBuddy 账号 · 国内站",
                   "wb-gateway-intl": "WorkBuddy 账号 · 国际站",
                   "gateway": "本地网关（全部）"}[pid]
             if pid != "gateway" and acc:
                 try:
                     from app import tlogin as TL
-                    from app.acct_pool import pick_secret
                     sec, _ = pick_secret(acc, pid) or ("", "")
                     if sec and not sec.startswith("eyJ"):
                         sec = ""   # 只认 JWT 型 accessToken
                     if sec:
-                        rows = TL.models_merged(sec) or []
+                        # ⚠ base 不能显式传 None：models_merged(token, base=LOGIN_HOST)
+                        #   的默认值是国内站，传 None 会把 base+path 变成 TypeError，
+                        #   被 except 吞掉后静默回退内置清单（2026-10-12 E2E 抓到的）。
+                        if pid == "wb-gateway-intl":
+                            rows = TL.models_merged(
+                                sec, base="https://www.codebuddy.ai") or []
+                        else:
+                            rows = TL.models_merged(sec) or []
                         if rows:
-                            return ok({
+                            return _ret({
                                 "platform": pid, "name": nm + "（在线目录）",
                                 "models": [{
                                     "id": r.get("id"),
@@ -1371,7 +1652,7 @@ def api_models(action=None, body=None):
                                      "credits": m.get("credits") or ""})
                 elif isinstance(m, str):
                     fallback.append({"id": m, "name": m, "credits": ""})
-            return ok({"platform": pid, "name": nm + "（内置清单）",
+            return _ret({"platform": pid, "name": nm + "（内置清单）",
                        "models": fallback, "live": False,
                        "note": "在线目录未取到（未登录或 token 过期），以下 %d 个来自"
                                "内置倍率表；扫码接入后可拉实时清单（带倍率）"
@@ -1384,33 +1665,38 @@ def api_models(action=None, body=None):
             real, live, note = ME.live_models(
                 acc, pid, gwextra.call, gwextra.action_spec)
             if live and real:
-                return ok({"platform": pid, "name": gwextra.api_official_name(pid),
+                return _ret({"platform": pid, "name": gwextra.api_official_name(pid),
                            "models": real, "live": True, "note": note})
             hints = gwextra.api_hint_models(pid)
             if hints:
-                return ok({"platform": pid, "name": gwextra.api_official_name(pid),
+                return _ret({"platform": pid, "name": gwextra.api_official_name(pid),
                            "models": hints, "live": False,
                            "note": "账号池未配置 API Key，以下是官方常见模型提示；"
                                    "在「账号登录」给该平台添加 Key 后自动拉全量清单（%s）"
                                    % note})
 
-        # anon-zen：匿名车道动态清单（免登录，OpenCode Zen）
-        if pid == "anon-zen":
-            from app import native_relay as NRZ
-            okk, models = NRZ.zen_models()
+        # 免凭据车道（anon-zen / kilo…）：动态清单，无需账号、无需 Key
+        # ★ 2026-10-07：原来写死 anon-zen，现按规格的 models_anon 判定 ——
+        #   新增免凭据车道自动复用这条路径。
+        from app import native_relay as NRZ
+        _fspec = NRZ.relay_of(pid) or {}
+        if _fspec.get("models_anon"):
+            okk, models = NRZ.free_models(pid)
             if okk and models:
-                return ok({"platform": pid, "name": "Our Free Model（匿名车道）",
+                return _ret({"platform": pid,
+                           "name": _fspec.get("name") or pid,
                            "models": models, "live": True,
-                           "note": "免登录动态清单（%d 个，OpenCode Zen）；"
-                                   "免费额度按会话计" % len(models),
-                           "source": "dsh-our-free-model 逆向"})
-            return fail("匿名清单拉取失败：%s" % models, code="zen_models_failed")
+                           "note": "免凭据动态清单（%d 个）：%s"
+                                   % (len(models), _fspec.get("name") or pid),
+                           "source": _fspec.get("evidence", "上游清单")})
+            return fail("免凭据清单拉取失败：%s" % models,
+                        code="free_models_failed")
 
         # web-qoder / web-lobster 等静态内置清单（社区逆向端点，免登录可展示）
         from app import native_relay as NR0
         _nspec = NR0.relay_of(pid)
         if _nspec and _nspec.get("models_static"):
-            return ok({"platform": pid,
+            return _ret({"platform": pid,
                        "name": _nspec.get("name") or pid,
                        "models": _nspec["models_static"], "live": False,
                        "note": "静态清单（社区逆向端点）；登录后可拉动态清单",
@@ -1434,7 +1720,7 @@ def api_models(action=None, body=None):
                              "credits": x.get("credits")}
                             for x in BM.MODELS if isinstance(x, dict)]
                 if fallback:
-                    return ok({"platform": pid, "name": "CodeBuddy 国际版（内置倍率表）",
+                    return _ret({"platform": pid, "name": "CodeBuddy 国际版（内置倍率表）",
                                "models": fallback, "live": False,
                                "note": "未登录：展示 APK 内置倍率表 %d 个模型"
                                        "（来源 %s）；登录后可拉在线目录（%s）"
@@ -1444,7 +1730,7 @@ def api_models(action=None, body=None):
         # 统一用 model_extract 解析（兼容 data/model_list/models 等多种响应形状）
         from app import model_extract as ME
         models = ME.extract_generic(data if isinstance(data, dict) else {})
-        return ok({"platform": pid, "name": pid, "models": models, "live": True,
+        return _ret({"platform": pid, "name": pid, "models": models, "live": True,
                    "note": "该平台返回 %d 个模型" % len(models)})
 
     if st != 200:
@@ -1476,7 +1762,7 @@ def api_models(action=None, body=None):
             "bundled": BM.stats(),
             "rate_summary": {"total": len(rows),
                              "with_rate": sum(1 for r in rows if r.get("credits")),
-                             "from_bundled": BM.stats().get("with_credits"),
+                             "from_bundled": BM.stats().get("with_rate"),
                              "from_online": len(cache),
                              "gateway_offline": True},
             "note": "网关 EXE 未运行：展示内置倍率表（登录/原生中继不受影响）",
@@ -1487,20 +1773,34 @@ def api_models(action=None, body=None):
     return ok(_merge_model_rates(admin, m, v1))
 
 
+_usage_flush = {"n": 0, "ts": 0.0}   # 用量落盘节流：每 20 条或 5 秒
+
+
 def _record_usage(platform, model, tin, tout, secs, ok, upstream="",
                   client_ip="", user_agent=""):
     """面板侧用量记录（保留 90 天 / 5000 条，等价网关 usageRetentionDays）"""
     try:
         store = APP["store"]
-        ev = store.get("usage_events") or []
-        ev.append({"ts": time.time(), "platform": platform, "model": model,
-                   "in": int(tin or 0), "out": int(tout or 0),
-                   "ms": int((secs or 0) * 1000), "ok": bool(ok),
-                   "upstream": str(upstream or "")[:60],
-                   "ip": str(client_ip or "")[:40],
-                   "ua": str(user_agent or "")[:80]})
-        cutoff = time.time() - 90 * 86400
-        store.put("usage_events", [x for x in ev if x.get("ts", 0) >= cutoff][-5000:])
+        now = time.time()
+
+        def _mut(ev):
+            ev.append({"ts": now, "platform": platform, "model": model,
+                       "in": int(tin or 0), "out": int(tout or 0),
+                       "ms": int((secs or 0) * 1000), "ok": bool(ok),
+                       "upstream": str(upstream or "")[:60],
+                       "ip": str(client_ip or "")[:40],
+                       "ua": str(user_agent or "")[:80]})
+            cutoff = now - 90 * 86400
+            return [x for x in ev if x.get("ts", 0) >= cutoff][-5000:]
+
+        # ★ 原实现是 get()→put()：跨锁的读改写会丢事件，且每个请求都要把
+        #   最多 5000 条事件整个序列化一遍。改成 store.update（原子）+
+        #   内存累加、每 20 条或 5 秒才落盘一次。
+        _usage_flush["n"] += 1
+        flush = (_usage_flush["n"] % 20 == 0) or (now - _usage_flush["ts"] > 5)
+        if flush:
+            _usage_flush["ts"] = now
+        store.update("usage_events", _mut, flush=flush)
     except Exception:
         pass
 
@@ -1584,15 +1884,125 @@ def api_checkins(trigger=False, force=False):
 
 
 def api_growth(trigger=False):
-    c = new_client()
-    if not trigger:
-        g, st = safe(lambda: c.growth())
-        if st != 200:
-            return g, st
-        return ok({"growth": g})
-    sched = APP["scheduler"]
-    threading.Thread(target=sched.run_growth_tasks, args=(c,), daemon=True).start()
-    return ok({"started": True, "message": "成长任务已触发"})
+    """任务中心（★ 2026-10-07 原生化：不再依赖已移除的网关 EXE）。
+
+    原实现是 client.growth() → 网关不在时直接 502，**整个任务中心是空白页**。
+    现在数据全部来自面板自己：
+      · 平台任务：autocheckin 的平台清单（开关/时间/今日状态/登录态）
+                  + 最近一次执行结果（checkins 里的 auto:<pid> 记录）
+                  + 连续失败计数 + 该平台可执行的动作（gwextra.ACTIONS）
+      · 外部站点：store.sites 里 checkin=true 的，带今日结果
+      · 汇总：今日完成/失败、调度器心跳、任务清单摘要
+    trigger=1 → 立刻跑一轮 APP 平台任务（原生线程，不碰网关）
+    """
+    from app import autocheckin as AC
+    from app import gwextra
+    store = APP["store"]
+    acc = APP.get("accounts")
+    auto = APP.get("auto_checkin")
+
+    if trigger:
+        def _work():
+            try:
+                if auto is not None:
+                    auto.run_round(force=True)
+                else:
+                    tmp = AC.AutoCheckin(store, lambda: acc, log)
+                    tmp.run_round(force=True)
+            except Exception as e:
+                log("任务中心触发失败：%s" % e)
+            # ★ 2026-10-12：顺手跑一轮 WorkBuddy 原生成长任务
+            #   （签到/任务 accept+claim/抽奖/盲盒/旅行/连签兑换 + 国际版活跃），
+            #   参照 L0NE-6/WorkBuddy-Daily 原生化，不再依赖已移除的网关 EXE。
+            try:
+                sched = APP.get("scheduler")
+                if sched is not None:
+                    r = sched.run_growth_tasks(None)
+                    log("成长任务（手动触发）：%s" % (r.get("summary") or ""))
+            except Exception as e:
+                log("成长任务触发失败：%s" % e)
+
+        threading.Thread(target=_work, daemon=True).start()
+        return ok({"started": True, "message": "已触发一轮平台任务（后台执行中）"})
+
+    st = AC.status(store, acc)
+
+    # 最近一次执行结果：autocheckin._record() 写的是 site="auto:<pid>"
+    last_map = {}
+    try:
+        hist = store.get("checkins") or {}
+        for day in sorted(hist.keys(), reverse=True)[:7]:
+            for e in (hist.get(day) or []):
+                sid = str(e.get("site") or "")
+                if not sid.startswith("auto:"):
+                    continue
+                pid = sid[5:]
+                if pid in last_map:
+                    continue
+                last_map[pid] = {"ok": bool(e.get("ok")),
+                                 "message": e.get("message") or "",
+                                 "at": e.get("at") or day}
+    except Exception:
+        pass
+
+    fail_streak = dict(getattr(auto, "_fail_count", {}) or {}) if auto else {}
+
+    platforms = []
+    for p in (st.get("platforms") or []):
+        pid = p.get("platform")
+        feats = []
+        for a in (gwextra.ACTIONS.get(pid) or [])[:14]:
+            if isinstance(a, dict) and a.get("id") and a.get("name"):
+                feats.append({"id": a.get("id"), "name": a.get("name"),
+                              "action": "%s:%s" % (pid, a.get("id"))})
+        platforms.append(dict(p, features=feats,
+                              last=last_map.get(pid) or {},
+                              fail_streak=int(fail_streak.get(pid, 0) or 0)))
+
+    sites = []
+    try:
+        last_site = {}
+        for e in (store.checkin_today() or []):
+            sid = str(e.get("site") or "")
+            if sid and not sid.startswith("auto:"):
+                last_site[sid] = {"ok": bool(e.get("ok")),
+                                  "message": e.get("message") or "",
+                                  "at": e.get("at") or ""}
+        for s in (store.get("sites") or []):
+            sites.append({"id": s.get("id"), "name": s.get("name"),
+                          "url": s.get("url"), "checkin": bool(s.get("checkin")),
+                          "last": last_site.get(s.get("id")) or {}})
+    except Exception:
+        pass
+
+    sched = APP.get("scheduler")
+    summary = {
+        "platforms": len(platforms),
+        "on": sum(1 for p in platforms if p.get("on")),
+        "done_today": sum(1 for p in platforms if p.get("done_today")),
+        "failed_today": sum(1 for p in platforms
+                            if (p.get("last") or {}).get("ok") is False),
+        "sites": len([s for s in sites if s["checkin"]]),
+        "sites_done": sum(1 for s in sites
+                          if s["checkin"] and (s.get("last") or {}).get("ok")),
+        "ticks": getattr(sched, "ticks", 0),
+        "last_tick": getattr(sched, "last_tick", None),
+        "last_checkin_date": getattr(sched, "last_checkin_date", None),
+    }
+    return ok({"growth": {
+        "source": "native",
+        "enabled": bool(st.get("enabled", True)),
+        "hour": str(st.get("default_time") or "09:10"),
+        "stagger_sec": st.get("stagger_sec"),
+        "retry_times": st.get("retry_times"),
+        "retry_delay_min": st.get("retry_delay_min"),
+        "notify": st.get("notify"),
+        "platforms": platforms,
+        "sites": sites,
+        "summary": summary,
+        "checkin_summary": store.checkin_summary(),
+        "tasks": store.task_summary(),
+    }})
 
 
 def api_sites(action=None, body=None):
@@ -1627,6 +2037,12 @@ def api_sites(action=None, body=None):
                     s["id"] = "s%d_%d" % (now_ts(), n)
                 store.upsert_site(s)
                 n += 1
+        # ★ 导入的站点若标了 in_route，必须重建路由表才生效（add/update 早就这么做）
+        if n:
+            try:
+                load_route_config(APP["router"], store, new_client())
+            except Exception:
+                pass
         return ok({"imported": n})
 
     if action == "export":
@@ -1708,6 +2124,34 @@ def api_tasks(action=None, body=None):
     if action == "delete":
         store.delete_task((body or {}).get("id"))
         return ok({"message": "已删除"})
+    if action == "run_all":
+        # ★ 2026-10-07：前端「一键执行」一直在调这个 action，但后端没有实现 ——
+        #   未知 action 落到默认分支返回 task_summary()（带 ok:true），前端于是
+        #   永远显示"没有到期的任务"，任务一个也没跑。
+        results = []
+        for task in store.get("tasks"):
+            if task.get("done"):
+                continue
+            tid = task.get("id")
+            sid = task.get("site") or ""
+            site = next((x for x in store.get("sites")
+                         if x.get("id") == sid), None) if sid else None
+            if site:
+                r = sitecheck.checkin_site(dict(site, force=True))
+                store.run_task(tid, bool(r.get("ok")), r.get("message", ""))
+                store.add_checkin({"site": site.get("id"), "name": site.get("name"),
+                                   "ok": bool(r.get("ok")),
+                                   "message": r.get("message"), "at": now_str()})
+                results.append({"id": tid, "name": task.get("name"),
+                                "ok": bool(r.get("ok")),
+                                "message": r.get("message") or ""})
+            else:
+                store.run_task(tid, True, "手动标记完成")
+                results.append({"id": tid, "name": task.get("name"),
+                                "ok": True, "message": "手动标记完成"})
+        return ok({"results": results, "total": len(results),
+                   "message": "已执行 %d 个未完成任务" % len(results)})
+
     if action == "run":
         tid = (body or {}).get("id")
         tasks = store.get("tasks")
@@ -1900,6 +2344,50 @@ def api_login(action=None, body=None):
             return fail("会话不存在或已过期", code="no_session", status=404)
         return ok({"session": sess.to_dict()})
 
+    if action == "loomy_sms_send":
+        # ★ Loomy 短信登录（参照 Patrick130306/loomy2api 的签名 API）——
+        #   完全不走浏览器：账号服务签名 → sendMsgCode → msgid 回传
+        phone = (b.get("phone") or "").strip()
+        if not phone:
+            return fail("手机号必填")
+        from app import loomy_client as LC
+        okk, msg = LC.send_sms(phone)
+        return ok({"ok": okk, "msgid": msg if okk else "",
+                   "message": "验证码已发送" if okk else msg})
+
+    if action == "loomy_sms_verify":
+        phone = (b.get("phone") or "").strip()
+        code = (b.get("code") or "").strip()
+        msgid = (b.get("msgid") or "").strip()
+        if not (phone and code and msgid):
+            return fail("手机号/验证码/msgid 必填")
+        from app import loomy_client as LC
+        okk, d = LC.verify_sms(phone, code, msgid)
+        if not okk:
+            return fail(str(d)[:200])
+        acc = APP.get("accounts").add({
+            "platform": "apk-loomy", "name": "Loomy（%s）" % phone,
+            "type": "token", "secret": d["session"],
+            "uid": d.get("userid") or "", "source": "短信登录"})
+        return ok({"account": APP["accounts"]._mask(acc),
+                   "message": "Loomy 登录成功，session 已入账号池（14 天有效）"})
+
+    if action == "loomy_pwd":
+        phone = (b.get("phone") or "").strip()
+        password = (b.get("password") or "").strip()
+        if not (phone and password):
+            return fail("手机号/密码必填")
+        from app import loomy_client as LC
+        okk, d = LC.pwd_login(phone, password)
+        if not okk:
+            return fail(str(d)[:200])
+        acc = APP.get("accounts").add({
+            "platform": "apk-loomy", "name": "Loomy（%s）" % phone,
+            "type": "token", "secret": d["session"],
+            "uid": d.get("userid") or "", "source": "密码登录"})
+        return ok({"account": APP["accounts"]._mask(acc),
+                   "message": "Loomy 登录成功，session 已入账号池（14 天有效）"})
+
     if action == "submit":
         b = body or {}
         sid = b.get("id") or b.get("session_id")
@@ -1928,6 +2416,51 @@ def api_login(action=None, body=None):
         "platforms": platform_list(),
         "sessions": [s.to_dict() for s in mgr.sessions.values()],
     })
+
+
+# ------------------------------------------------------------------ 自定义 API
+def api_custom_apis(action=None, body=None):
+    """自定义 API 管理接口"""
+    mgr = APP.get("custom_api_mgr")
+    if mgr is None:
+        return fail("自定义 API 管理器未初始化", code="not_ready")
+    b = body or {}
+    
+    if action == "list":
+        return ok({"apis": mgr.list()})
+    
+    if action == "add":
+        pid = mgr.add(b)
+        return ok({"id": pid, "message": "添加成功"})
+    
+    if action == "update":
+        pid = b.get("id")
+        if not pid:
+            return fail("id 必填")
+        ok_flag = mgr.update(pid, b)
+        if ok_flag:
+            return ok({"message": "更新成功"})
+        return fail("未找到该配置")
+    
+    if action == "delete":
+        pid = b.get("id")
+        if not pid:
+            return fail("id 必填")
+        ok_flag = mgr.delete(pid)
+        if ok_flag:
+            return ok({"message": "删除成功"})
+        return fail("未找到该配置")
+    
+    if action == "sync":
+        pid = b.get("id")
+        if not pid:
+            return fail("id 必填")
+        ok_flag, msg = mgr.sync_models(pid)
+        if ok_flag:
+            return ok({"message": msg})
+        return fail(msg)
+    
+    return fail("未知 action：%s" % action)
 
 
 # ------------------------------------------------------------------ 账号池
@@ -2245,6 +2778,7 @@ ROUTES = {
     "/api/credentials": lambda q, b: api_creds(q.get("action", [None])[0], b),
     "/api/login": lambda q, b: api_login(q.get("action", [None])[0], b),
     "/api/accounts": lambda q, b: api_accounts(q.get("action", [None])[0], b),
+    "/api/custom_apis": lambda q, b: api_custom_apis(q.get("action", [None])[0], b),
     "/api/platform": lambda q, b: api_platform(q.get("action", [None])[0], b),
     "/api/notify": lambda q, b: api_notify(q.get("action", [None])[0], b),
     "/api/logs": lambda q, b: api_logs(),
@@ -2287,14 +2821,92 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    # ------------------------------------------------------------ 访问控制
+    # ★ 2026-10-07 加固：面板原先对 /api/* 完全无鉴权、且每个响应都带
+    #   Access-Control-Allow-Origin: *。两者叠加 = 用户开着面板时，访问任何
+    #   网页都能 fetch 本机接口，读走 gateway_admin_password / 账号池 / 自建
+    #   API Key，甚至 POST 触发上游动作或退出面板。
+    #   这里两道防线：
+    #     1) 一律不再发 ACAO:*；跨站来源直接 403（浏览器必带 Origin）。
+    #     2) 面板被绑定到非回环地址（对外部署）时必须带 panel_token，
+    #        本机回环使用默认不要求，保证既有客户端与自测脚本不受影响。
+    LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+    def _cors_headers(self):
+        """只对本机来源回显 CORS；跨站一律不回（浏览器就读不到响应）。"""
+        origin = self.headers.get("Origin") or ""
+        host = ""
+        if origin:
+            try:
+                host = urllib.parse.urlparse(origin).hostname or ""
+            except Exception:
+                host = ""
+        if origin and host in self.LOCAL_HOSTS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Headers",
+                             "Content-Type, Authorization, X-AIGW-Token")
+            self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+
+    def _origin_ok(self):
+        """Origin/Referer 必须是本机来源；没有这两个头的（curl/SDK/自测）放行。"""
+        for name in ("Origin", "Referer"):
+            v = self.headers.get(name) or ""
+            if not v:
+                continue
+            try:
+                host = urllib.parse.urlparse(v).hostname or ""
+            except Exception:
+                return False
+            return host in self.LOCAL_HOSTS
+        return True
+
+    @staticmethod
+    def _need_token():
+        """对外监听时强制 token；本机回环且未显式开启时不要求。"""
+        st = (APP.get("store").get("settings") if APP.get("store") else {}) or {}
+        if st.get("panel_token"):
+            return True
+        host = os.environ.get("AIGW_PANEL_HOST") or "127.0.0.1"
+        return host not in ("127.0.0.1", "localhost", "::1")
+
+    def _token_ok(self):
+        if not self._need_token():
+            return True
+        st = (APP.get("store").get("settings") if APP.get("store") else {}) or {}
+        need = st.get("panel_token") or APP.get("panel_token") or ""
+        if not need:
+            return True
+        given = self.headers.get("X-AIGW-Token") or ""
+        if not given:
+            auth = self.headers.get("Authorization") or ""
+            if auth.lower().startswith("bearer "):
+                given = auth[7:].strip()
+        if not given:
+            ck = self.headers.get("Cookie") or ""
+            m = re.search(r"(?:^|;\s*)aigw_token=([^;]+)", ck)
+            if m:
+                given = urllib.parse.unquote(m.group(1))
+        return bool(given) and hmac.compare_digest(str(given), str(need))
+
+    def _guard(self, path):
+        """返回 None 表示放行，否则返回 (错误体, 状态码)。"""
+        if not self._origin_ok():
+            return ({"ok": False, "code": "cross_origin_denied",
+                     "message": "跨站请求已拒绝（面板只接受本机来源）"}, 403)
+        # 只对面板管理接口要求 token；/v1 兼容端点按 OpenAI 客户端习惯用
+        # Bearer，既有的 "admin" 之类配置不作废（对外部署请改用 panel_token）。
+        if path.startswith("/api/") and not self._token_ok():
+            return ({"ok": False, "code": "unauthorized",
+                     "message": "缺少或错误的 X-AIGW-Token（见 设置→面板令牌）"}, 401)
+        return None
+
     def _send(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self._cors_headers()
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -2310,7 +2922,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._cors_headers()
         self.end_headers()
         self.close_connection = True
         try:
@@ -2348,8 +2960,23 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, path):
         if path in ("/", ""):
             path = "/index.html"
-        rel = path.lstrip("/").replace("..", "")
-        full = os.path.join(APP["static_dir"], rel)
+        rel = urllib.parse.unquote(path.lstrip("/"))
+        # ★ 2026-10-07 修（任意文件读取）：原实现是
+        #     rel = path.lstrip("/").replace("..", "")
+        #     full = os.path.join(APP["static_dir"], rel)
+        #   ".." 被删掉后残留的 "/" 会让第二个分量变成绝对路径 ——
+        #   GET /../x        → rel="/x"     → os.path.join 丢前缀 → 读 C:/x 或 /x
+        #   GET /C:/Windows/win.ini → rel 带盘符 → 同样丢前缀
+        #   现在：拒绝盘符/反斜杠/NUL，再用 realpath 做包含性校验（穿越无解）。
+        if ("\x00" in rel or ":" in rel or "\\" in rel
+                or rel.startswith("/")):
+            self._send({"ok": False, "message": "not found: %s" % path}, 404)
+            return
+        base = os.path.abspath(APP["static_dir"])
+        full = os.path.abspath(os.path.join(base, rel))
+        if full != base and not full.startswith(base + os.sep):
+            self._send({"ok": False, "message": "not found: %s" % path}, 404)
+            return
         if not os.path.isfile(full):
             self._send({"ok": False, "message": "not found: %s" % path}, 404)
             return
@@ -2361,6 +2988,12 @@ class Handler(BaseHTTPRequestHandler):
                                                   "javascript" in ctype else ""))
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        # 面板令牌随首页下发（SameSite=Strict：跨站请求不会带上它）
+        st = (APP.get("store").get("settings") if APP.get("store") else {}) or {}
+        if rel.endswith("index.html") and st.get("panel_token"):
+            self.send_header(
+                "Set-Cookie", "aigw_token=%s; Path=/; SameSite=Strict; HttpOnly"
+                % urllib.parse.quote(str(st["panel_token"])))
         self.end_headers()
         try:
             self.wfile.write(data)
@@ -2368,11 +3001,18 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_OPTIONS(self):
+        if not self._origin_ok():
+            self._send({"ok": False, "code": "cross_origin_denied"}, 403)
+            return
         self._send({})
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
+        guard = self._guard(u.path)
+        if guard is not None:
+            self._send(guard[0], guard[1])
+            return
         if u.path in ROUTES:
             obj, st = dispatch(u.path, q, None)
             self._send(obj, st)
@@ -2390,7 +3030,16 @@ class Handler(BaseHTTPRequestHandler):
         import urllib.parse as _up
         u = _up.urlparse(self.path)
         q = _up.parse_qs(u.query)
+        guard = self._guard(u.path)
+        if guard is not None:
+            self._send(guard[0], guard[1])
+            return
+        # 请求体上限：本地服务也不接受无界 upload
         n = int(self.headers.get("Content-Length") or 0)
+        if n > 32 * 1024 * 1024:
+            self._send({"ok": False, "code": "payload_too_large",
+                        "message": "请求体超过 32MB 上限"}, 413)
+            return
         raw = self.rfile.read(n) if n else b""
         try:
             body = json.loads(raw.decode("utf-8")) if raw else {}
@@ -2417,6 +3066,9 @@ class Handler(BaseHTTPRequestHandler):
         避免每次拉清单都吃 2s 死连接（CodeDesk 等客户端会高频轮询这里）。
         """
         out = []
+        # ★ 用户在模型总表里关掉的模型：这里也要过滤（路由表已重建，
+        #   但中继平台的 "模型@平台" 条目是静态拼的，得单独挡一次）
+        _disabled = set(APP["store"].get("disabled_models") or [])
         router = APP.get("router")
         if router:
             for name, info in sorted(router.list_models().items()):
@@ -2443,14 +3095,18 @@ class Handler(BaseHTTPRequestHandler):
             rows = spec.get("models_static") or _BUNDLED.get(pid) or []
             for m in rows:
                 mid = (m.get("id") if isinstance(m, dict) else str(m)) or ""
-                if not mid or mid == "auto":
+                if not mid or mid == "auto" or mid in _disabled:
                     continue
                 out.append({"id": "%s@%s" % (mid, pid), "object": "model",
                             "owned_by": pid, "aigw": {"via": "relay"}})
-            if spec.get("models_anon") and pid == "anon-zen":
+            if spec.get("models_anon"):
+                # ★ 2026-10-07：按规格判定（原写死 anon-zen），Kilo 等新增
+                #   免凭据车道自动出现在 /v1/models
                 try:
-                    _ok, _zm = NR.zen_models()
-                    for m in (_zm if _ok and isinstance(_zm, list) else []):
+                    _ok, _zm = NR.free_models(pid)
+                    for m in (_ok and isinstance(_zm, list) and _zm or []):
+                        if m.get("id") in _disabled:
+                            continue
                         out.append({"id": "%s@%s" % (m["id"], pid),
                                     "object": "model", "owned_by": pid,
                                     "aigw": {"via": "relay"}})
@@ -2712,29 +3368,104 @@ class Handler(BaseHTTPRequestHandler):
             "type": "invalid_request_error", "code": "model_not_found"},
             "ok": False}, 404)
 
+    # ------------------------------------------------------- Anthropic 兼容
+    @staticmethod
+    def _oa_to_anthropic(oa, model):
+        """OpenAI chat.completion → Anthropic message（tool_calls → tool_use）。"""
+        ch = ((oa.get("choices") or [{}])[0] if isinstance(oa, dict) else {}) or {}
+        msgd = ch.get("message") or {}
+        blocks = []
+        text = msgd.get("content")
+        if isinstance(text, str) and text:
+            blocks.append({"type": "text", "text": text})
+        elif isinstance(text, list):
+            for part in text:
+                if isinstance(part, dict) and part.get("text"):
+                    blocks.append({"type": "text", "text": str(part["text"])})
+        for tc in (msgd.get("tool_calls") or []):
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args or "{}")
+                except Exception:
+                    args = {"_raw": args}
+            blocks.append({"type": "tool_use",
+                           "id": tc.get("id") or ("toolu_" + uuid.uuid4().hex[:24]),
+                           "name": fn.get("name") or "",
+                           "input": args if isinstance(args, dict) else {}})
+        if not blocks:
+            blocks = [{"type": "text", "text": ""}]
+        u = (oa or {}).get("usage") or {}
+        has_tool = any(x.get("type") == "tool_use" for x in blocks)
+        stop = "tool_use" if has_tool else (
+            "max_tokens" if ch.get("finish_reason") == "length" else "end_turn")
+        return {
+            "id": (oa or {}).get("id") or ("msg_" + uuid.uuid4().hex[:24]),
+            "type": "message", "role": "assistant", "model": model,
+            "content": blocks, "stop_reason": stop, "stop_sequence": None,
+            "usage": {"input_tokens": int(u.get("prompt_tokens") or 1),
+                      "output_tokens": int(u.get("completion_tokens") or 1)},
+        }
+
+    @staticmethod
+    def _anthropic_sse(text, model, usage=None):
+        """把一段完整回答回放成 Anthropic SSE 事件序列。"""
+        mid = "msg_" + uuid.uuid4().hex[:24]
+        u = usage or {}
+
+        def ev(name, obj):
+            return "event: %s\ndata: %s\n\n" % (
+                name, json.dumps(obj, ensure_ascii=False))
+        yield ev("message_start", {
+            "type": "message_start",
+            "message": {"id": mid, "type": "message", "role": "assistant",
+                        "model": model, "content": [], "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": int(u.get("prompt_tokens") or 1),
+                                  "output_tokens": 0}}})
+        yield ev("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""}})
+        if text:
+            yield ev("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": text}})
+        yield ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+        yield ev("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": int(u.get("completion_tokens") or 1)}})
+        yield ev("message_stop", {"type": "message_stop"})
+
     def _proxy_messages(self, body):
         """
-        Anthropic /v1/messages 兼容端点（等价网关 EXE 的同名能力，免 EXE）。
-        model=claude-* 且账号池有豆包 Cookie → 映射豆包模式原生出话；
-        其它模型 → 交给 _proxy_chat 的既有链路（路由/中继/EXE），
-        最后把 OpenAI 形状转回 Anthropic 形状。非流式。
+        Anthropic /v1/messages 兼容端点。
+        ★ 2026-10-07 重写：
+          · claude-* 映射豆包模式；auto/free/<id>@<平台> 走既有链路 ——
+            两者都经 _proxy_chat（账号池轮换、冷却、熔断一致）；
+          · 回给客户端的一定是 **Anthropic 形状**（原实现只在豆包分支转换，
+            其它模型把 OpenAI choices 原样回给 Anthropic 客户端）；
+          · 支持 stream=true：输出 message_start / content_block_delta /
+            message_stop 事件序列（Claude Code 默认流式，原先必然解析失败）。
         """
-        # 获取客户端 IP 和 UA
-        client_ip = self.headers.get("X-Forwarded-For", "").split(",")[0].strip() \
-                    or self.headers.get("X-Real-IP", "") \
-                    or (self.client_address[0] if self.client_address else "")
-        user_agent = self.headers.get("User-Agent", "")
-
-        model = (body or {}).get("model") or ""
-        msgs_in = (body or {}).get("messages") or []
-        system = (body or {}).get("system") or ""
+        body = body or {}
+        model = body.get("model") or ""
+        msgs_in = body.get("messages") or []
+        system = body.get("system") or ""
+        stream = bool(body.get("stream"))
 
         def blocks_text(c):
             if isinstance(c, str):
                 return c
             if isinstance(c, list):
-                return chr(10).join(b.get("text", "") for b in c
-                                    if isinstance(b, dict) and b.get("type") == "text")
+                out = []
+                for b in c:
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        out.append(b.get("text", ""))
+                return chr(10).join(out)
             return str(c or "")
 
         oa_msgs = []
@@ -2746,67 +3477,74 @@ class Handler(BaseHTTPRequestHandler):
             oa_msgs.append({"role": m.get("role", "user"),
                             "content": blocks_text(m.get("content"))})
 
-        def to_anthropic(oa):
-            ch = ((oa.get("choices") or [{}])[0])
-            msgd = ch.get("message") or {}
-            text = msgd.get("content") or ""
-            u = oa.get("usage") or {}
-            return {
-                "id": oa.get("id") or ("msg_" + uuid.uuid4().hex[:24]),
-                "type": "message", "role": "assistant",
-                "model": model,
-                "content": [{"type": "text", "text": text}],
-                "stop_reason": "end_turn", "stop_sequence": None,
-                "usage": {"input_tokens": u.get("prompt_tokens", 1),
-                          "output_tokens": u.get("completion_tokens", 1)},
-            }
-
         # claude-* → 豆包模式映射（等价 free-api 的 ANTHROPIC_MODEL_MAP）
         DB_MAP = {"claude-3-5-sonnet-latest": "doubao-pro",
                   "claude-3-5-haiku-latest": "doubao-fast",
                   "claude-3-opus-latest": "doubao-expert",
                   "claude-sonnet-4": "doubao-pro",
                   "claude-opus-4": "doubao-expert"}
-        db_model = None
+        wire_model = model
         ml = model.lower()
         for k, v in DB_MAP.items():
             if ml.startswith(k):
-                db_model = v
+                wire_model = v
                 break
-        if db_model:
-            from app import doubao_relay as DR
-            acc = APP.get("accounts")
-            secret, acct_name = DR.pick_secret(acc, "apk-doubao")
-            if not secret:
-                self._send({"type": "error", "error": {
-                    "type": "authentication_error",
-                    "message": "账号池里没有可用的豆包 Cookie（全部冷却或未登录）"}},
-                    401)
-                return
-            t0 = time.time()
-            okk, payload = DR.chat(oa_msgs, secret, model=db_model)
-            _record_usage("apk-doubao", db_model,
-                          (payload.get("usage") or {}).get("prompt_tokens") if okk else 0,
-                          (payload.get("usage") or {}).get("completion_tokens") if okk else 0,
-                          time.time() - t0, okk,
-                          client_ip=client_ip, user_agent=user_agent)
-            if okk:
-                out = to_anthropic(payload)
-                out["model"] = model
-                self._send(out, 200)
-            else:
-                self._send({"type": "error", "error": {
-                    "type": "api_error", "message": str(payload)[:400]}}, 502)
+
+        oa_body = {"model": wire_model, "messages": oa_msgs,
+                   "max_tokens": int(body.get("max_tokens") or 4096),
+                   # 取非流式聚合结果，再按客户端要求回放 Anthropic 帧
+                   "stream": False}
+        if body.get("tools"):
+            oa_body["tools"] = body["tools"]
+        if body.get("temperature") is not None:
+            oa_body["temperature"] = body["temperature"]
+
+        captured = {}
+        real_send = self._send
+
+        def _capture(obj, status=200):
+            captured["obj"], captured["status"] = obj, status
+
+        err = None
+        self._send = _capture
+        try:
+            self._proxy_chat(oa_body)
+        except Exception as e:
+            err = "%s: %s" % (type(e).__name__, e)
+        finally:
+            self._send = real_send
+
+        if err:
+            self._send({"type": "error", "error": {
+                "type": "api_error", "message": err[:400]}}, 502)
             return
 
-        # 其它模型：转 OpenAI 后走既有链路，再转回 Anthropic
-        oa_body = {"model": model, "messages": oa_msgs,
-                   "max_tokens": (body or {}).get("max_tokens") or 4096}
-        self._proxy_chat(oa_body)
-        # _proxy_chat 直接写回响应（未知模型也会回结构化错误，不会直落），
-        # 这里必须 return——下面曾残留一段「透传网关」旧代码，会在同一连接
-        # 上发第二次响应（响应帧错乱）并白等 2s 死网关。EXE 已移除，整段删除。
-        return
+        oa = captured.get("obj")
+        if not isinstance(oa, dict) or "choices" not in oa:
+            msg = ""
+            if isinstance(oa, dict):
+                msg = (oa.get("message")
+                       or (oa.get("error") or {}).get("message")
+                       or json.dumps(oa, ensure_ascii=False)[:300])
+            self._send({"type": "error", "error": {
+                "type": "api_error",
+                "message": str(msg)[:400] or "上游未返回可用结果"}}, 502)
+            return
+
+        usage = oa.get("usage") or {}
+        if stream:
+            txt = ((oa.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            if not isinstance(txt, str):
+                txt = blocks_text(txt)
+            if not txt:
+                self._send_sse(iter([self._sse_error(
+                    "自动路由未返回内容：%s" % (oa.get("message") or "上游返回空"))]))
+                return
+            self._send_sse(self._anthropic_sse(txt, model, usage))
+            return
+        out = self._oa_to_anthropic(oa, model)
+        out["model"] = model
+        self._send(out, 200)
 
 
 def _icon_path():
@@ -2817,6 +3555,42 @@ def _icon_path():
         if os.path.exists(c):
             return c
     return None
+
+
+# ★ 2026-10-12：onedir 模式下**没有运行时解压**，`_clean_stale_runtime_tmpdirs`
+#   连同它引出的两轮 bug（清理跑在互斥体之前误删在用实例的 _MEI 等）一并删除。
+#   历史：onefile 时代每次启动解压 10MB+ 到 temp_runtime/_MEI*，且公司 TSD
+#   过滤驱动会把解压出的 base_library.zip 污染成 %TSD-Header-###% 开头的坏 zip ——
+#   这两个问题都随 onedir 消失（见 build.spec 顶部说明）。
+
+
+def _open_browser(url):
+    """打开默认浏览器访问面板。Windows 上优先 cmd /c start（新起进程开 URL，
+    彻底绕开 GUI 线程 apartment 导致 os.startfile 偶发失败），失败再退
+    os.startfile，最后退 webbrowser。任一步失败都记日志，便于排查。
+    注意：冻结 EXE 里 webbrowser.open 会静默失败，所以不用它首发。"""
+    log("打开浏览器: %s" % url)
+    sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+    # 1) cmd /c start（最稳，新进程开 URL）
+    try:
+        subprocess.Popen([os.path.join(sysroot, "System32", "cmd.exe"),
+                          "/c", "start", "", url], shell=False)
+        return True
+    except Exception as e:
+        log("cmd start 失败: %s" % e)
+    # 2) os.startfile 兜底
+    try:
+        os.startfile(url)
+        return True
+    except Exception as e:
+        log("os.startfile 失败: %s" % e)
+    # 3) webbrowser 最终兜底
+    try:
+        webbrowser.open(url)
+        return True
+    except Exception as e:
+        log("webbrowser.open 失败: %s" % e)
+    return False
 
 
 def main():
@@ -2832,7 +3606,8 @@ def main():
         log("检测到已有实例运行，唤醒其面板后退出")
         guard.find_existing_window()
         if os.environ.get("AIGW_NO_BROWSER") != "1":
-            webbrowser.open(_last_url_path() or "http://127.0.0.1:8790/")
+            _open_browser(_last_url_path()
+                          or "http://127.0.0.1:%d/" % DEFAULT_PANEL_PORT)
         guard.release()
         return
 
@@ -2856,7 +3631,7 @@ def main():
     state = {"exit": False}
 
     def do_open():
-        webbrowser.open(url)
+        _open_browser(url)
 
     def do_exit():
         state["exit"] = True
@@ -2888,7 +3663,9 @@ def main():
     print("=" * 64)
 
     if os.environ.get("AIGW_NO_BROWSER") != "1" and not tray_mode:
-        threading.Timer(1.0, do_open).start()
+        # 启动 1.5s 后自动开浏览器；用 _open_browser 而非 webbrowser.open，
+        # 避免冻结 EXE 里 webbrowser 静默失败（os.startfile 优先，带日志兜底）
+        threading.Timer(1.5, _open_browser, args=(url,)).start()
 
     try:
         srv.serve_forever()
@@ -2975,10 +3752,16 @@ def _save_url(port):
 
 
 def _last_url_path():
+    """上次写入的面板地址。★ 必须能在这个进程 init_app() 之前调用：
+    单实例唤醒时要打开老实例的地址，而那时 APP 还是空的 ——
+    原先用 APP.get("data_dir", ".") 去找 ./panel.url（真实文件在
+    <exe 同级>/data/panel.url），恒取不到，于是回退到硬编码的 8790。"""
     try:
-        p = os.path.join(APP.get("data_dir", "."), "panel.url")
+        base = APP.get("data_dir") or os.path.join(base_dir(), "data")
+        p = os.path.join(base, "panel.url")
         if os.path.exists(p):
-            return open(p, encoding="utf-8").read().strip()
+            with open(p, encoding="utf-8") as f:
+                return f.read().strip()
     except Exception:
         pass
     return None
