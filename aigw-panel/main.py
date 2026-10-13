@@ -1776,9 +1776,36 @@ def api_models(action=None, body=None):
             real, live, note = ME.live_models(
                 acc, pid, gwextra.call, gwextra.action_spec)
             if live and real:
+                # ★ 2026-10-14：OpenRouter 的 :free 模型打"免费"标记，
+                #   免费池一目了然（这些 id 即每日免费榜里的 OpenRouter 免费项）。
+                if pid == "api-openrouter":
+                    for _m in real:
+                        if (_m.get("id") or "").endswith(":free"):
+                            _m["free"] = True
                 return _ret({"platform": pid, "name": gwextra.api_official_name(pid),
                            "models": real, "live": True, "note": note})
             hints = gwextra.api_hint_models(pid)
+            # ★ 2026-10-14：OpenRouter 未配 Key 时，把每日免费榜里的 OpenRouter
+            #   :free 模型做成"免费池候选"清单，挂到**现有** api-openrouter 平台下——
+            #   复用既有平台、不新建重复入口（用户明确"尽量不要有重复"）。这些模型
+            #   id 本身就是 OpenRouter 真实模型 id，用户填入 Key 后即可直接选用。
+            if pid == "api-openrouter":
+                _ofree = _openrouter_free_from_feed()
+                if _ofree:
+                    if not hints:
+                        hints = []
+                    _seen = {m.get("id") for m in hints}
+                    for _m in _ofree:
+                        if _m["id"] not in _seen:
+                            _m["free"] = True
+                            hints.append(_m)
+                    return _ret({"platform": pid,
+                               "name": gwextra.api_official_name(pid),
+                               "models": hints, "live": False,
+                               "note": "未配 Key：下方为每日免费榜中的 OpenRouter "
+                                       "免费模型（:free），面板已集成 OpenRouter "
+                                       "（填入 Key 后可直接选用）；完整模型在配 Key "
+                                       "后自动拉取（%s）" % note})
             if hints:
                 return _ret({"platform": pid, "name": gwextra.api_official_name(pid),
                            "models": hints, "live": False,
@@ -2945,6 +2972,54 @@ ROUTES = {
 
 
 # ------------------------------------------------------------------ 免费模型榜
+def _openrouter_free_from_feed():
+    """从每日免费榜过滤出 OpenRouter 的 :free 模型。
+
+    ★ 2026-10-14：OpenRouter 免费池**不新建平台**（避免与既有 api-openrouter 重复），
+    而是复用现有平台——这些模型 id 本身就是 OpenRouter 真实模型 id，用户配 Key 后在
+    api-openrouter 平台下即可直接选用。冷缓存（每日榜尚未拉到）时回空列表，由调用方
+    回退到官方 hints。
+    """
+    try:
+        from app import free_models_feed as FF
+        d = FF.get_free_feed()
+        if not d:
+            return []
+        out = []
+        for m in (d.get("models") or []):
+            _key = ((m.get("id") or "") + " " + (m.get("source") or "") + " "
+                    + (m.get("provider") or "")).lower()
+            if "openrouter" not in _key:
+                continue
+            out.append({
+                "id": m.get("id"),
+                "name": m.get("name") or m.get("id"),
+                "desc": "OpenRouter 免费模型（每日榜 #%s）"
+                        % (m.get("rank") if m.get("rank") is not None else "—"),
+                "ctx": m.get("context_window"),
+                "rate_limit": m.get("rate_limit") or "",
+            })
+        return out
+    except Exception:
+        return []
+
+
+def _feed_integrated_by_key(m):
+    """判断每日榜某模型是否已被面板集成（用于前端去重/标注，避免呈现成"又一个平台"）。
+
+    返回平台 pid 字符串，或 None。
+    - api-openrouter：填 Key 即用（OpenRouter 免费模型也走它）
+    - pollinations：免密钥匿名车道
+    """
+    _key = ((m.get("id") or "") + " " + (m.get("source") or "") + " "
+            + (m.get("provider") or "")).lower()
+    if "openrouter" in _key:
+        return "api-openrouter"
+    if "pollinations" in _key:
+        return "pollinations"
+    return None
+
+
 def api_free_models(refresh=False):
     """每日免费模型榜单（数据源 ClawLabsAI/free-ai-models）。
 
@@ -2968,6 +3043,10 @@ def api_free_models(refresh=False):
         if not d:
             return ok({"updated_at": None, "total": 0, "models": [],
                        "note": "暂无可展示数据（拉取失败，稍后自动重试）"})
+        # ★ 2026-10-14：标记哪些模型已被面板集成（OpenRouter 填 Key 即用 /
+        #   Pollinations 免密钥），前端据此显示"已集成"、避免呈现成"又一个平台"。
+        for _m in (d.get("models") or []):
+            _m["integrated"] = _feed_integrated_by_key(_m)
         return ok(d)
     except Exception as e:
         return fail("%s: %s" % (type(e).__name__, e))

@@ -3206,7 +3206,7 @@ function viewRoute0(){
       <h2>每日免费模型榜 <span class="faint" style="font-size:12px" id="freeFeedTs"></span></h2>
       <button class="btn" onclick="loadFreeModels(true)">立即刷新</button>
     </div>
-    <div class="faint" style="margin:4px 0 10px">数据源 ClawLabsAI/free-ai-models（每天 04:00 UTC 更新）；<b>不训练</b> 表示提供商承诺不用你的提示词训练模型。模型 id 可直接用于对应提供商的 OpenAI SDK。</div>
+    <div class="faint" style="margin:4px 0 10px">数据源 ClawLabsAI/free-ai-models（每天 04:00 UTC 更新）；<b>不训练</b> 表示提供商承诺不用你的提示词训练模型。模型 id 可直接用于对应提供商的 OpenAI SDK。<br><b>已集成</b> 标记 = 面板已内置该平台（OpenRouter 填 Key 即用 / Pollinations 免密钥），不再另建重复入口；未标记的需自行注册。</div>
     <div id="freeModelsBody" class="scroll" style="max-height:560px">${freeModelsHtml()}</div>
   </div>
 `;
@@ -3231,9 +3231,15 @@ function freeModelsHtml(){
     const prov=(m.provider||(m.served_by&&m.served_by[0])||'—');
     const ctx=m.context_window?Math.round(m.context_window/1024)+'K':'—';
     const tools=m.supports_tools?'✓':'—';
+    const integ=m.integrated;
+    const integTag=integ
+      ? (integ==='pollinations'
+          ? tag('已集成·免密钥','ok')
+          : tag('已集成·填Key即用','info'))
+      : '';
     return `<tr>
       <td><b>${esc(m.rank!=null?m.rank:'—')}</b></td>
-      <td><b class="mono">${esc(m.id)}</b><div class="faint" style="font-size:11px">${esc(m.name||'')}</div></td>
+      <td><b class="mono">${esc(m.id)}</b><div class="faint" style="font-size:11px">${esc(m.name||'')}</div>${integTag}</td>
       <td>${esc(prov)}</td>
       <td>${trainTag(m.data_use)}</td>
       <td class="mono">${ctx}</td>
