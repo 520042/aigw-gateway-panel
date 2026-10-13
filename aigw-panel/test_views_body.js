@@ -90,20 +90,27 @@ S.data = {
 SRC_VIEW = 'card'; S.data.srcDetail = null;
 let h = viewSources();
 ck('接入源渲染不崩', typeof h === 'string' && h.length > 0, 'len=' + h.length);
-ck('有 ① 接入源 KPI', h.includes('① 接入源'));
-ck('有 ② 原生直连 KPI（免 EXE）', h.includes('② 原生直连') && h.includes('免 EXE'));
-ck('有 ③ 自动路由 KPI', h.includes('③ 自动路由'));
-ck('写明三步用法', h.includes('用法就三步') && h.includes('auto'));
-ck('说明增强功能可选', h.includes('可选增强'));
-ck('无分类 Tab、一屏本地 AI 一览',
-   h.includes('本地 AI 一览') && !h.includes('setSrcTab'));
+// ★ 2026-10-13：以下断言全部对齐现行 UI —— srcbar 三指标取代旧 ①②③ KPI，
+//   分类从顶部 Tab 改左侧竖排（src-cats-v），CLIProxyAPI 默认不内置后
+//   「本地反代」走 srcSeg 筛选项，合并卡名 WorkBuddy（两个站点 variant 行）。
+ck('srcbar 三指标（已接入/账号凭据/收录模型）',
+   h.includes('账号凭据') && h.includes('收录模型') && h.includes('已接入'));
+ck('旧 KPI 序号（①②③）已移除', !h.includes('① ') && !h.includes('② ') && !h.includes('③ '));
+ck('srcbar 有「怎么用」帮助入口', h.includes('怎么用'));
+SRC_HELP = true; h = viewSources();
+ck('写明三步用法', h.includes('就三步') && h.includes('auto'));
+ck('说明客户端 base_url 与 api_key 填法', h.includes('base_url') && h.includes('api_key 填'));
+ck('分类是左侧竖排（src-cats-v），无旧 Tab',
+   h.includes('src-cats-v') && h.includes('cat-all') && !h.includes('setSrcTab'));
+SRC_HELP = false; h = viewSources();
 ck('网关 EXE 卡已彻底移除', !h.includes('本地网关 EXE') && !h.includes('8317'));
-ck('列出本地反代源', h.includes('CLIProxyAPI'));
-SRC_TAB='LOCAL'; h=viewSources();
-ck('LOCAL 类含桌面平台（合并卡）', h.includes('CodeBuddy / WorkBuddy 账号（copilot 直连）'), h.length+' 字节');
+ck('有「本地反代」筛选项（srcSeg）', h.includes('本地反代'));
+h = viewSources();
+ck('合并卡含 WorkBuddy（copilot 直连）',
+   h.includes('WorkBuddy') && h.includes('copilot.tencent.com'), h.length + ' 字节');
 ck('已接入显示标签', h.includes('已接入'));
-ck('未接入可点击', h.includes("openSrc('apk-yuanbao')"));
-ck('未接入平台给「接入」入口', h.includes('openSrc(') && (h.includes('扫码接入') || h.includes('已接入')));
+ck('未接入可点击（卡片 expandSrc 展开）', h.includes("expandSrc('apk-yuanbao')"));
+ck('未接入平台给「接入」入口', h.includes('expandSrc(') && (h.includes('扫码接入') || h.includes('已接入')));
 
 // sourceList 结构
 const sl = sourceList();
@@ -119,7 +126,12 @@ ck('未登录的标 false（copilot）', sl.some(x => x.key === 'copilot' && !x.
 openSrc('apk-yuanbao');
 h = viewSources();
 ck('已接入详情有标签', h.includes('已接入'), h.length + ' 字节');
-ck('已接入详情给查看模型', h.includes('查看该源模型'));
+// ★ 2026-10-13：模型入口从旧详情页挪进抽屉（srcModBox）—— openSrc 旧详情页
+//   不再有「查看该源模型」，改验抽屉里的「拉取清单 / ⟳ 刷新」两个入口。
+S.data.srcDetail=null; SRC_VIEW='card';
+expandSrc('apk-yuanbao'); h = viewSources();
+ck('抽屉有模型清单入口（拉取清单/⟳ 刷新）', h.includes('拉取清单') && h.includes('⟳ 刷新'));
+SRC_EXPAND=null;
 ck('已接入详情给解除接入', h.includes('解除接入'));
 openSrc('apk-yuanbao');
 h = viewSources();
@@ -127,10 +139,11 @@ ck('已接入详情不再显示接入按钮（fixture 元宝已登录）',
    !(h.includes('扫码接入') || h.includes('用浏览器 Cookie 接入')));
 openSrc('copilot');
 h = viewSources();
-ck('copilot 详情给四个账号行（含扫码接入）',
-   h.includes('国内站账号') && h.includes('国际站账号')
-   && h.includes('CodeBuddy 国际账号') && h.includes('CodeBuddy 国内账号')
-   && h.includes('扫码接入'));
+// ★ 2026-10-13：copilot 合并卡从 4 个 variant 收窄为 2 个站点行
+//   （wb-gateway 国内 / wb-gateway-intl 国际；CodeBuddy 国内/国际是独立卡），
+//   登录方式从「扫码接入」改跳转制「跳转登录」。
+ck('copilot 详情给国内/国际两个账号行（含登录入口）',
+   h.includes('国内站账号') && h.includes('国际站账号') && h.includes('跳转登录'));
 ck('copilot 详情不再有旧的单按钮接入条', !(h.includes('先探测端点')));
 closeSrc();
 ck('closeSrc 回到卡片墙', SRC_VIEW === 'card' && S.data.srcDetail === null);
@@ -167,7 +180,8 @@ ck('任务中心不再有「去任务管理」跳转', !h.includes("go('tasks')"
 // ---------------------------------------------------------------- 设置
 SET_TAB = 'main';
 h = viewSettings();
-ck('设置页 Tab 化', h.includes('基本设置') && h.includes('资源站点') && h.includes('日志'));
+// ★ 2026-10-13：设置 Tab 收敛为「代理设置 / 日志」两个
+ck('设置页 Tab 化', h.includes('代理设置') && h.includes('日志'));
 ck('设置页已无网关连接字段（sAddr/监听地址 均移除）',
    !h.includes('sAddr') && !h.includes('监听地址'));
 ck('设置页不再有网关 EXE 段落', !h.includes('workbuddy-gateway') && h.includes('CLIProxyAPI'));
@@ -258,8 +272,10 @@ S.data.loginPlatforms = [
   {id:'apk-codebuddy-cn', name:'CBCN', method:'qrcode', edition:'cn', hosts:[], login_url:'', upstream:'www.codebuddy.cn', hint:''},
 ];
 S.data.accounts = [];
-ck('copilot 卡存在（扫码入口在详情 variants 行）',
-   sourceList().some(x => x.key === 'copilot' && x.variants && x.variants.length === 4));
+// ★ 2026-10-13：copilot 合并卡只合并 wb-gateway/wb-gateway-intl 两个站点
+//   （CodeBuddy 国内/国际按用户要求是独立账号行，不并卡）
+ck('copilot 卡存在（国内/国际两个 variants 行）',
+   sourceList().some(x => x.key === 'copilot' && x.variants && x.variants.length === 2));
 
 // 复位
 S.data.tcModels = [];
@@ -285,14 +301,15 @@ try {
   ck('sourceList 不崩（pl 已定义）', Array.isArray(rows) && rows.length > 0,
      'rows=' + rows.length);
   const cop = rows.find(x => x.key === 'copilot');
-  ck('copilot 合并卡存在且带 4 个版本按钮',
-     cop && Array.isArray(cop.variants) && cop.variants.length === 4,
+  // ★ 2026-10-13：4 个版本按钮 → 2 个（wb-gateway 国内 / wb-gateway-intl 国际）
+  ck('copilot 合并卡存在且带 2 个版本按钮',
+     cop && Array.isArray(cop.variants) && cop.variants.length === 2,
      JSON.stringify(cop && cop.variants || null));
-  ck('copilot 系三张独立卡已消失',
-     !rows.some(x => x.key === 'wb-gateway-intl' || x.key === 'apk-codebuddy'),
+  ck('copilot 系（wb-gateway/wb-gateway-intl）不单独成卡',
+     !rows.some(x => x.key === 'wb-gateway' || x.key === 'wb-gateway-intl'),
      '');
-  ck('APK 卡带局域网反代说明',
-     (rows.find(x => x.key === 'apk-doubao') || {}).desc.indexOf('局域网反代') >= 0,
+  ck('APK 卡 desc 透传平台 hint',
+     (rows.find(x => x.key === 'apk-doubao') || {}).desc.indexOf('hd') >= 0,
      '');
   const doubao = rows.find(x => x.key === 'apk-doubao');
   ck('豆包卡已接入态（账号池有凭据）', doubao && doubao.logged === true, '');

@@ -661,7 +661,11 @@ function srcCatCounts(items){
   return m;
 }
 function setSrcCat(c){ SRC_CAT = c; render(); }
-function srcToggleMod(k){ SRC_MOD_OPEN[k] = !(SRC_MOD_OPEN[k] !== false); render(); }
+function srcToggleMod(k){
+  SRC_MOD_OPEN[k] = !(SRC_MOD_OPEN[k] !== false);
+  // ★ 2026-10-13：只局部换抽屉模型区，不整页 render()（点收起也闪）
+  srcPatch(k);
+}
 
 /** 懒拉某个源的模型清单（只有平台动作/内置表能给的才有），结果缓存在内存 */
 async function refreshSrcModels(pid){
@@ -673,19 +677,27 @@ async function refreshSrcModels(pid){
     S.data.srcModels[pid] = r.models || [];
     SRC_MOD_OPEN[pid] = true;
     toast('已获取 '+((r.models||[]).length)+' 个模型'+(r.live?'（实时清单）':'（内置清单）'), 'ok');
-    // ★ 2026-10-12（用户反馈「获取完模型后路由与模型页没更新」）：
-    //   后端已把拉取结果持久化，grouped 会消费 —— 这里立即重拉 grouped，
-    //   「路由与模型」页马上就能看到新清单。
-    if(typeof loadModels==='function') loadModels();
-    render();
+    // ★ 2026-10-13（用户三次反馈「点抽屉刷新模型界面就闪一下」）：
+    //   原先这里 loadModels()（内部 render() 整页重绘）+ 本函数末尾又 render()
+    //   一次，一帧内全量替换两次 innerHTML → 卡片墙连抽屉拆掉重建，就是「闪」。
+    //   现在：① grouped 后台静默更新（路由页切过去时 switchView→render 读新数据，
+    //   「路由与模型」页照样马上能看到新清单）；② 抽屉/卡片只局部替换（srcPatch）。
+    api('api/models?action=grouped').then(g=>{ if(g&&g.groups) S.data.grouped=g; }).catch(()=>{});
+    srcPatch(pid);
   }catch(e){ toast('拉取失败：'+e.message, 'err'); }
 }
 /** 删掉某个源下的一个账号 */
 async function delSrcAccount(id, name){
   if(!confirm('删除账号 '+(name||id)+' ？该操作只影响本机账号池。')) return;
   const r = await post('api/accounts?action=delete', {id});
-  toast(r.ok===false ? ('删除失败：'+(r.message||'')) : '已删除', r.ok===false?'err':'ok');
-  loadSources();
+  if(r.ok===false){ toast('删除失败：'+(r.message||''), 'err'); return; }
+  toast('已删除','ok');
+  // ★ 2026-10-13：删除后只局部刷新账号池 + 卡片/抽屉，不整页 render（不闪）
+  try{
+    const a2=await api('api/accounts');
+    if(a2&&a2.accounts){S.data.accounts=a2.accounts;S.data.accountStats=a2.stats||S.data.accountStats;}
+  }catch(e){}
+  if(SRC_EXPAND) srcPatch(SRC_EXPAND);
 }
 
 function srcFilter(list){
@@ -705,19 +717,26 @@ function srcCards(items){
   if(!items.length)
     return '<div class="empty">没有匹配的源，换个关键词或点「全部」</div>';
   let h='';
-  for(const s of items){
-    const on=!!s.logged;
-    const expanded = SRC_EXPAND===s.key;
-    // 「新建自定义 API」入口：需要独立表单，单独一行
-    if(s.custom_new){
-      h+='<div class="sr-row" onclick="openSrc(\'custom-new\')">'
-        +'<span class="sdot"></span>'
-        +'<div class="sr-name"><b>'+esc(s.name)+'</b>'
-        +'<span class="faint">'+esc(s.desc||'')+'</span></div>'
-        +'<button class="btn sm pri" onclick="event.stopPropagation();openSrc(\'custom-new\')">新建</button>'
-        +'</div>';
-      continue;
-    }
+  for(const s of items) h+=srcCardRow(s);
+  return h;
+}
+
+/** ★ 2026-10-13：单张卡片行的 HTML（从 srcCards 抽出）。
+ *  存在意义：srcPatch 局部替换用（row.outerHTML=srcCardRow(s)）——
+ *  整页 render() 的 $('#view').innerHTML 全量替换就是「点刷新界面闪一下」的根因。
+ *  data-sk = 卡片 key，srcPatch 靠它定位这一行。 */
+function srcCardRow(s){
+  const on=!!s.logged;
+  const expanded = SRC_EXPAND===s.key;
+  // 「新建自定义 API」入口：需要独立表单，单独一行
+  if(s.custom_new){
+    return '<div class="sr-row" onclick="openSrc(\'custom-new\')">'
+      +'<span class="sdot"></span>'
+      +'<div class="sr-name"><b>'+esc(s.name)+'</b>'
+      +'<span class="faint">'+esc(s.desc||'')+'</span></div>'
+      +'<button class="btn sm pri" onclick="event.stopPropagation();openSrc(\'custom-new\')">新建</button>'
+      +'</div>';
+  }
     // ★ 2026-10-12（用户实测截图：WorkBuddy 合并卡「账号 0」但明明已登录）：
     //   合并卡 key 是 'copilot'/'kimi'，账号池里存的是 variants 的 pid
     //   （wb-gateway/wb-gateway-intl）—— 按 s.key 过滤永远是 0。
@@ -736,27 +755,12 @@ function srcCards(items){
     const mods=lazy||(grp?grp.models:null);
     const modTot=mods?mods.length:0;
     const modOn=mods?mods.filter(m=>m.on!==false).length:0;
-    const quota=accts.map(a=>a.quota).filter(Boolean)[0]||'';
-    // ★ 2026-10-13：实时积分余额（顶层 balances 按卡片 key / variants pid 取；
-    //   apk-wps 等平台在 grouped 里没有模型分组，余额走顶层字典）
-    const _bals=((S.data.grouped||{}).balances)||{};
-    const bal=_bals[s.key] || (vpids.length ? (_bals[vpids[0]]||'') : '')
-             || (grp&&grp.balance)||'';
-    // ★ 2026-10-13：来源卡片补充积分倍率摘要（从模型清单里聚合）。
-    //   优先取账号 quota；没有账号 quota 时，若模型带 credits（如 WorkBuddy
-    //   在线目录），显示最小~最大倍率范围。
-    const creditNums=(mods||[]).map(m=>{
-      const s=String(m.credits||'');
-      const m2=s.match(/x?([0-9]+(?:\.[0-9]+)?)/);
-      return m2?parseFloat(m2[1]):NaN;
-    }).filter(v=>!isNaN(v)&&v>=0);
-    const creditHint=creditNums.length
-      ?('x'+Math.min(...creditNums).toFixed(2)+'~x'+Math.max(...creditNums).toFixed(2))
-      :'';
+    // ★ 2026-10-13（用户要求）：卡片外面不显示积分/倍率了 —— 账号的实时
+    //   积分余额改在抽屉详情里按账号行显示（见 srcDrawer）。
     // ★ 2026-10-12 终版（new-api 渠道列表范式）：所有源统一一行 ——
     //   两段式紧凑卡：上行=状态+名称+分类；下行=详情+账号+模型+积分+⟳。
     //   外层 .src-list 是 auto-fill 网格 —— 宽度/缩放不同，列数自动变。
-    h+='<div class="sr-row'+(on?' on':'')+(expanded?' open':'')+'" onclick="expandSrc(\''+esc(s.key)+'\')">'
+    return '<div class="sr-row'+(on?' on':'')+(expanded?' open':'')+'" data-sk="'+esc(s.key)+'" onclick="expandSrc(\''+esc(s.key)+'\')">'
       +'<div class="sr-top">'
       +'<span class="sdot'+(on?' ok':'')+'" title="'+(on?'已接入':'未接入')+'"></span>'
       +'<div class="sr-name">'
@@ -769,24 +773,33 @@ function srcCards(items){
       +'<button class="btn sm'+(on?'':' pri')+'" onclick="event.stopPropagation();expandSrc(\''+esc(s.key)+'\')">'+(expanded?'收起':(on?'详情':'接入'))+'</button>'
       +'<span class="sc-stat" title="账号数">账号 <b>'+accts.length+'</b></span>'
       +'<span class="sc-stat" title="模型（启用/总数）">模型 <b>'+(mods?(modOn+'/'+modTot):(s.models||0))+'</b></span>'
-      +(bal?'<span class="sc-stat" title="实时积分余额">积分 <b>'+esc(bal)+'</b></span>'
-        :(quota?'<span class="sc-stat" title="可用积分">积分 <b>'+esc(String(quota).slice(0,10))+'</b></span>':''))
-      +(creditHint?'<span class="sc-stat" title="模型积分范围（按 credits 倍率聚合）">积分 <b>'+esc(creditHint)+'</b></span>':'')
       +'<button class="btn sm gh" style="margin-left:auto" title="刷新账号状态与模型清单" onclick="event.stopPropagation();refreshSrcCard(\''+esc(s.key)+'\')">⟳</button>'
       +'</div>'
       +'</div>';
-  }
-  return h;
 }
 
-/** 右侧抽屉：某源的详情面（登录流程 + 账号 + 模型，new-api Drawer 范式）
- *  animate=false → 不加入场动画（轮询重绘时不能重播，否则每 2 秒闪一次） */
-function srcDrawer(s, animate){
-  const on=!!s.logged;
+/** 抽屉「账号区」HTML（独立块：srcPatch 局部替换用）。
+ *  刷新账号状态不再整页 render() —— 那是抽屉「闪一下」的根因。 */
+function srcAcctBoxHtml(s){
   // ★ 合并卡按 variants 的 pid 过滤（key 是 copilot/kimi，账号存 wb-gateway 等）
   const vpids=(s.variants||[]).map(v=>v.pid);
   const accts=(S.data.accounts||[]).filter(a=>
     vpids.length ? (vpids.indexOf(a.platform)>=0) : (a.platform===s.key));
+  return '<div class="sc-sect"><i>账号（'+accts.length+'）</i>'
+    +'<button class="btn sm gh" onclick="refreshSrcAccounts(\''+esc(s.key)+'\')">⟳ 刷新状态与积分</button></div>'
+    +'<div class="sc-sub">'+(accts.length?accts.map(a=>
+      '<div class="sc-row">'
+      +'<span class="mono" title="'+esc(a.name||'')+'">'+esc(a.name||a.platform)+'</span>'
+      +'<span class="faint">'+esc(a.secret||'')+(a.status&&a.status!=='unknown'?' · '+esc(a.status):'')+'</span>'
+      +(a.balance?'<span class="tag acc" title="实时积分余额（15 分钟缓存）">积分 '+esc(a.balance)+'</span>':'')
+      +'<button class="btn sm dgr" onclick="delSrcAccount(\''+esc(a.id)+'\',\''+esc(a.name||'')+'\')">删除</button>'
+      +'</div>').join(''):'<div class="faint" style="padding:6px 0;font-size:11.5px">还没有账号，完成上方登录后会自动出现在这里</div>')+'</div>';
+}
+
+/** 抽屉「模型区」HTML（独立块：srcPatch 局部替换用）。
+ *  拉取清单 / 收起展开只换这块，不整页 render()。 */
+function srcModBoxHtml(s){
+  const vpids=(s.variants||[]).map(v=>v.pid);
   const grp=((S.data.grouped||{}).groups||[]).find(gr=>
     vpids.length ? (vpids.indexOf(gr.pid)>=0) : (gr.pid===s.key));
   // ★ 2026-10-13：与 srcCards 同键修复 —— 按 s.key 读（拉取时按它存）
@@ -795,12 +808,48 @@ function srcDrawer(s, animate){
   const mods=lazy||(grp?grp.models:null);
   const modOn=mods?mods.filter(m=>m.on!==false).length:0;
   const modTot=mods?mods.length:0;
-  // ★ 2026-10-13：实时积分（顶层 balances 优先，回落分组自带）
-  const _bals=((S.data.grouped||{}).balances)||{};
-  const bal=_bals[s.key] || (vpids.length ? (_bals[vpids[0]]||'') : '')
-           || (grp&&grp.balance)||'';
   // ★ 2026-10-13（用户要求）：模型清单默认展开，点「收起清单」才折起来
   const modOpen = SRC_MOD_OPEN[s.key] !== false;
+  return '<div class="sc-sect"><i>模型（'+modOn+'/'+modTot+'）</i>'
+    +(mods?'<button class="btn sm gh" onclick="srcToggleMod(\''+esc(s.key)+'\')">'+(modOpen?'收起清单':'展开清单')+'</button>'
+          :'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">拉取清单</button>')
+    +'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">⟳ 刷新</button></div>'
+    +((modOpen&&mods)?'<div class="sc-sub">'+mods.slice(0,40).map(m=>
+      '<div class="sc-row" title="'+(m.ctx?('上下文 '+Number(m.ctx).toLocaleString()+' / '):'')+(m.out?('输出 '+Number(m.out).toLocaleString()):'')+'">'
+      +'<span class="mono">'+esc(m.id)+'</span>'
+      +'<span class="faint" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.name||'')+'</span>'
+      +(m.credits?'<span class="tag acc" title="积分倍率">'+esc(gmCred(m.credits))+'</span>':'<span class="faint">—</span>')
+      +'</div>').join('')+'</div>':'');
+}
+
+/** ★ 2026-10-13（用户三次反馈「点抽屉里的刷新模型，界面就闪一下」）：
+ *  局部补丁 —— 所有抽屉内刷新（模型/账号/删除/卡片⟳）只走这里，
+ *  **不再整页 render()**。根因：render() 是 $('#view').innerHTML 整页替换，
+ *  卡片墙连抽屉一起拆掉重建，看着就是「闪一下」；且 refreshSrcModels 原先
+ *  loadModels() 内部 render() + 函数末尾 render() 一帧内闪两次。
+ *  只换：① 卡片行（账号数/模型数/接入态）② 抽屉账号区 ③ 抽屉模型区。
+ *  登录面板不碰（输入框焦点、扫码轮询都不受影响），抽屉动画不重播。 */
+function srcPatch(pid){
+  const s=sourceList().find(x=>x.key===pid);
+  if(!s) return;
+  // 1) 卡片行（被搜索词过滤掉时 row 为 null，只补抽屉）
+  try{
+    const row=document.querySelector('.sr-row[data-sk="'+pid.replace(/"/g,'\\"')+'"]');
+    if(row) row.outerHTML=srcCardRow(s);
+  }catch(e){}
+  // 2) 抽屉两个区（开着才补；API 类源抽屉没有这两个盒，自然落空）
+  if(SRC_EXPAND===pid){
+    const ab=document.getElementById('srcAcctBox');
+    if(ab) ab.innerHTML=srcAcctBoxHtml(s);
+    const mb=document.getElementById('srcModBox');
+    if(mb) mb.innerHTML=srcModBoxHtml(s);
+  }
+}
+
+/** 右侧抽屉：某源的详情面（登录流程 + 账号 + 模型，new-api Drawer 范式）
+ *  animate=false → 不加入场动画（轮询重绘时不能重播，否则每 2 秒闪一次） */
+function srcDrawer(s, animate){
+  const on=!!s.logged;
   let body='';
   // ★ 2026-10-12（用户反馈：公益中转站等 api_key 平台也被迫「先点接入再粘贴」，
   //   与开放平台 API 的「直接输入 Key」不一致，多此一举）：直接输入 Key 的判定
@@ -825,26 +874,11 @@ function srcDrawer(s, animate){
       +'</div></div>'
       +'</div>';
   }else{
+    // ★ 2026-10-13：账号区/模型区各自包一层带 id 的盒（srcAcctBox/srcModBox），
+    //   srcPatch 局部替换这两块的 innerHTML 即可，不用整页 render()（不闪）。
     body=srcLoginPanel(s, true)
-      +'<div class="sc-sect"><i>账号（'+accts.length+'）</i>'
-      +(bal?'<span class="tag acc" title="实时积分余额（15 分钟缓存）">积分 '+esc(bal)+'</span>':'')
-      +'<button class="btn sm gh" onclick="refreshSrcAccounts(\''+esc(s.key)+'\')">⟳ 刷新状态</button></div>'
-      +'<div class="sc-sub">'+(accts.length?accts.map(a=>
-        '<div class="sc-row">'
-        +'<span class="mono" title="'+esc(a.name||'')+'">'+esc(a.name||a.platform)+'</span>'
-        +'<span class="faint">'+esc(a.secret||'')+(a.status&&a.status!=='unknown'?' · '+esc(a.status):'')+'</span>'
-        +'<button class="btn sm dgr" onclick="delSrcAccount(\''+esc(a.id)+'\',\''+esc(a.name||'')+'\')">删除</button>'
-        +'</div>').join(''):'<div class="faint" style="padding:6px 0;font-size:11.5px">还没有账号，完成上方登录后会自动出现在这里</div>')+'</div>'
-      +'<div class="sc-sect"><i>模型（'+modOn+'/'+modTot+'）</i>'
-      +(mods?'<button class="btn sm gh" onclick="srcToggleMod(\''+esc(s.key)+'\')">'+(modOpen?'收起清单':'展开清单')+'</button>'
-            :'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">拉取清单</button>')
-      +'<button class="btn sm gh" onclick="refreshSrcModels(\''+esc(s.key)+'\')">⟳ 刷新</button></div>'
-      +((modOpen&&mods)?'<div class="sc-sub">'+mods.slice(0,40).map(m=>
-        '<div class="sc-row" title="'+(m.ctx?('上下文 '+Number(m.ctx).toLocaleString()+' / '):'')+(m.out?('输出 '+Number(m.out).toLocaleString()):'')+'">'
-        +'<span class="mono">'+esc(m.id)+'</span>'
-        +'<span class="faint" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.name||'')+'</span>'
-        +(m.credits?'<span class="tag acc" title="积分倍率">'+esc(gmCred(m.credits))+'</span>':'<span class="faint">—</span>')
-        +'</div>').join('')+'</div>':'');
+      +'<div id="srcAcctBox">'+srcAcctBoxHtml(s)+'</div>'
+      +'<div id="srcModBox">'+srcModBoxHtml(s)+'</div>';
   }
   return '<div class="sc-mask" onclick="closeSrcPop()"></div>'
     +'<div class="sc-drawer'+(animate?'':' no-anim')+'" onclick="event.stopPropagation();">'
@@ -865,16 +899,32 @@ function closeSrcPop(){
 /** 卡片 ⟳：统一刷新 —— 账号状态 + 平台态；该平台拉过模型清单的话连模型一起刷 */
 async function refreshSrcCard(pid){
   toast('正在刷新 '+pid+' …');
-  await loadSources();
-  if((S.data.srcModels||{})[pid]) await refreshSrcModels(pid);
-  else toast('已刷新','ok');
+  try{
+    // ★ 2026-10-13：不再 loadSources()（它末尾 render() 整页重绘，抽屉开着也闪）。
+    //   只拉账号池 + grouped 进 S.data，再走 srcPatch 局部补丁。
+    const [ac,gr]=await Promise.all([
+      api('api/accounts').catch(()=>null),
+      api('api/models?action=grouped').catch(()=>null),
+    ]);
+    if(ac&&ac.accounts){S.data.accounts=ac.accounts;S.data.accountStats=ac.stats||S.data.accountStats;}
+    if(gr&&gr.groups)S.data.grouped=gr;
+    srcPatch(pid);
+    if((S.data.srcModels||{})[pid]) await refreshSrcModels(pid);
+    else toast('已刷新','ok');
+  }catch(e){ toast('刷新失败：'+e.message,'err'); }
 }
 
-/** 刷新某个源的账号状态（轻量：只重拉账号与平台态，不动模型） */
+/** 刷新某个源的账号状态（refresh=1 让后端绕过 TTL 强刷各账号积分余额） */
 async function refreshSrcAccounts(pid){
-  toast('正在刷新账号状态…');
-  await loadSources();
-  toast('账号状态已刷新','ok');
+  toast('正在刷新账号状态与积分…');
+  try{
+    const r=await api('api/accounts',{refresh:1});
+    if(r&&r.accounts){S.data.accounts=r.accounts;S.data.accountStats=r.stats||S.data.accountStats;}
+  }catch(e){}
+  // ★ 2026-10-13：不再 loadSources()（末尾 render() 整页重绘 → 抽屉闪一下）。
+  //   账号数据已进 S.data，srcPatch 局部刷新抽屉账号区 + 卡片即可。
+  srcPatch(pid);
+  toast('账号状态与积分已刷新','ok');
 }
 
 /** 保存 API Key 并获取模型（从抽屉 URL/Key 输入框读取） */
@@ -2401,8 +2451,10 @@ function chart(pts){
 /** 模型总表数据（按来源分组，含每模型连接测试） */
 async function loadModels(){
   const g=await api('api/models?action=grouped').catch(()=>null);
-  S.data.grouped=g;
-  render();
+  if(g) S.data.grouped=g;
+  // ★ 2026-10-13：只有当前在路由页才需要立即重绘；在接入源页时整页 render
+  //   就是「刷新模型闪一下」的根因之一（grouped 已进 S.data，切页自更新）。
+  if(S.v==='route') render();
 }
 function panelBaseUrl(){
   const u=location.origin||'';
