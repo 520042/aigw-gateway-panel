@@ -747,6 +747,30 @@ class LoginSession:
                 self.result = result
 
 
+def _norm_cookie_text(cookie):
+    """规范化用户粘贴的 Cookie 文本。
+
+    用户按「F12 → Network → Request Headers」复制时，常见三种脏数据：
+      · 连 `cookie:` 前缀一起复制（最常见）
+      · 多行粘贴（Request Headers 整块复制时带上换行）
+      · 首尾带引号（从 JSON / 日志里抠出来的片段）
+    原样送进验活必然 401，用户视角就是「已登录，无法识别」（2026-10-13 实拍）。
+    """
+    if not cookie:
+        return ""
+    s = str(cookie).strip()
+    if s[:1] in ('"', "'") and s[-1:] == s[:1] and len(s) >= 2:
+        s = s[1:-1]
+    if s[:7].lower() == "cookie:":
+        s = s[7:].lstrip()
+    # 多行 → 单行（header 块复制时换行分隔的其它头会以 "x: y" 形态混入，
+    # 只保留含 = 且不像 "头名: 值" 的段太复杂——直接压成空格后再按 ; 切，
+    # 由 verify 侧决定哪些段可用）
+    s = s.replace("\r", "\n")
+    s = "; ".join(p.strip() for p in s.split("\n") if p.strip())
+    return s.strip().strip(";").strip()
+
+
 def _mask(res):
     """对外隐藏完整密钥，只留可辨识的指纹。
 
@@ -2022,10 +2046,11 @@ class LoginManager:
             except Exception as e:
                 _why = "读取失败：%s" % e
             with sess.lock:
-                sess.message = ("还没检测到登录态（%s）。若已在浏览器标签页登录成功，"
-                                "再点一次「我已登录，立即获取」；"
-                                "Chrome 127+ 的 Cookie 有加密保护、面板可能读不到，"
-                                "这时请直接把 Cookie 粘贴到下方。" % str(_why)[:80])
+                sess.message = ("还没自动检测到登录态（%s）。本机 Chrome/Edge 127+ "
+                                "的 Cookie 是 app-bound 加密，面板读不出来是正常的——"
+                                "请在浏览器标签页里确认已登录，然后 F12 → Network → "
+                                "任选一个请求 → Request Headers → 把 cookie: 整行"
+                                "复制到下方粘贴框，点「提交」。" % str(_why)[:60])
             return
         # ★ 2026-10-12（用户实测「没登录却显示登录成功」的真凶）：
         #   这条轮询路径原来**自己拼凭据串**（Cookie + __ls_ 原样合并），
@@ -2116,14 +2141,31 @@ class LoginManager:
         """
         if sess.status == "success":
             return True
+        # ★ 2026-10-13：用户从 F12 → Network → Request Headers 复制时，常把
+        #   `cookie:` 前缀、换行、首尾引号一起带进来。原样送验活必然失败，
+        #   用户视角就是「已登录，无法识别」。这里先规范化再验。
+        cookie = _norm_cookie_text(cookie)
         okk, info = verify_cookie(spec, cookie)
         if not okk:
             if strict:
-                sess.finish("error", "Cookie 已取得但未通过登录校验", info)
+                # ★ 2026-10-13：别只甩一句「未通过校验」—— 用户不知道下一步。
+                #   手动粘贴失败的三大常见原因写全，让人能自己排查。
+                sess.finish("error",
+                            "提交的凭据未通过登录校验（%s）。请确认："
+                            "① 是在该平台**已登录**的浏览器里复制的；"
+                            "② 复制的是完整 cookie（F12 → Network → 任选一个请求 "
+                            "→ Request Headers → cookie: 整行）；"
+                            "③ 登录态没有过期（换个页面刷新后再复制一次）。"
+                            % str(info)[:80], "verify_failed")
                 return False
             with sess.lock:
-                sess.message = ("已检测到凭据但登录校验未通过（%s），"
-                                "请继续完成扫码登录" % info)
+                if cookie:
+                    sess.message = ("自动读取到的 Cookie 未通过登录校验（%s）——"
+                                    "它可能是旧的/匿名登录态。请在下方粘贴框里贴入"
+                                    "浏览器里登录后的 Cookie。" % str(info)[:60])
+                else:
+                    sess.message = ("已检测到凭据但登录校验未通过（%s），"
+                                    "请继续完成扫码登录" % info)
             return False
         # ★ 从 Cookie 中提取指定键作为最终 secret（如 web-glm 需要从完整Cookie
         #   里抽出 chatglm_refresh_token 单独存，后端 relay 用它换 access_token）
@@ -2151,8 +2193,13 @@ class LoginManager:
         return True
 
     def _finish_cookie(self, sess, spec, cookie, source=""):
-        # 防止「看守线程自动捕捉」与「前端手动点已登录」重复落库
-        self._verify_and_finish(sess, spec, cookie, source, strict=True)
+        # 防止「看守线程自动捕捉」与「前端手动点已登录」重复落库。
+        # ★ 2026-10-13：只有**手动粘贴**才 strict（失败即报错踢回）——
+        #   自动读取（browser_cookie 直读 / 看守线程捕捉）拿到过期或匿名
+        #   Cookie 时不能杀会话：用户还得靠这个会话里的粘贴框补救，
+        #   杀掉会话＝粘贴框一起消失（用户实拍「无 cookie 填入框」）。
+        manual = ("手动" in (source or "")) or ("粘贴" in (source or ""))
+        self._verify_and_finish(sess, spec, cookie, source, strict=manual)
 
     # ---------------------------------------------------------- 扫码看守线程
     def _watch_cookie(self, sess, spec, b, timeout=240):

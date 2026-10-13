@@ -65,5 +65,19 @@ const ra2=panel('apk-raccoon');
 ck('本平台会话活跃时显示登录会话区（打开授权页/取消）',ra2.includes('登录会话')&&ra2.includes('取消'));
 ck('本平台会话活跃时不重复渲染接入按钮组',!ra2.includes('接入并打开登录页'));
 
+// ★ 2026-10-13（图2 实拍「已登录，无法识别，且无 cookie 填入框」）：compact 会话
+//   内必须有无条件渲染的手动粘贴框。本机 Chrome 127+ app-bound 加密使自动读取
+//   必然失败，粘贴框是唯一可靠回收路径；旧实现限定 !compact 把它藏掉了。
+ck('compact 会话内渲染 Cookie 粘贴框（manualCookie_<pid>）',
+  ra2.includes('manualCookie_apk-raccoon'));
+ck('compact 会话内渲染「提交 Cookie」按钮',ra2.includes('提交Cookie'));
+
+// 同理 token 类（copilot 原生 / Trae / Loomy）在 compact 会话内也要有粘贴框
+S.data.loginSession={id:'s3',platform:'wb-gateway',platform_name:'WorkBuddy 国内站',
+  method:'qrcode',status:'waiting',message:'请在浏览器粘贴 accessToken',auth_url:'',seconds_left:120};
+const wbg=srcLoginPanel({key:'wb-gateway',method:'qrcode',name:'WorkBuddy 国内站',logged:false},true);
+ck('token 类会话内渲染 Token 粘贴框（manualSecret_wb-gateway）',
+  wbg.includes('manualSecret_wb-gateway')&&wbg.includes('提交Token'));
+
 console.log('\n失败 '+fail+' 项');
 process.exit(fail?1:0);

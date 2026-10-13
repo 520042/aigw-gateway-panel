@@ -48,9 +48,10 @@ class Store:
             #   只从硬编码 paths 加载，导致重启后动态注册丢失、文件存在却读不到，
             #   用户看到的永远是内置/静态老数据。这里显式注册并给默认值。
             "platform_models": os.path.join(data_dir, "platform_models.json"),
-            # 接入源卡片「实时积分」余额缓存（pid → {value, ts}，15 分钟 TTL）。
-            #   与 platform_models 同理：必须注册进 paths，否则重启后读不到。
-            "platform_balances": os.path.join(data_dir, "platform_balances.json"),
+            # 接入源抽屉「账号实时积分余额」缓存（account_id → {value, ts}，
+            # 15 分钟 TTL）。与 platform_models 同理：必须注册进 paths，
+            # 否则重启后读不到。
+            "account_balances": os.path.join(data_dir, "account_balances.json"),
             # 面板侧用量事件（原生中继/路由调用，保留 90 天）
             "usage_events": os.path.join(data_dir, "usage_events.json"),
         }
@@ -93,8 +94,8 @@ class Store:
             "disabled_models": [],
             # 接入源页各平台「拉取清单」的缓存（pid → {models, live, ts}）
             "platform_models": {},
-            # 接入源卡片「实时积分」余额缓存（pid → {value, ts}）
-            "platform_balances": {},
+            # 接入源抽屉各账号「实时积分余额」缓存（account_id → {value, ts}）
+            "account_balances": {},
             "autocheckin": {},   # 实际默认值在 app/autocheckin.DEFAULT_CFG
             "toolcall": {},
             "usage_events": [],  # 面板侧用量事件（原生中继/路由调用，90 天剪枝）

@@ -695,6 +695,66 @@ def _lobster_base():
         return ""
 
 
+# 订阅反代平台的静态模型清单（业界熟知标识；网关实时代理就用这些）。
+# ★ 2026-10-13：这些平台（Kimi/Codex/Claude/Grok/Antigravity/Devin/Meta）
+#   是 OAuth 订阅登录，没有「模型列表」动作，此前在 platform_models 里落到了
+#   no_models_action 硬错误 —— 用户看到的「获取不到模型」多半就是它们。
+#   给一份与社区 CLIProxyAPI / 反代项目对齐的静态标识表，网关按此实时代理。
+_SUBSCRIPTION_MODELS = {
+    "sub-kimi": [
+        {"id": "kimi-k2", "name": "Kimi K2"},
+        {"id": "kimi-k2-0905-preview", "name": "Kimi K2 0905"},
+        {"id": "kimi-latest", "name": "Kimi Latest"},
+    ],
+    "sub-kimi-ai": [
+        {"id": "kimi-k2", "name": "Kimi K2"},
+        {"id": "kimi-latest", "name": "Kimi Latest"},
+    ],
+    "sub-codex": [
+        {"id": "gpt-4o", "name": "GPT-4o"},
+        {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+        {"id": "o1", "name": "o1"},
+        {"id": "o1-mini", "name": "o1 Mini"},
+    ],
+    "sub-claude": [
+        {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet"},
+        {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku"},
+        {"id": "claude-3-opus-20240229", "name": "Claude 3 Opus"},
+    ],
+    "sub-grok": [
+        {"id": "grok-3", "name": "Grok 3"},
+        {"id": "grok-3-mini", "name": "Grok 3 Mini"},
+        {"id": "grok-2", "name": "Grok 2"},
+    ],
+    "sub-antigravity": [
+        {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash"},
+        {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash"},
+    ],
+    "sub-devin": [
+        {"id": "devin", "name": "Devin"},
+    ],
+    "sub-meta": [
+        {"id": "meta-llama/llama-3.1-405b-instruct", "name": "Llama 3.1 405B"},
+        {"id": "meta-llama/llama-3.3-70b-instruct", "name": "Llama 3.3 70B"},
+    ],
+}
+_SUB_NAME = {
+    "sub-kimi": "Kimi Code 国内站", "sub-kimi-ai": "Kimi Code 国际站",
+    "sub-codex": "OpenAI Codex", "sub-claude": "Anthropic Claude Code",
+    "sub-grok": "xAI Grok", "sub-antigravity": "Google Antigravity",
+    "sub-devin": "Devin", "sub-meta": "Meta Muse",
+}
+
+
+def _subscription_models(pid):
+    return _SUBSCRIPTION_MODELS.get(pid)
+
+
+def _subscription_name(pid):
+    return _SUB_NAME.get(pid)
+
+
 def _gw_alive():
     """网关存活缓存（5s TTL / 2s 短超时）。
 
@@ -1733,11 +1793,32 @@ def api_models(action=None, body=None):
 
         spec = gwextra.action_spec(pid, "models")
         if not spec:
-            return fail("平台 %s 的模型清单由它 APK 内的本地网关（运行在手机 "
-                        "127.0.0.1）在运行时提供，面板无法直连手机端点；"
-                        "静态提取结果已内置的会直接显示，未内置的可在"
-                        "「拉取线上倍率」或登录后探测" % pid,
-                        code="no_models_action")
+            # ★ 2026-10-13（用户实拍「获取不到模型」）：原来这里甩一句
+            #   「模型清单由它 APK 内的本地网关…」硬错误，对订阅反代平台
+            #   （sub-*）和没配 models 动作的平台完全是误导。改为分级兜底：
+            #   ① 订阅 OAuth 平台（Kimi/Codex/Claude/Grok/Antigravity/Devin/Meta）
+            #      有业界熟知的模型标识，直接给静态清单（网关实时代理用这一个）；
+            #   ② 原生中继规格里声明了 models_static 的，用那个；
+            #   ③ 都没有 → 返回空表 + 友好说明，不再抛「no_models_action」硬错。
+            _static = _subscription_models(pid)
+            if not _static:
+                try:
+                    from app import native_relay as NRZ
+                    _fs = NRZ.relay_of(pid) or {}
+                    _static = _fs.get("models_static") or []
+                except Exception:
+                    _static = []
+            if _static:
+                return _ret({"platform": pid,
+                           "name": _subscription_name(pid) or pid,
+                           "models": _static, "live": False,
+                           "note": "静态清单（%d 个）：该平台为订阅反代 / 原生中继，"
+                                   "登录后由网关按此标识实时代理" % len(_static)})
+            return ok({"platform": pid, "name": pid, "models": [],
+                       "live": False,
+                       "note": "该平台没有公开模型列表接口；登录后由网关按上游"
+                               "实际可用标识实时代理，无需在此勾选。"})
+
         okk, data = gwextra.call(acc, pid, "models", {},
                                  base_override=_lobster_base())
         if not okk:

@@ -1612,10 +1612,27 @@ async function submitDirectPaste(pid, type){
   }
 }
 
+/** Loomy 手机号归一化（与后端 app/loomy_client.py norm_phone 同规则）：
+ *  剥 +86/86 前缀、空格、横线、括号；^1[3-9]\d{9}$ 校验。
+ *  不合法就原地 toast，别发请求 —— 账号服务对非法号段只回笼统的
+ *  「请求参数错误」（010003），用户看不出是手机号写错（2026-10-13 实拍）。 */
+function normLoomyPhone(raw){
+  let s=(raw||'').replace(/[\s\-()（）]+/g,'');
+  if(s.indexOf('+86')===0)s=s.slice(3);
+  else if(s.indexOf('0086')===0)s=s.slice(4);
+  else if(s.indexOf('86')===0&&s.length===13)s=s.slice(2);
+  return s;
+}
+function loomyPhoneOk(s){ return /^1[3-9]\d{9}$/.test(s); }
+
 /** Loomy 短信登录三步（签名 API，免浏览器） */
 async function loomySendSms(key){
-  const phone=document.getElementById('loomyPhone_'+key).value.trim();
+  const phone=normLoomyPhone(document.getElementById('loomyPhone_'+key).value);
+  document.getElementById('loomyPhone_'+key).value=phone;
   if(!phone){ toast('请先输入手机号','warn'); return; }
+  if(!loomyPhoneOk(phone)){
+    toast('手机号格式不正确：请填 11 位大陆手机号（可带 +86 前缀）','err'); return;
+  }
   toast('正在发送验证码…');
   const r=await post('api/login?action=loomy_sms_send',{phone});
   if(r.ok && r.msgid){
@@ -1626,19 +1643,24 @@ async function loomySendSms(key){
   }
 }
 async function loomySmsVerify(key){
-  const phone=document.getElementById('loomyPhone_'+key).value.trim();
+  const phone=normLoomyPhone(document.getElementById('loomyPhone_'+key).value);
   const code=document.getElementById('loomyCode_'+key).value.trim();
   const msgid=document.getElementById('loomyMsgid_'+key).value.trim();
   if(!phone||!code||!msgid){ toast('请先填手机号并获取验证码','warn'); return; }
+  if(!loomyPhoneOk(phone)){ toast('手机号格式不正确','err'); return; }
   toast('正在登录…');
   const r=await post('api/login?action=loomy_sms_verify',{phone,code,msgid});
   if(r.ok){ toast('Loomy 登录成功','ok'); await loadSources(); }
   else toast(r.message||r.error||'登录失败','err');
 }
 async function loomyPwdLogin(key){
-  const phone=document.getElementById('loomyPwdPhone_'+key).value.trim();
+  const phone=normLoomyPhone(document.getElementById('loomyPwdPhone_'+key).value);
+  document.getElementById('loomyPwdPhone_'+key).value=phone;
   const pwd=document.getElementById('loomyPwd_'+key).value.trim();
   if(!phone||!pwd){ toast('请填手机号和密码','warn'); return; }
+  if(!loomyPhoneOk(phone)){
+    toast('手机号格式不正确：请填 11 位大陆手机号（可带 +86 前缀）','err'); return;
+  }
   toast('正在登录…');
   const r=await post('api/login?action=loomy_pwd',{phone,password:pwd});
   if(r.ok){ toast('Loomy 登录成功','ok'); await loadSources(); }
@@ -3649,12 +3671,24 @@ async function pollCookieOnce(){
   }
 }
 
-async function submitManualCookie(){
+/** 规范化用户粘贴的 Cookie：
+ *  · F12 → Network → Copy Request Headers 常连 `cookie:` 前缀一起复制进来；
+ *  · 也有人把整行 "cookie: a=1; b=2" 或带引号的 JSON 片段粘进来。
+ *  这里统一剥成 `a=1; b=2`，否则后端 verify 必然失败（用户视角＝"已登录无法识别"）。 */
+function normCookieText(v){
+  let s=(v||'').trim();
+  if(/^cookie\s*:/i.test(s))s=s.replace(/^cookie\s*:\s*/i,'');
+  // 去掉换行（多行粘贴）与首尾引号
+  s=s.replace(/[\r\n]+/g,'; ').replace(/^["']|["']$/g,'').trim();
+  return s;
+}
+
+async function submitManualCookie(pid){
   const s=S.data.loginSession;
-  const box=$('#manualCookie');
-  const v=box?box.value.trim():'';
+  pid=pid||(s?s.platform:'');
+  const box=pid?$('#manualCookie_'+pid):$('#manualCookie');
+  const v=normCookieText(box?box.value:'');
   if(!v){toast('请先粘贴 Cookie','err');return;}
-  const pid=s?s.platform:(($('#manualPlatform')||{}).value||'');
   if(!pid){toast('缺少平台','err');return;}
   const r=await api('api/login?action=submit',
     {id:s?s.id:undefined,platform:pid,cookie:v}).catch(e=>({ok:false,message:e.message}));
@@ -3662,27 +3696,30 @@ async function submitManualCookie(){
   if(r.session){
     S.data.loginSession=r.session;
     paintLoginSession();
-    if(r.session.status==='success'){toast('已保存','ok');loadLogin();}
+    if(r.session.status==='success'){toast('已保存','ok');loadLogin();loadSources();}
     else toast(r.session.message||r.session.error||'未通过校验','warn');
-  }else{toast('已保存','ok');loadLogin();}
+  }else{toast('已保存','ok');loadLogin();loadSources();}
 }
 
-async function submitManualSecret(){
+async function submitManualSecret(pid,type){
   const s=S.data.loginSession;
-  const box=$('#manualSecret');
-  const v=box?box.value.trim():'';
+  pid=pid||(s?s.platform:'');
+  const box=pid?$('#manualSecret_'+pid):$('#manualSecret');
+  let v=(box?box.value:'').trim();
+  // Token 类粘贴同样可能带 `Authorization: Bearer ` 前缀 / 换行
+  v=v.replace(/^authorization\s*:\s*bearer\s+/i,'').replace(/[\r\n]+/g,'').trim();
   if(!v){toast('请先粘贴凭据内容','err');return;}
-  const pid=s?s.platform:'';
   if(!pid){toast('缺少平台','err');return;}
   const r=await api('api/login?action=submit',
-    {id:s?s.id:undefined,platform:pid,secret:v}).catch(e=>({ok:false,message:e.message}));
+    {id:s?s.id:undefined,platform:pid,secret:v,type:type||'token'})
+    .catch(e=>({ok:false,message:e.message}));
   if(r.ok===false){toast(r.message||'保存失败','err');return;}
   if(r.session){
     S.data.loginSession=r.session;
     paintLoginSession();
-    if(r.session.status==='success'){toast('已保存','ok');loadLogin();}
+    if(r.session.status==='success'){toast('已保存','ok');loadLogin();loadSources();}
     else toast(r.session.message||r.session.error||'未通过校验','warn');
-  }else{toast('已保存','ok');loadLogin();}
+  }else{toast('已保存','ok');loadLogin();loadSources();}
 }
 
 async function delAccount(id){
@@ -4299,30 +4336,53 @@ function viewLoginSession(onlyPid, compact){
     }
     h+='<button class="btn dgr n" onclick="cancelLogin()">取消</button>';
     h+='</div></div>';
-    // ★ 2026-10-12：cookie/file 的会话内粘贴框在 compact（内联卡片）模式下
-    //   不再重复渲染 —— 下方「方式二」就是同一功能，两处同时出现即冗余。
-    //   pkce/lobster 的授权码输入保留（那是完成登录的必要入口）。
-    if(sess.method==='cookie' && !compact){
-      const dg=S.data.browserDiag;
-      let tip='自动获取会被浏览器加密策略挡住时，可直接粘贴 Cookie'
-        +'（浏览器 F12 → Network → 复制 Request Headers 里的 cookie）';
-      if(dg){
-        tip=(dg.auto_supported
-          ? '本机浏览器可直接读取 Cookie（'+esc(dg.reason)+'）'
-          : '⚠ '+esc(dg.reason));
+    // ★★★ 2026-10-13（用户截图实锤：「已登录，无法识别，且无 cookie 填入框」）：
+    //   原实现把手动粘贴框限定在 `!compact` —— 而接入源抽屉正是 compact 模式，
+    //   会话一活跃（waiting）本平台的粘贴框就整个消失；偏偏「只开标签」模式下
+    //   「我已登录，立即获取」走 browser_cookie 直读，Chrome 127+ app-bound
+    //   加密（v20）在 app/browser_cookie.py decrypt_value 里直接返空
+    //   （本机 diagnose 实测：auto_supported=False）→ 自动读取必然失败。
+    //   → 粘贴框必须**无条件渲染**（compact 也渲染）：它是「只开标签」模式下
+    //     唯一可靠的凭据回收路径，也是所有 xxxx2api 社区反代项目的标准姿势
+    //     （doubao-free-api / yuanbao-chat2api 等全是手动粘贴 Cookie）。
+    //   element id 带 pid 后缀，避免多个抽屉同页渲染时 id 撞车。
+    //   pkce / google / lobster 有自己的 code 输入框（下面单独渲染），不重复摆。
+    const _pp=(S.data.loginPlatforms||[]).find(p=>p.id===sess.platform)||{};
+    const _pm=_pp.method||sess.method;
+    const _ptype=_pp.paste_type||(_pm==='cookie'?'cookie':_pm==='file'?'api_key':'token');
+    const _pkind=_pm==='cookie'?'Cookie'
+      :(_pm==='file'?(_ptype==='token'?'Token':'API Key / Token')
+      :(_pm==='loomy'?'session':'Token'));
+    const _ph2=_pp.placeholder
+      ||(_pm==='cookie'
+        ?'粘贴 Cookie（浏览器 F12 → Network → 任选一个请求 → Request Headers 里 cookie: 整行复制）'
+        :('粘贴 '+_pkind+'…'));
+    if(sess.method!=='oauth_pkce'&&sess.method!=='oauth_google'
+       &&sess.method!=='oauth_lobster'){
+      const _isCk=(_ptype==='cookie');
+      const _boxId=(_isCk?'manualCookie_':'manualSecret_')+esc(sess.platform);
+      const _btn=_isCk
+        ?('submitManualCookie(\''+esc(sess.platform)+'\')')
+        :('submitManualSecret(\''+esc(sess.platform)+'\',\''+esc(_ptype)+'\')');
+      let _tip=_isCk
+        ?('自动读取被浏览器加密策略挡住时，直接粘贴 Cookie'
+          +'（浏览器 F12 → Network → 复制 Request Headers 里的 cookie）')
+        :('把登录后拿到的 '+_pkind+'粘贴到这里（浏览器 F12 → Network / Application 里找）');
+      if(_isCk&&S.data.browserDiag){
+        const dg=S.data.browserDiag;
+        _tip=(dg.auto_supported
+          ?'本机浏览器可直接读取 Cookie（'+esc(dg.reason)+'）'
+          :'⚠ '+esc(dg.reason));
       }
-      h+='<div style="margin-top:12px"><div class="faint" style="margin-bottom:5px">'+tip+'</div>'
-        +'<textarea id="manualCookie" rows="3" placeholder="粘贴 Cookie，例如 sessionid=xxx; passport_csrf_token=yyy" '
-        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
-        +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualCookie()">提交 Cookie</button></div>';
-    }
-    if(sess.method==='file' && !compact){
-      const ph=(S.data.loginPlatforms||[]).find(p=>p.id===sess.platform);
-      const placeholder=(ph&&ph.placeholder)||'粘贴 API Key 或 refresh_token';
-      h+='<div style="margin-top:12px">'
-        +'<textarea id="manualSecret" rows="4" placeholder="'+esc(placeholder)+'" '
-        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:monospace;font-size:12px"></textarea>'
-        +'<button class="btn pri sm" style="margin-top:6px" onclick="submitManualSecret()">提交凭据</button></div>';
+      h+='<div style="margin-top:12px"><div class="faint" style="margin-bottom:5px">'+_tip+'</div>'
+        +'<textarea id="'+_boxId+'" rows="3" placeholder="'+esc(_ph2)+'" '
+        +'style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;'
+        +'font-family:monospace;font-size:12px"></textarea>'
+        +'<div class="row n" style="margin-top:6px;gap:8px">'
+        +'<button class="btn pri sm" onclick="'+_btn+'">提交'+esc(_pkind)+'</button>'
+        +'<span class="faint" style="font-size:11.5px;align-self:center">'
+        +'提交后面板会在线校验，通过即入库</span>'
+        +'</div></div>';
     }
     // oauth_pkce（Codex/Claude/Devin）与 oauth_google（Antigravity）都是
     // 「授权 URL → 地址栏跳 localhost 回调 → 复制 code 回来」的同款流程，
