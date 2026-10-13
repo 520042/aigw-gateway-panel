@@ -513,8 +513,12 @@ function sourceList(){
     });
   }
   
-  // 3) 可登录的平台 —— WorkBuddy 国内/国际两张卡合并成一张
-  const COPILOT_IDS={'wb-gateway':'国内站','wb-gateway-intl':'国际站'};
+  // 3) 可登录的平台 —— WorkBuddy 国内/国际 + CodeBuddy 国内/国际 合成一张卡
+  // ★ 2026-10-13：补 CodeBuddy 两站（此前 COPILOT_IDS 只有 WorkBuddy 两个 pid，
+  //   而 apk-codebuddy/-cn 无 PLATFORMS 规格 → 不在登录列表 → 页面根本没有
+  //   它们的行；用户明确要求四站各自独立成行、不能合并）。
+  const COPILOT_IDS={'wb-gateway':'国内站','wb-gateway-intl':'国际站',
+                     'apk-codebuddy-cn':'CodeBuddy 国内站','apk-codebuddy':'CodeBuddy 国际站'};
   let copilotDone=false;
   // Kimi 国内/国际也合并成一张
   const KIMI_IDS={'sub-kimi':'国内站','sub-kimi-ai':'国际站'};
@@ -527,14 +531,16 @@ function sourceList(){
     if(COPILOT_IDS[p.id]){
       if(copilotDone)continue;
       copilotDone=true;
-      const anyLogged=['wb-gateway','wb-gateway-intl'].some(x=>logged.has(x));
+      const anyLogged=['wb-gateway','wb-gateway-intl','apk-codebuddy','apk-codebuddy-cn'].some(x=>logged.has(x));
       out.push({
-        key:'copilot', name:'WorkBuddy', kind:'账号接入', category:'账号接入',
-        desc:'国内/国际独立账号，扫码登录',
+        key:'copilot', name:'WorkBuddy / CodeBuddy', kind:'账号接入', category:'账号接入',
+        desc:'四个站点各自独立账号，扫码登录',
         method:'qrcode', merged:true,
         variants:[
-          {pid:'wb-gateway', label:'国内站账号', logged:logged.has('wb-gateway')},
-          {pid:'wb-gateway-intl', label:'国际站账号', logged:logged.has('wb-gateway-intl')},
+          {pid:'wb-gateway', label:'WorkBuddy 国内站', logged:logged.has('wb-gateway')},
+          {pid:'wb-gateway-intl', label:'WorkBuddy 国际站', logged:logged.has('wb-gateway-intl')},
+          {pid:'apk-codebuddy-cn', label:'CodeBuddy 国内站', logged:logged.has('apk-codebuddy-cn')},
+          {pid:'apk-codebuddy', label:'CodeBuddy 国际站', logged:logged.has('apk-codebuddy')},
         ],
         logged:anyLogged, endpoint:'copilot.tencent.com',
         models:0, withRate:0, checkin:false, canModels:false,
@@ -1467,7 +1473,7 @@ function srcLoginPanel(s, compact){
       : '接入';
     h+='<div style="margin:4px 0">'
       +'<div class="faint" style="font-size:11.5px;margin-bottom:4px">'
-      +'国内/国际是两个独立账号，额度互不互通；需要哪个就登哪个。</div>'
+      +'四个站点是四个独立账号，额度互不互通；需要哪个就登哪个。</div>'
       +s.variants.map(v=>
         '<div class="flex" style="justify-content:space-between;align-items:center;'
         +'padding:7px 0;border-top:1px solid var(--line2)">'
@@ -1478,7 +1484,7 @@ function srcLoginPanel(s, compact){
             +btnText+'</button>')
         +'</div>').join('')
       +'<div class="faint" style="font-size:11.5px;margin-top:6px">'
-        +'国内/国际是两个独立账号，额度互不互通；需要哪个就登哪个。</div>'
+        +'四个站点是四个独立账号，额度互不互通；需要哪个就登哪个。</div>'
       +'</div>';
     if(S.data.loginSession)h+=viewLoginSession(s.key, compact);
     // ★ 2026-10-12（跳转制）：手动粘贴降级为 <details> 低调兜底，不在主区摆表单

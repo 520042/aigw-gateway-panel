@@ -87,6 +87,41 @@ PLATFORMS = {
                    "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
                    "ok_keys": ["uid", "nick", "userId"]},
     },
+    # ★ 2026-10-13 补齐：CodeBuddy 国内站 / 国际站 —— 与 WorkBuddy 同一套
+    #   腾讯 copilot 授权（本文件 223/354 行已注明「同一账号体系」），
+    #   但用户明确要求四站各自独立成行、额度互不互通、**不能合并**。
+    #   此前这两个 pid 只有 sources.py 的声明、**没有 PLATFORMS 规格** →
+    #   不进 api/login?action=platforms 列表 → 接入源页根本没有它们的卡片
+    #   与登录入口；强行调用还会被 main.py:2474 拦成「未知平台」。
+    #   现补齐规格，走与 wb-gateway 完全相同的面板原生扫码链路（已实测可用）。
+    "apk-codebuddy-cn": {
+        "name": "CodeBuddy 账号 · 国内站（扫码 · 面板原生直连）",
+        "paste_type": "token",
+        "method": "qrcode", "edition": "cn",
+        "gateway": True,
+        "upstream": "www.codebuddy.cn",
+        "hint": "CodeBuddy 国内站账号（www.codebuddy.cn）。与 WorkBuddy 国内站"
+                "同一套腾讯授权，但**账号独立、额度互不互通**；同样由面板原生"
+                "直连，不需要网关 EXE",
+        "verify": {"url": "https://copilot.tencent.com/console/account",
+                   "type": "bearer",
+                   "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
+                   "ok_keys": ["uid", "nick", "userId"]},
+    },
+    "apk-codebuddy": {
+        "name": "CodeBuddy 账号 · 国际站（扫码 · 面板原生直连）",
+        "paste_type": "token",
+        "method": "qrcode", "edition": "intl",
+        "gateway": True,
+        "upstream": "www.codebuddy.ai",
+        "hint": "CodeBuddy 国际站账号（www.codebuddy.ai）。与 WorkBuddy 国际站"
+                "同一套授权，但**账号独立、额度互不互通**；同样由面板原生"
+                "直连，不需要网关 EXE",
+        "verify": {"url": "https://copilot.tencent.com/console/account",
+                   "type": "bearer",
+                   "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
+                   "ok_keys": ["uid", "nick", "userId"]},
+    },
         "web-lobster": {
         "name": "网易 Lobster AI（有道龙虾 · 0.05 倍率）",
         "method": "oauth_lobster",
