@@ -1,0 +1,3183 @@
+{
+ "platforms": {
+  "wb-gateway": {
+   "name": "WorkBuddy 账号 · 国内站（扫码 · 面板原生直连）",
+   "paste_type": "token",
+   "method": "qrcode",
+   "edition": "cn",
+   "gateway": true,
+   "upstream": "copilot.tencent.com",
+   "hint": "扫码登录 WorkBuddy / CodeBuddy 国内账号。凭据由面板直接持有并直连 copilot.tencent.com 拉倍率/签到 —— 不需要启动网关 EXE；「本地网关 EXE」是另一个东西（外部可选组件）",
+   "verify": {
+    "url": "https://copilot.tencent.com/console/account",
+    "type": "bearer",
+    "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
+    "ok_keys": [
+     "uid",
+     "nick",
+     "userId"
+    ]
+   }
+  },
+  "wb-gateway-intl": {
+   "name": "WorkBuddy 账号 · 国际站（扫码 · 面板原生直连）",
+   "paste_type": "token",
+   "method": "qrcode",
+   "edition": "intl",
+   "gateway": true,
+   "upstream": "copilot.tencent.com",
+   "hint": "国际站账号，扫码走 copilot.tencent.com 国际授权；同样由面板原生直连，不需要网关 EXE",
+   "verify": {
+    "url": "https://copilot.tencent.com/console/account",
+    "type": "bearer",
+    "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
+    "ok_keys": [
+     "uid",
+     "nick",
+     "userId"
+    ]
+   }
+  },
+  "web-lobster": {
+   "name": "网易 Lobster AI（有道龙虾 · 0.05 倍率）",
+   "method": "oauth_lobster",
+   "hosts": [
+    "lobsterai.youdao.com"
+   ],
+   "login_url": "https://lobsterai.youdao.com/#/index?keyfrom=invitation",
+   "gateway": false,
+   "upstream": "lobsterai.youdao.com",
+   "hint": "★ 客户端 0.05 倍率。点击「启动登录」后，在浏览器打开授权链接，完成手机/微信登录，面板会自动获取 token。对话 model 写 模型id@web-lobster 即走面板原生中继。",
+   "verify": {
+    "url": "https://@lobster/api/user/profile-summary",
+    "type": "bearer",
+    "ok_keys": [
+     "data",
+     "uid",
+     "email",
+     "credits"
+    ]
+   }
+  },
+  "web-glm": {
+   "name": "智谱清言网页版（glm2api 逆向）",
+   "method": "cookie",
+   "hosts": [
+    "chatglm.cn"
+   ],
+   "login_url": "https://chatglm.cn",
+   "login_click": [
+    "微信扫码登录",
+    "扫码登录"
+   ],
+   "gateway": false,
+   "upstream": "chatglm.cn",
+   "placeholder": "粘贴 chatglm_refresh_token（登录 chatglm.cn 后 F12 → Application → Cookies）",
+   "hint": "支持微信扫码登录（点开始登录后用手机扫二维码即可）；或手动粘贴 chatglm_refresh_token（F12 → Cookies）。对话 model 写 模型id@web-glm（glm-4-flash / glm-4 / glm-4-plus / glm-4-air / glm-4-all / glm-zero-preview）。",
+   "verify": {
+    "session_markers": [
+     "chatglm_refresh_token"
+    ]
+   },
+   "extract_secret_from_cookie": "chatglm_refresh_token"
+  },
+  "web-trae": {
+   "name": "Trae 直连（Trae2api-cn 逆向）",
+   "method": "file",
+   "hosts": [
+    "trae-api-cn.mchost.guru",
+    "trae.cn",
+    "trae.com.cn"
+   ],
+   "login_url": "https://www.trae.com.cn",
+   "browser_capture": true,
+   "gateway": false,
+   "upstream": "trae-api-cn.mchost.guru",
+   "placeholder": "粘贴 Trae x-ide-token（桌面端登录态 leveldb 或 OAuth refresh 换取）",
+   "hint": "★ 直连 Trae 国内版，无需手机开 App。取 x-ide-token：桌面端登录一次后，从 Trae 的 leveldb/Electron LocalStorage 取 ideToken（或用 OAuth refresh 换）。对话 model 写 模型id@web-trae（gpt-4o / claude-3-7-sonnet / deepseek-v3 / deepseek-r1 等）。★ 嫌手动抠麻烦？在「腾讯/原生登录」页点「读取本机 Trae 登录态」（/api/tencent?action=trae_local）可一键自动提取并落库（需面板与本机 Trae 同一台电脑）。",
+   "verify": {
+    "type": "bearer",
+    "ok_keys": [
+     "data",
+     "choices",
+     "output"
+    ]
+   }
+  },
+  "web-deepseek": {
+   "name": "DeepSeek 网页版（deepseek-free-api 逆向）",
+   "method": "file",
+   "hosts": [
+    "chat.deepseek.com"
+   ],
+   "login_url": "https://chat.deepseek.com",
+   "gateway": false,
+   "upstream": "chat.deepseek.com",
+   "paste_type": "token",
+   "placeholder": "粘贴 userToken（登录 chat.deepseek.com 后 F12 → Application → LocalStorage）",
+   "hint": "★ 免 API Key，用免费网页额度。登录 chat.deepseek.com 后 F12 拿 LocalStorage 的 userToken 粘这里。对话 model 写 deepseek-chat@web-deepseek 或 deepseek-reasoner@web-deepseek（深度思考）。首次对话需系统装有 node（用于解 POW 校验）。",
+   "browser_capture": true,
+   "storage_keys": [
+    "userToken"
+   ],
+   "storage_json_field": "value",
+   "login_click": [
+    "扫码登录",
+    "登录",
+    "手机号登录"
+   ],
+   "verify": {
+    "type": "bearer",
+    "ok_keys": [
+     "data",
+     "choices",
+     "id"
+    ]
+   }
+  },
+  "apk-trae": {
+   "name": "Trae 国内版",
+   "paste_type": "token",
+   "method": "file",
+   "hosts": [
+    "trae.com.cn",
+    "www.trae.com.cn",
+    "trae.cn",
+    "api.trae.cn"
+   ],
+   "login_url": "https://www.trae.com.cn",
+   "login_click": [
+    "登录",
+    "扫码登录",
+    "立即登录"
+   ],
+   "browser_capture": true,
+   "storage_keys": [
+    "ideToken",
+    "x-ide-token",
+    "iCubeAuthInfo",
+    "authInfo"
+   ],
+   "gateway": false,
+   "upstream": "api.trae.cn",
+   "hint": "Trae 国内版，三种方式任选：① 本机装着并登录过 Trae 桌面端 → 点「读取本机 Trae 登录态」一键提取入库；② 点「↗ 接入并打开登录页」在 Trae 官网登录，面板自动抓取凭据；③ 手动粘贴桌面端 x-ide-token。对话 model 写 模型id@apk-trae。",
+   "placeholder": "粘贴 Trae x-ide-token（桌面端 leveldb 或 OAuth refresh 换取）",
+   "verify": {
+    "url": "https://api.trae.cn/trae/api/v2/ug/checkin_credits/status",
+    "type": "bearer",
+    "ok_keys": [
+     "checked_in",
+     "enable",
+     "credits",
+     "data"
+    ]
+   }
+  },
+  "apk-doubao": {
+   "name": "豆包 网页版",
+   "method": "cookie",
+   "hosts": [
+    "doubao.com"
+   ],
+   "login_url": "https://www.doubao.com/",
+   "login_click": [
+    "账号登录",
+    "登录"
+   ],
+   "gateway": false,
+   "upstream": "www.doubao.com",
+   "hint": "在打开的浏览器里登录豆包，面板自动取 Cookie（也支持手动粘贴）",
+   "verify": {
+    "url": "https://www.doubao.com/alice/user/config/pull?version_code=20800&language=zh&device_platform=web&doubao_device_platform=web&aid=497858&real_aid=497858",
+    "type": "cookie"
+   }
+  },
+  "apk-yuanbao": {
+   "name": "元宝 网页版",
+   "method": "cookie",
+   "hosts": [
+    "yuanbao.tencent.com"
+   ],
+   "login_url": "https://yuanbao.tencent.com/",
+   "login_click": [
+    "Log In",
+    "登录",
+    "Sign in",
+    "扫码登录"
+   ],
+   "gateway": false,
+   "upstream": "yuanbao.tencent.com",
+   "storage_keys": [
+    "LOCAL_AUTH_INFO_KEY_yuanbao.tencent.com"
+   ],
+   "hint": "⚠ 元宝的会话在 localStorage（不是 Cookie）：请在打开的浏览器里登录元宝后再点「我已登录」。若只在 Cookie 里看到 _TDID_CK / 561553b2 这类设备 ID，说明还没登录成功。",
+   "verify": {
+    "url": "https://yuanbao.tencent.com/api/getuserinfo",
+    "type": "cookie",
+    "ok_keys": [
+     "user",
+     "data",
+     "userId"
+    ]
+   }
+  },
+  "apk-raccoon": {
+   "name": "小浣熊 dev.raccoon2api",
+   "method": "cookie",
+   "hosts": [
+    "xiaohuanxiong.com"
+   ],
+   "login_url": "https://xiaohuanxiong.com/",
+   "login_click": [
+    "同意并继续",
+    "同意",
+    "扫码登录",
+    "登录",
+    "立即登录"
+   ],
+   "gateway": false,
+   "upstream": "xiaohuanxiong.com",
+   "hint": "登录小浣熊；登录后可调「登录送积分」接口领积分",
+   "verify": {
+    "url": "https://xiaohuanxiong.com/api/web/points/v1/balance",
+    "type": "cookie",
+    "ok_keys": [
+     "balance",
+     "points",
+     "data"
+    ]
+   },
+   "bonus": {
+    "url": "https://xiaohuanxiong.com/api/web/desktop/v1/login/points/grant",
+    "method": "POST"
+   }
+  },
+  "apk-go": {
+   "name": "Go 原生网关 com.joy4fire.wb2apimobile",
+   "paste_type": "token",
+   "method": "qrcode",
+   "edition": "cn",
+   "gateway": false,
+   "upstream": "copilot.tencent.com",
+   "hint": "Go 版网关未提供网页授权入口，支持导入凭据文件 / 直接填 API Key",
+   "verify": {
+    "url": "https://copilot.tencent.com/console/account",
+    "type": "bearer",
+    "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
+    "ok_keys": [
+     "uid",
+     "nick",
+     "userId"
+    ]
+   }
+  },
+  "apk-loomy": {
+   "name": "Loomy 讯飞（loomy.xunfei.cn）",
+   "method": "loomy",
+   "hosts": [
+    "loomy.xunfei.cn",
+    "xunfei.cn",
+    "xfinfr.com"
+   ],
+   "login_url": "https://loomy.xunfei.cn/login",
+   "no_remote_scan": true,
+   "gateway": false,
+   "upstream": "loomyad.xunfei.cn",
+   "paste_type": "token",
+   "placeholder": "粘贴 session（32 字符，登录后服务端下发）",
+   "hint": "讯飞 Loomy。★ 支持三种登录（均无需浏览器）：① 手机号+短信验证码 ② 手机号+密码 ③ 粘贴 session。登录后模型清单实时拉取（含倍率）。",
+   "verify": {
+    "url": "https://loomyad.xunfei.cn/api/v1/models",
+    "type": "bearer",
+    "ok_keys": [
+     "data",
+     "models",
+     "id"
+    ]
+   }
+  },
+  "apk-antigravity": {
+   "name": "Antigravity / Google Cloud Code",
+   "method": "cookie",
+   "hosts": [
+    "google.com",
+    "googleapis.com"
+   ],
+   "login_url": "https://accounts.google.com/",
+   "gateway": false,
+   "upstream": "cloudcode-pa.googleapis.com",
+   "hint": "Google 官方 Antigravity（APK 内 UA antigravity/1.15.8，pluginType=GEMINI）。需 Google 账号，取 oauth2 token 或 Cookie。⚠ 2026-10-06 实测：accounts.google.com 在服务端无头浏览器里抓不到二维码——Google 官方说明 QR 登录是「用已登录手机给电脑做二次验证」，且明确写了「电脑端可能无法扫描」，遇风控/VPN 更会直接隐藏 QR 选项退回密码登录。故本平台**不支持远程扫码**，请在自己电脑浏览器登录后手动粘贴 Cookie（或 oauth2 token）",
+   "verify": {
+    "url": "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+    "method": "POST",
+    "type": "bearer"
+   }
+  },
+  "apk-coze": {
+   "browser_capture": true,
+   "name": "扣子 Coze（api.coze.cn 官方 API）",
+   "method": "file",
+   "type": "api_key",
+   "placeholder": "pat_xxxxxxxxxxxx",
+   "hosts": [
+    "coze.cn"
+   ],
+   "login_url": "https://www.coze.cn/",
+   "gateway": false,
+   "upstream": "api.coze.cn",
+   "hint": "唯一有完整开放 API 的国内 Agent 平台。在扣子控制台「个人访问令牌」生成 pat_ 开头的 PAT，粘到下面即可（浏览器 Cookie 会被 401 拒绝）",
+   "verify": {
+    "url": "https://api.coze.cn/v3/chat/retrieve",
+    "type": "bearer"
+   }
+  },
+  "apk-qwenwork": {
+   "name": "千问办公 QwenWork（阿里）",
+   "method": "cookie",
+   "hosts": [
+    "qwenwork.cn",
+    "aliyun.com"
+   ],
+   "login_url": "https://qwenwork.cn/signin",
+   "gateway": false,
+   "upstream": "qwenwork.cn",
+   "hint": "⚠ qwenwork.cn 是 JWT 鉴权（实测 2026-10-05）：网关中间件只认 cookie 名 token=eyJ… 或 Authorization Bearer 头，其它 Cookie 一律「JWT is missing」。自动捕获会双发 Bearer；若仍校验失败，请在登录后浏览器 DevTools→Application→Cookies 里找 token=开头为 eyJ 的那条手动粘贴。每日登录奖 100 积分",
+   "login_click": [
+    "扫码登录",
+    "登录",
+    "立即登录"
+   ],
+   "verify": {
+    "url": "https://qwenwork.cn/api/user/info",
+    "type": "cookie",
+    "ok_keys": [
+     "user",
+     "data",
+     "nick",
+     "avatar"
+    ]
+   }
+  },
+  "apk-kuku": {
+   "name": "库库 AI（百度文库+网盘）",
+   "method": "cookie",
+   "hosts": [
+    "baidu.com",
+    "kuku.baidu.com"
+   ],
+   "login_url": "https://kuku.baidu.com/",
+   "login_click": [
+    "立即登录",
+    "登录",
+    "扫码登录",
+    "账号登录",
+    "去登录"
+   ],
+   "gateway": false,
+   "upstream": "kuku.baidu.com",
+   "hint": "每日登录 +50、完成一次对话 +50、邀请新用户最高 +450；连续签到 3/5/7 天各再送百度网盘 SVIP。1 积分 ≈ 1 万 Token。活动期制，规则可能变",
+   "verify": {
+    "url": "https://kuku.baidu.com/api/genflowpro/settings/profile",
+    "type": "cookie",
+    "ok_keys": [
+     "nickname",
+     "account",
+     "avatar_url"
+    ],
+    "errno_field": "errno",
+    "unlogin_errno": -6,
+    "unlogin_msg": "未登录 / need login",
+    "note": "200 + errno:-6 = 未登录；errno:0 = 已登录"
+   }
+  },
+  "apk-wps": {
+   "name": "WPS AI（金山办公）",
+   "method": "cookie",
+   "hosts": [
+    "wps.cn",
+    "kdocs.cn"
+   ],
+   "login_url": "https://www.wps.cn/",
+   "login_click": [
+    "登录",
+    "立即登录",
+    "免费登录",
+    "扫码登录"
+   ],
+   "gateway": false,
+   "upstream": "www.wps.cn",
+   "hint": "⚠ WPS 是「积分 / 灵犀智点」双轨制，别把两者当同一个。端点需登录后探测",
+   "verify": {
+    "url": "https://drive.kdocs.cn/api/v3/userinfo",
+    "type": "cookie",
+    "ok_keys": [
+     "id",
+     "name",
+     "avatar",
+     "status"
+    ],
+    "note": "AI 积分在 lingxi.kdocs.cn/api/public/v1/credits/balance"
+   }
+  },
+  "apk-nano": {
+   "name": "纳米 AI（360）",
+   "method": "cookie",
+   "hosts": [
+    "n.cn",
+    "360.cn"
+   ],
+   "login_url": "https://www.n.cn/",
+   "login_click": [
+    "立即登录",
+    "登录",
+    "扫码登录",
+    "账号登录",
+    "去登录"
+   ],
+   "gateway": false,
+   "upstream": "www.n.cn",
+   "hint": "360 旗下 AI 搜索/办公。端点需登录后探测",
+   "verify": {
+    "url": "https://www.n.cn/api/user/info",
+    "type": "cookie",
+    "ok_keys": [
+     "user",
+     "data",
+     "nickname",
+     "avatar"
+    ]
+   }
+  },
+  "anon-zen": {
+   "name": "Our Free Model（OpenCode Zen 匿名车道）",
+   "method": "anon",
+   "hosts": [
+    "opencode.ai"
+   ],
+   "login_url": "https://opencode.ai",
+   "gateway": false,
+   "upstream": "opencode.ai",
+   "placeholder": "无需填写（公共凭据自动落池）",
+   "hint": "★ 免登录、免 Key、免注册：点接入即把公共凭据写入账号池。模型含 DeepSeek V4.1 Flash、Kimi K3 等前沿款（动态清单）。免费额度按会话计，短时间打满会 429（换会话或稍后再用）；个别地区 403。上游仅 OpenCode Zen 一家，无中转无号池。",
+   "verify": {
+    "url": "https://opencode.ai/zen/v1/models",
+    "type": "bearer",
+    "ua": "opencode/1.18.31",
+    "ok_keys": [
+     "data",
+     "id",
+     "model"
+    ]
+   }
+  },
+  "kilo": {
+   "name": "Kilo Gateway（免凭据免费池）",
+   "method": "anon",
+   "hosts": [
+    "api.kilo.ai",
+    "kilo.ai"
+   ],
+   "login_url": "https://kilo.ai",
+   "gateway": false,
+   "upstream": "api.kilo.ai",
+   "placeholder": "无需填写（免凭据车道，点接入即用）",
+   "hint": "★ 免登录、免 Key、免注册：Kilo 的免费池对匿名请求直接应答，点「接入」只是把它登记进路由。清单取上游 models 的 isFree 切片。⚠ 上游明确说明免费池的提示可能被记录用于改进其服务，请勿用它处理敏感内容。"
+  },
+  "web-qoder": {
+   "browser_capture": true,
+   "name": "Qoder（直连模型端点 · qwen3.8-flash 免费）",
+   "method": "file",
+   "hosts": [
+    "qoder.com",
+    "api2-v2.qoder.sh"
+   ],
+   "login_url": "https://www.qoder.com/",
+   "gateway": false,
+   "upstream": "api2-v2.qoder.sh",
+   "placeholder": "粘贴 Qoder 的 accessToken（桌面端登录态）",
+   "hint": "★ 直连模型端点（社区 Qoder2Api 逆向）：qwen3.8-flash 免费，qwen3.7-plus/kimi-k2.7-code/deepseek-v4-pro/minimax-m2.5 走 trial credits。获取 token：运行 Qoder2Api 的设备登录（python main.py --login），token 存于 ~/.qoder2api-auth.json，把 accessToken 粘到这里。粘好后对话 model 写 模型id@web-qoder 即走面板原生中继。",
+   "verify": {
+    "url": "https://www.qoder.com/api/v1/user/info",
+    "type": "bearer",
+    "ok_keys": [
+     "data",
+     "id",
+     "model",
+     "choices"
+    ]
+   }
+  },
+  "apk-qoder": {
+   "browser_capture": true,
+   "name": "Qoder（阿里桌面端，原通义灵码国际版）",
+   "method": "file",
+   "hosts": [
+    "qoder.com",
+    "lingma.aliyun.com"
+   ],
+   "login_url": "https://www.qoder.com/",
+   "gateway": false,
+   "upstream": "www.qoder.com",
+   "placeholder": "粘贴 Qoder 的 token/Cookie",
+   "hint": "★ 桌面端应用：凭据在 Qoder 桌面客户端本地，浏览器 Cookie 接入无意义（已移除该流程）。每日 10:00 领 100 Credits 要在桌面端里领（官方写明仅桌面端主动领取，未公布 API）。CLIProxyAPI v8.0.13 尚无 -qoder-login。若你能从客户端取到凭据，可手动粘贴这里（验活走 /api/v1/user/info）",
+   "verify": {
+    "url": "https://www.qoder.com/api/v1/user/info",
+    "type": "cookie",
+    "ok_keys": [
+     "user",
+     "data",
+     "email",
+     "credits"
+    ]
+   }
+  },
+  "apk-metaso": {
+   "name": "秘塔 AI（metaso.cn）",
+   "method": "cookie",
+   "hosts": [
+    "metaso.cn"
+   ],
+   "login_url": "https://metaso.cn/",
+   "login_click": [
+    "登录",
+    "立即登录",
+    "扫码登录",
+    "登录/注册"
+   ],
+   "gateway": false,
+   "upstream": "metaso.cn",
+   "hint": "唯一有官方 Open API + MCP 的国内办公 AI（¥0.03/次）。它的积分是「每日自动刷新到账」，**不需要签到** —— 别给它做签到按钮",
+   "verify": {
+    "url": "https://metaso.cn/api/user/info",
+    "type": "cookie",
+    "ok_keys": [
+     "user",
+     "data",
+     "id",
+     "name"
+    ]
+   }
+  },
+  "api-deepseek": {
+   "name": "DeepSeek 官方 API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://platform.deepseek.com/",
+   "upstream": "api.deepseek.com",
+   "placeholder": "sk-...",
+   "hint": "在 DeepSeek 开放平台「API keys」创建后粘贴",
+   "verify": {
+    "url": "https://api.deepseek.com/models",
+    "type": "api_key"
+   }
+  },
+  "api-moonshot": {
+   "name": "Kimi 月之暗面 API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://platform.moonshot.cn/",
+   "upstream": "api.moonshot.cn",
+   "placeholder": "sk-...",
+   "hint": "在 Moonshot 开放平台「API Key 管理」创建后粘贴",
+   "verify": {
+    "url": "https://api.moonshot.cn/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-zhipu": {
+   "name": "智谱 BigModel API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://open.bigmodel.cn/usercenter/apikeys",
+   "upstream": "open.bigmodel.cn",
+   "placeholder": "id.xxx",
+   "hint": "在智谱「API keys」创建后粘贴；GLM-Flash 系免费",
+   "verify": {
+    "url": "https://open.bigmodel.cn/api/paas/v4/models",
+    "type": "api_key"
+   }
+  },
+  "api-dashscope": {
+   "name": "阿里云百炼 API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://bailian.console.aliyun.com/",
+   "upstream": "dashscope.aliyuncs.com",
+   "placeholder": "sk-...",
+   "hint": "在百炼控制台「API-KEY 管理」创建后粘贴；新用户赠大量 token",
+   "verify": {
+    "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-bailian": {
+   "name": "阿里百炼 API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://bailian.console.aliyun.com/",
+   "upstream": "dashscope.aliyuncs.com",
+   "placeholder": "sk-...",
+   "hint": "与阿里云百炼同一套 Key（DashScope 兼容模式）",
+   "verify": {
+    "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-volcengine": {
+   "name": "火山方舟 API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://console.volcengine.com/ark",
+   "upstream": "ark.cn-beijing.volces.com",
+   "placeholder": "key...",
+   "hint": "在火山方舟「API Key 管理」创建后粘贴",
+   "verify": {
+    "url": "https://ark.cn-beijing.volces.com/api/v3/models",
+    "type": "api_key"
+   }
+  },
+  "api-minimax": {
+   "name": "MiniMax API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://platform.minimaxi.com/",
+   "upstream": "api.minimax.chat",
+   "placeholder": "eyJ...",
+   "hint": "在 MiniMax 开放平台创建后粘贴",
+   "verify": {
+    "url": "https://api.minimax.chat/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-stepfun": {
+   "name": "阶跃星辰 API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://platform.stepfun.com/",
+   "upstream": "api.stepfun.com",
+   "placeholder": "sk-...",
+   "hint": "在阶跃「API 密钥」创建后粘贴",
+   "verify": {
+    "url": "https://api.stepfun.com/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-baichuan": {
+   "name": "百川智能 API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://platform.baichuan-ai.com/",
+   "upstream": "api.baichuan-ai.com",
+   "placeholder": "sk-...",
+   "hint": "在百川开放平台「API Keys」创建后粘贴",
+   "verify": {
+    "url": "https://api.baichuan-ai.com/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-siliconflow": {
+   "name": "硅基流动 API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://cloud.siliconflow.cn/",
+   "upstream": "api.siliconflow.cn",
+   "placeholder": "sk-...",
+   "hint": "在硅基流动「API 密钥」创建后粘贴；部分模型永久免费",
+   "verify": {
+    "url": "https://api.siliconflow.cn/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-groq": {
+   "name": "Groq API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://console.groq.com/keys",
+   "upstream": "api.groq.com",
+   "placeholder": "gsk_...",
+   "hint": "在 Groq Console 创建后粘贴（免费档极低延迟）",
+   "verify": {
+    "url": "https://api.groq.com/openai/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-openrouter": {
+   "name": "OpenRouter API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://openrouter.ai/keys",
+   "upstream": "openrouter.ai",
+   "placeholder": "sk-or-...",
+   "hint": "在 OpenRouter「Keys」创建后粘贴；有 free 标签免费模型",
+   "verify": {
+    "url": "https://openrouter.ai/api/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-modelscope": {
+   "name": "魔搭 ModelScope API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://modelscope.cn/my/myaccesstoken",
+   "upstream": "api-inference.modelscope.cn",
+   "placeholder": "ms-...",
+   "hint": "在魔搭「访问令牌」创建后粘贴；3000+ 模型",
+   "verify": {
+    "url": "https://api-inference.modelscope.cn/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-xfyun": {
+   "name": "讯飞星辰 MaaS API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://console.xfyun.cn/",
+   "upstream": "spark-api-open.xf-yun.com",
+   "placeholder": "sk-...",
+   "hint": "用星辰 MaaS 的 http key（Bearer 直用）；注意 spark-api.xf-yun.com 老星火是 HMAC 签名，不适用",
+   "verify": {
+    "url": "https://spark-api-open.xf-yun.com/v1/models",
+    "type": "api_key"
+   }
+  },
+  "api-qianfan": {
+   "name": "百度千帆 API",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://console.bce.baidu.com/iam/",
+   "upstream": "qianfan.baidubce.com",
+   "placeholder": "bce-...",
+   "hint": "在百度智能云创建千帆 API Key 后粘贴；ERNIE-Speed/Lite 永久免费",
+   "verify": {
+    "url": "https://qianfan.baidubce.com/v2/models",
+    "type": "api_key"
+   }
+  },
+  "sub-kimi": {
+   "name": "Kimi Code 国内站",
+   "method": "oauth_device",
+   "type": "subscription",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "",
+   "upstream": "",
+   "hint": "Kimi Code 订阅登录。国内站 auth.kimi.com。设备码登录后自动获取 token，网关直接反代。",
+   "verify": null
+  },
+  "sub-kimi-ai": {
+   "name": "Kimi Code 国际站",
+   "method": "oauth_device",
+   "type": "subscription",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "",
+   "upstream": "",
+   "hint": "Kimi Code 订阅登录。国际站 auth.kimi.ai。设备码登录后自动获取 token，网关直接反代。",
+   "verify": null
+  },
+  "sub-codex": {
+   "name": "OpenAI Codex",
+   "method": "oauth_pkce",
+   "type": "subscription",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "",
+   "upstream": "",
+   "hint": "ChatGPT Plus/Pro 订阅登录。PKCE OAuth 流程，登录后自动获取 access_token，网关直接反代。",
+   "verify": null
+  },
+  "sub-claude": {
+   "name": "Anthropic Claude Code",
+   "method": "oauth_pkce",
+   "type": "subscription",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "",
+   "upstream": "",
+   "hint": "Claude Pro/Max 订阅登录。PKCE OAuth 流程，登录后自动获取 access_token，网关直接反代。",
+   "verify": null
+  },
+  "sub-grok": {
+   "name": "xAI Grok",
+   "method": "oauth_device",
+   "type": "subscription",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "",
+   "upstream": "",
+   "hint": "Grok Build 订阅登录。设备码 OAuth 流程，登录后自动获取 access_token，网关直接反代。",
+   "verify": null
+  },
+  "sub-antigravity": {
+   "name": "Google Antigravity",
+   "method": "oauth_google",
+   "type": "subscription",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "",
+   "upstream": "",
+   "hint": "Google Gemini 订阅登录。Google OAuth 流程：点「接入」生成授权链接 → 浏览器登录授权 → 地址栏跳 localhost:51121/callback?code=…（页面打不开是正常的）→ 把 code= 后面那段粘贴到下方即完成登录，token 自动入库。",
+   "verify": null
+  },
+  "sub-devin": {
+   "name": "Devin",
+   "method": "oauth_pkce",
+   "type": "subscription",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "",
+   "upstream": "",
+   "hint": "Devin 订阅登录。PKCE OAuth 流程，登录后自动获取 session_token，网关直接反代。",
+   "verify": null
+  },
+  "sub-meta": {
+   "name": "Meta Muse",
+   "method": "oauth_device",
+   "type": "subscription",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "",
+   "upstream": "",
+   "hint": "Meta AI 订阅登录。设备码 OAuth 流程，登录后自动获取 access_token，网关直接反代。",
+   "verify": null
+  }
+ },
+ "sources_meta": {
+  "categories": [
+   {
+    "kind": "LOCAL",
+    "name": "本地 AI",
+    "icon": "◈",
+    "desc": "有桌面客户端的 AI 应用。登录后用客户端的额度，既有网页版也有桌面版的统一归这里。",
+    "color": "acc"
+   },
+   {
+    "kind": "API",
+    "name": "平台 API",
+    "icon": "⇄",
+    "desc": "云厂商的正规 OpenAI 兼容接口，有 API Key 和配额说明，适合程序化调用与批量化。",
+    "color": "info"
+   },
+   {
+    "kind": "WEB",
+    "name": "网页对话",
+    "icon": "☁",
+    "desc": "只有网页版、没有客户端的对话产品。靠浏览器登录态取凭据，稳定性相对弱。",
+    "color": "warn"
+   }
+  ],
+  "platform_facts": {
+   "wb-gateway": {
+    "desktop": true,
+    "web": false,
+    "api": true,
+    "provider": "腾讯"
+   },
+   "wb-gateway-intl": {
+    "desktop": true,
+    "web": true,
+    "api": true,
+    "provider": "腾讯"
+   },
+   "apk-codebuddy": {
+    "desktop": true,
+    "web": true,
+    "api": true,
+    "provider": "腾讯"
+   },
+   "apk-codebuddy-cn": {
+    "desktop": true,
+    "web": true,
+    "api": true,
+    "provider": "腾讯"
+   },
+   "apk-trae": {
+    "desktop": true,
+    "web": true,
+    "api": false,
+    "provider": "字节"
+   },
+   "apk-doubao": {
+    "desktop": true,
+    "web": true,
+    "api": true,
+    "provider": "字节"
+   },
+   "apk-yuanbao": {
+    "desktop": true,
+    "web": true,
+    "api": false,
+    "provider": "腾讯"
+   },
+   "apk-go": {
+    "desktop": true,
+    "web": false,
+    "api": false,
+    "provider": "腾讯"
+   },
+   "apk-nano": {
+    "desktop": true,
+    "web": true,
+    "api": false,
+    "provider": "360"
+   },
+   "apk-metaso": {
+    "desktop": true,
+    "web": true,
+    "api": true,
+    "provider": "秘塔"
+   },
+   "apk-kuku": {
+    "desktop": false,
+    "web": true,
+    "api": false,
+    "provider": "百度"
+   },
+   "apk-wps": {
+    "desktop": true,
+    "web": true,
+    "api": false,
+    "provider": "金山"
+   },
+   "apk-qwenwork": {
+    "desktop": true,
+    "web": true,
+    "api": false,
+    "provider": "阿里"
+   },
+   "apk-qoder": {
+    "desktop": true,
+    "web": true,
+    "api": false,
+    "provider": "阿里"
+   },
+   "apk-kimi": {
+    "desktop": true,
+    "web": true,
+    "api": true,
+    "provider": "月之暗面"
+   },
+   "apk-raccoon": {
+    "desktop": false,
+    "web": true,
+    "api": false,
+    "provider": "小浣熊"
+   },
+   "apk-loomy": {
+    "desktop": true,
+    "web": true,
+    "api": false,
+    "provider": "讯飞"
+   },
+   "apk-antigravity": {
+    "desktop": true,
+    "web": true,
+    "api": true,
+    "provider": "Google"
+   },
+   "apk-coze": {
+    "desktop": true,
+    "web": true,
+    "api": true,
+    "provider": "字节"
+   },
+   "api-deepseek": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "DeepSeek"
+   },
+   "api-zhipu": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "智谱"
+   },
+   "api-dashscope": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "阿里云"
+   },
+   "api-moonshot": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "月之暗面"
+   },
+   "api-volcengine": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "字节火山"
+   },
+   "api-minimax": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "MiniMax"
+   },
+   "api-stepfun": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "阶跃"
+   },
+   "api-baichuan": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "百川"
+   },
+   "api-siliconflow": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "硅基流动"
+   },
+   "api-groq": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "Groq"
+   },
+   "api-openrouter": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "OpenRouter"
+   },
+   "api-modelscope": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "魔搭"
+   },
+   "api-bailian": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "阿里百炼"
+   },
+   "api-xfyun": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "讯飞星火"
+   },
+   "api-qianfan": {
+    "desktop": false,
+    "web": true,
+    "api": true,
+    "provider": "百度千帆"
+   }
+  },
+  "local_proxies": [
+   {
+    "id": "gateway",
+    "name": "workbuddy-gateway",
+    "desc": "CodeBuddy / WorkBuddy 的反代（腾讯，Go 1.24.5；已弃用，面板原生直连替代）",
+    "endpoint": "http://127.0.0.1:8317/v1"
+   },
+   {
+    "id": "localproxy",
+    "name": "CLIProxyAPI（可选，未内置）",
+    "desc": "Kimi / Codex / Claude / Antigravity 等订阅 OAuth 反代；默认不打进 EXE，需要时自行提供 cli-proxy-api.exe 并设 AIGW_BUNDLE_CLIPROXY=1",
+    "endpoint": "http://127.0.0.1:8318/v1"
+   }
+  ]
+ },
+ "catalog_sites": [
+  {
+   "name": "AnyRouter",
+   "url": "https://anyrouter.top",
+   "api_url": "https://anyrouter.top/v1",
+   "signup": "https://anyrouter.top/register?aff=pG9m",
+   "bonus": "注册赠 $100，签到送 $25",
+   "models": "Claude 系 10+",
+   "limit": "Linux Do 信任等级≥2",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "AgentRouter",
+   "url": "https://agentrouter.org",
+   "api_url": "https://agentrouter.org/v1",
+   "signup": "https://agentrouter.org/register?aff=jnrM",
+   "bonus": "注册赠 $100，签到送 $25",
+   "models": "Claude/GPT/GLM/DeepSeek",
+   "limit": "GitHub 注册满 5 年",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "PM-API",
+   "url": "https://xn--wnup5g6so4wn.de5.net",
+   "api_url": "https://xn--wnup5g6so4wn.de5.net/v1",
+   "signup": "https://xn--wnup5g6so4wn.de5.net/sign-up?aff=9b8a",
+   "bonus": "完全免费无签到",
+   "models": "240 个",
+   "limit": "—",
+   "checkin": false,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "快跑 API",
+   "url": "https://kuaipao.ai",
+   "api_url": "https://kuaipao.ai/v1",
+   "signup": "https://kuaipao.ai/register?aff=tOJg",
+   "bonus": "每日签到",
+   "models": "100+ 个",
+   "limit": "—",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "维云模型",
+   "url": "https://vsllm.cc",
+   "api_url": "https://vsllm.cc/v1",
+   "signup": "https://vsllm.cc/i/z2IN",
+   "bonus": "每日任务换额度",
+   "models": "69 个",
+   "limit": "注册无限制",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "New API 福利站",
+   "url": "https://new-api.abrdns.com",
+   "api_url": "https://new-api.abrdns.com/v1",
+   "signup": "https://new-api.abrdns.com/register?aff=klPR",
+   "bonus": "每日福利签到",
+   "models": "69 个",
+   "limit": "Linux Do Lv1 + 注册满 1 天",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "CM-API 公益站",
+   "url": "https://api.chengmo.cc.cd",
+   "api_url": "https://api.chengmo.cc.cd/v1",
+   "signup": "https://api.chengmo.cc.cd/sign-up?aff=lz0Q",
+   "bonus": "每日签到",
+   "models": "46 个",
+   "limit": "注册无限制",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "ZeroCat",
+   "url": "https://zero.cat",
+   "api_url": "https://zero.cat/v1",
+   "signup": "https://zero.cat/sign-up?aff=esyf",
+   "bonus": "每日签到",
+   "models": "Claude/DS/xAI/Gemini 40",
+   "limit": "—",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "Huan API",
+   "url": "https://ai.huan666.de",
+   "api_url": "https://ai.huan666.de/v1",
+   "signup": "https://ai.huan666.de/sign-up?aff=npLD",
+   "bonus": "每日签到",
+   "models": "17 个",
+   "limit": "—",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "可萌中转站",
+   "url": "https://api456.me",
+   "api_url": "https://api456.me/v1",
+   "signup": "https://api456.me/register?aff=76S3",
+   "bonus": "每日签到",
+   "models": "Claude/GPT/GLM/DS/Gemini/qwen 29",
+   "limit": "注册无限制",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "Token 能量站",
+   "url": "https://factory.pub",
+   "api_url": "https://factory.pub/v1",
+   "signup": "https://factory.pub/sign-up?aff=6oZK",
+   "bonus": "每日签到",
+   "models": "20 个",
+   "limit": "仅 yaohuo/github 注册",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "Pomelo",
+   "url": "https://api.67.si",
+   "api_url": "https://api.67.si/v1",
+   "signup": "https://api.67.si/sign-up?aff=zpBO",
+   "bonus": "每日签到",
+   "models": "xAI/GPT/GLM/DS 17",
+   "limit": "—",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "BER分公益站",
+   "url": "https://ai.berf1.cn",
+   "api_url": "https://ai.berf1.cn/v1",
+   "signup": "https://ai.berf1.cn/sign-up?aff=RQvt",
+   "bonus": "每日签到",
+   "models": "4 个",
+   "limit": "—",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "hkai",
+   "url": "https://share.hkai25.top",
+   "api_url": "https://share.hkai25.top/v1",
+   "signup": "https://share.hkai25.top/sign-up?aff=0qe8",
+   "bonus": "每日签到",
+   "models": "xAI/minimax/GLM/DS 10",
+   "limit": "—",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "糯喵喵 AI 驿站",
+   "url": "https://ai.yangwj.me",
+   "api_url": "https://ai.yangwj.me/v1",
+   "signup": "https://ai.yangwj.me/sign-up?aff=gs6u",
+   "bonus": "每日签到",
+   "models": "47 个",
+   "limit": "—",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "onomeo",
+   "url": "https://onomeo.com",
+   "api_url": "https://onomeo.com/v1",
+   "signup": "https://onomeo.com/?ref=AC-U4P69Q",
+   "bonus": "签到积分：首日 5000，第 7 天起 10000/日",
+   "models": "35 免费 + 9 付费",
+   "limit": "免费账号 5h/20 次",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "奶昔 New API",
+   "url": "https://newapi.naixi.net",
+   "api_url": "https://newapi.naixi.net/v1",
+   "signup": "https://newapi.naixi.net/login",
+   "bonus": "开户送 $5，签到送 1-2 刀/日",
+   "models": "模型广场自选",
+   "limit": "需奶昔 SSO 账号",
+   "checkin": true,
+   "category": "relay",
+   "region": "—",
+   "endpoints": [
+    "/api/user/checkin",
+    "/api/user/checkin/status"
+   ]
+  },
+  {
+   "name": "智谱 BigModel",
+   "url": "https://open.bigmodel.cn",
+   "signup": "https://open.bigmodel.cn",
+   "bonus": "GLM-4.7-Flash / GLM-4-Flash / GLM-4.6V-Flash 永久免费；签到送 1 万 token",
+   "models": "—",
+   "limit": "—",
+   "checkin": true,
+   "category": "official",
+   "region": "国内",
+   "endpoints": []
+  },
+  {
+   "name": "阿里云百炼",
+   "url": "https://bailian.aliyun.com",
+   "signup": "https://bailian.aliyun.com",
+   "bonus": "通义千问全系免费；新人 7000 万 token + 100 张生图",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "国内",
+   "endpoints": []
+  },
+  {
+   "name": "百度千帆",
+   "url": "https://qianfan.cloud.baidu.com",
+   "signup": "https://qianfan.cloud.baidu.com",
+   "bonus": "ERNIE-Speed/Lite/Tiny 永久免费不限量；新用户 150 万 token",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "国内",
+   "endpoints": []
+  },
+  {
+   "name": "硅基流动 SiliconFlow",
+   "url": "https://cloud.siliconflow.cn",
+   "signup": "https://cloud.siliconflow.cn",
+   "bonus": "部分模型永久免费 + 新户赠 14 元",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "国内",
+   "endpoints": []
+  },
+  {
+   "name": "美团 LongCat",
+   "url": "https://longcat.chat/platform",
+   "signup": "https://longcat.chat/platform",
+   "bonus": "LongCat-2.5-Preview 资源包 + 活动赠送",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "国内",
+   "endpoints": []
+  },
+  {
+   "name": "讯飞星辰 MaaS",
+   "url": "https://platform.xfyun.cn",
+   "signup": "https://platform.xfyun.cn",
+   "bonus": "Qwen3-Coder-Next / Qwen3-1.7B 永久免费不限量",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "国内",
+   "endpoints": []
+  },
+  {
+   "name": "魔搭 ModelScope",
+   "url": "https://modelscope.cn",
+   "signup": "https://modelscope.cn",
+   "bonus": "3000+ 模型，魔棒兑换调用",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "国内",
+   "endpoints": []
+  },
+  {
+   "name": "Google AI Studio",
+   "url": "https://aistudio.google.com",
+   "signup": "https://aistudio.google.com",
+   "bonus": "Gemini 全系免费层，15 RPM / 1500 RPD",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "海外",
+   "endpoints": []
+  },
+  {
+   "name": "NVIDIA NIM",
+   "url": "https://build.nvidia.com",
+   "signup": "https://build.nvidia.com",
+   "bonus": "100+ 模型无限额（速率限制 ~40 RPM）",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "海外",
+   "endpoints": []
+  },
+  {
+   "name": "Groq",
+   "url": "https://groq.com",
+   "signup": "https://groq.com",
+   "bonus": "免费 tier 极低延迟",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "海外",
+   "endpoints": []
+  },
+  {
+   "name": "OpenRouter",
+   "url": "https://openrouter.ai",
+   "signup": "https://openrouter.ai",
+   "bonus": "20+ free 模型，每日请求上限",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "海外",
+   "endpoints": []
+  },
+  {
+   "name": "Cloudflare Workers AI",
+   "url": "https://developers.cloudflare.com",
+   "signup": "https://developers.cloudflare.com",
+   "bonus": "免费层每天 10,000 Neurons",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "海外",
+   "endpoints": []
+  },
+  {
+   "name": "HuggingFace",
+   "url": "https://huggingface.co",
+   "signup": "https://huggingface.co",
+   "bonus": "每月 $0.10 credits",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "海外",
+   "endpoints": []
+  },
+  {
+   "name": "Cerebras",
+   "url": "https://cerebras.ai",
+   "signup": "https://cerebras.ai",
+   "bonus": "$5 试用额度（需绑支付方式）",
+   "models": "—",
+   "limit": "—",
+   "checkin": false,
+   "category": "official",
+   "region": "海外",
+   "endpoints": []
+  }
+ ],
+ "bundled": {
+  "wb-gateway": [
+   {
+    "id": "default-model",
+    "name": "Auto",
+    "credits": "x0.79 credits",
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "default-model-lite",
+    "name": "Default-Lite",
+    "credits": "x0.67 credits",
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "lite"
+    ]
+   },
+   {
+    "id": "fast-model",
+    "name": "Fast",
+    "credits": "x0.34 credits",
+    "maxInputTokens": 200000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "i",
+    "descriptionZh": "响应快，适合简单任务"
+   },
+   {
+    "id": "balanced-model",
+    "name": "Balanced",
+    "credits": "x0.59 credits",
+    "maxInputTokens": 256000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "速度与质量兼顾，日常工作首选"
+   },
+   {
+    "id": "primary-model",
+    "name": "Primary",
+    "credits": "x3.31 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 72000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "descriptionZh": "高质量输出，胜任复杂任务"
+   },
+   {
+    "id": "deep-model",
+    "name": "Deep",
+    "credits": "x3.33 credits",
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "vendor": "e",
+    "descriptionZh": "深度推理，适合深度分析与难题"
+   },
+   {
+    "id": "gpt-5.5",
+    "name": "GPT-5.5",
+    "credits": "x3.31 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 72000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "descriptionZh": "OpenAI 旗舰编码模型,擅长长程任务"
+   },
+   {
+    "id": "gpt-5.4",
+    "name": "GPT-5.4",
+    "credits": "x1.65 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gpt-5.3-codex",
+    "name": "GPT-5.3-Codex",
+    "credits": "x1.25 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gpt-5.1-codex",
+    "name": "GPT-5.1-Codex",
+    "credits": "x0.90 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gpt-5.1-codex-mini",
+    "name": "GPT-5.1-Codex-Mini",
+    "credits": "x0.18 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gemini-3.1-pro",
+    "name": "Gemini-3.1-Pro",
+    "credits": "x1.32 credits",
+    "maxInputTokens": 400000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true
+   },
+   {
+    "id": "gemini-3.0-flash",
+    "name": "Gemini-3.0-Flash",
+    "credits": "x0.33 credits",
+    "maxInputTokens": 400000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true
+   },
+   {
+    "id": "gemini-3.5-flash",
+    "name": "Gemini-3.5-Flash",
+    "credits": "x0.99 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 65536,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "descriptionZh": "能力均衡，适合日常使用"
+   },
+   {
+    "id": "gemini-2.5-flash",
+    "name": "Gemini-2.5-Flash",
+    "credits": "x0.22 credits",
+    "maxInputTokens": 400000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true
+   },
+   {
+    "id": "gemini-3.1-flash-lite",
+    "name": "Gemini-3.1-flash-lite",
+    "credits": "x0.17 credits",
+    "maxInputTokens": 200000,
+    "maxOutputTokens": 65536,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gemini-2.5-pro",
+    "name": "Gemini-2.5-Pro",
+    "credits": "x0.90 credits",
+    "maxInputTokens": 400000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true
+   },
+   {
+    "id": "deepseek-v3-2-volc",
+    "name": "DeepSeek-V3.2",
+    "credits": "x0.29 credits",
+    "maxInputTokens": 96000,
+    "maxOutputTokens": 32000,
+    "supportsImages": false,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "deepseek-v4.1-flash",
+    "name": "DeepSeek-V4.1-Flash",
+    "maxInputTokens": 96000,
+    "maxOutputTokens": 32000,
+    "supportsImages": false,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "descriptionZh": "DeepSeek V4.1 Flash - 快速且免费"
+   },
+   {
+    "id": "glm-5.0",
+    "name": "GLM-5.0",
+    "credits": "x0.80 credits",
+    "maxInputTokens": 200000,
+    "maxOutputTokens": 48000,
+    "supportsImages": false,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "kimi-k2.5",
+    "name": "Kimi-K2.5",
+    "credits": "x0.45 credits",
+    "maxInputTokens": 164000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f"
+   },
+   {
+    "id": "gemini-3.0-pro-image",
+    "name": "Gemini-3.0-Pro-Image",
+    "credits": "x4.96 credits",
+    "tags": [
+     "text-to-image",
+     "image-to-image"
+    ]
+   },
+   {
+    "id": "gemini-3.1-flash-image",
+    "name": "Gemini-3.1-Flash-Image",
+    "credits": "x1.78 credits",
+    "tags": [
+     "text-to-image",
+     "image-to-image"
+    ]
+   },
+   {
+    "id": "gemini-2.5-flash-image",
+    "name": "Gemini-2.5-Flash-Image",
+    "credits": "x1.14 credits",
+    "tags": [
+     "text-to-image",
+     "image-to-image"
+    ]
+   },
+   {
+    "id": "hunyuan-image-v3.0",
+    "name": "Hunyuan-Image-V3",
+    "credits": "x5.00 credits",
+    "tags": [
+     "text-to-image"
+    ]
+   },
+   {
+    "id": "hunyuan-image-v2.0-general-edit",
+    "name": "Hunyuan-Image-Edit",
+    "credits": "x5.00 credits",
+    "tags": [
+     "image-to-image"
+    ]
+   },
+   {
+    "id": "hunyuan-video-art",
+    "name": "Hunyuan-Video-Art",
+    "credits": "x10.00 credits",
+    "tags": [
+     "text-to-video",
+     "image-to-video"
+    ]
+   },
+   {
+    "id": "gpt-5.6-sol",
+    "name": "GPT-5.6-Sol",
+    "credits": "x3.47 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "badge:企业版:#3B82F6"
+    ],
+    "descriptionZh": "OpenAI 旗舰模型，擅长复杂推理与长程任务"
+   },
+   {
+    "id": "gpt-5.6-terra",
+    "name": "GPT-5.6-Terra",
+    "credits": "x1.39 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "badge:企业版:#3B82F6"
+    ],
+    "descriptionZh": "OpenAI 均衡模型，兼顾能力、速度与成本"
+   },
+   {
+    "id": "gpt-5.6-luna",
+    "name": "GPT-5.6-Luna",
+    "credits": "x0.14 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "badge:企业版:#3B82F6"
+    ],
+    "descriptionZh": "OpenAI 轻量模型，响应快速，适合日常任务"
+   },
+   {
+    "id": "glm-5.3",
+    "name": "GLM-5.3",
+    "credits": "x0.79 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 48000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "能力均衡，适合日常使用"
+   },
+   {
+    "id": "glm-5.2",
+    "name": "GLM-5.2",
+    "credits": "x0.79 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 48000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "1M 上下文，擅长长程任务"
+   },
+   {
+    "id": "hy3",
+    "name": "Hy3",
+    "credits": "x0.00",
+    "maxInputTokens": 192000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "j",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "混元思考模型，具有增强的推理能力"
+   },
+   {
+    "id": "kimi-k3",
+    "name": "Kimi-K3",
+    "credits": "x1.62 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f",
+    "descriptionZh": "擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。"
+   },
+   {
+    "id": "kimi-k2.6",
+    "name": "Kimi-K2.6",
+    "credits": "x0.52 credits",
+    "maxInputTokens": 256000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "多模态模型，适合日常任务"
+   },
+   {
+    "id": "minimax-m3",
+    "name": "MiniMax-M3",
+    "credits": "x0.25 credits",
+    "maxInputTokens": 512000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f",
+    "descriptionZh": "原生多模态，擅长代码、智能体任务"
+   }
+  ],
+  "wb-gateway-intl": [
+   {
+    "id": "default-model",
+    "name": "Auto",
+    "credits": "x0.79 credits",
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "default-model-lite",
+    "name": "Default-Lite",
+    "credits": "x0.67 credits",
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "lite"
+    ]
+   },
+   {
+    "id": "fast-model",
+    "name": "Fast",
+    "credits": "x0.34 credits",
+    "maxInputTokens": 200000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "i",
+    "descriptionZh": "响应快，适合简单任务"
+   },
+   {
+    "id": "balanced-model",
+    "name": "Balanced",
+    "credits": "x0.59 credits",
+    "maxInputTokens": 256000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "速度与质量兼顾，日常工作首选"
+   },
+   {
+    "id": "primary-model",
+    "name": "Primary",
+    "credits": "x3.31 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 72000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "descriptionZh": "高质量输出，胜任复杂任务"
+   },
+   {
+    "id": "deep-model",
+    "name": "Deep",
+    "credits": "x3.33 credits",
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "vendor": "e",
+    "descriptionZh": "深度推理，适合深度分析与难题"
+   },
+   {
+    "id": "gpt-5.5",
+    "name": "GPT-5.5",
+    "credits": "x3.31 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 72000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "descriptionZh": "OpenAI 旗舰编码模型,擅长长程任务"
+   },
+   {
+    "id": "gpt-5.4",
+    "name": "GPT-5.4",
+    "credits": "x1.65 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gpt-5.3-codex",
+    "name": "GPT-5.3-Codex",
+    "credits": "x1.25 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gpt-5.1-codex",
+    "name": "GPT-5.1-Codex",
+    "credits": "x0.90 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gpt-5.1-codex-mini",
+    "name": "GPT-5.1-Codex-Mini",
+    "credits": "x0.18 credits",
+    "maxInputTokens": 272000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gemini-3.1-pro",
+    "name": "Gemini-3.1-Pro",
+    "credits": "x1.32 credits",
+    "maxInputTokens": 400000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true
+   },
+   {
+    "id": "gemini-3.0-flash",
+    "name": "Gemini-3.0-Flash",
+    "credits": "x0.33 credits",
+    "maxInputTokens": 400000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true
+   },
+   {
+    "id": "gemini-3.5-flash",
+    "name": "Gemini-3.5-Flash",
+    "credits": "x0.99 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 65536,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "descriptionZh": "能力均衡，适合日常使用"
+   },
+   {
+    "id": "gemini-2.5-flash",
+    "name": "Gemini-2.5-Flash",
+    "credits": "x0.22 credits",
+    "maxInputTokens": 400000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true
+   },
+   {
+    "id": "gemini-3.1-flash-lite",
+    "name": "Gemini-3.1-flash-lite",
+    "credits": "x0.17 credits",
+    "maxInputTokens": 200000,
+    "maxOutputTokens": 65536,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "gemini-2.5-pro",
+    "name": "Gemini-2.5-Pro",
+    "credits": "x0.90 credits",
+    "maxInputTokens": 400000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true
+   },
+   {
+    "id": "deepseek-v3-2-volc",
+    "name": "DeepSeek-V3.2",
+    "credits": "x0.29 credits",
+    "maxInputTokens": 96000,
+    "maxOutputTokens": 32000,
+    "supportsImages": false,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "deepseek-v4.1-flash",
+    "name": "DeepSeek-V4.1-Flash",
+    "maxInputTokens": 96000,
+    "maxOutputTokens": 32000,
+    "supportsImages": false,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "descriptionZh": "DeepSeek V4.1 Flash - 快速且免费"
+   },
+   {
+    "id": "glm-5.0",
+    "name": "GLM-5.0",
+    "credits": "x0.80 credits",
+    "maxInputTokens": 200000,
+    "maxOutputTokens": 48000,
+    "supportsImages": false,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e"
+   },
+   {
+    "id": "kimi-k2.5",
+    "name": "Kimi-K2.5",
+    "credits": "x0.45 credits",
+    "maxInputTokens": 164000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f"
+   },
+   {
+    "id": "gemini-3.0-pro-image",
+    "name": "Gemini-3.0-Pro-Image",
+    "credits": "x4.96 credits",
+    "tags": [
+     "text-to-image",
+     "image-to-image"
+    ]
+   },
+   {
+    "id": "gemini-3.1-flash-image",
+    "name": "Gemini-3.1-Flash-Image",
+    "credits": "x1.78 credits",
+    "tags": [
+     "text-to-image",
+     "image-to-image"
+    ]
+   },
+   {
+    "id": "gemini-2.5-flash-image",
+    "name": "Gemini-2.5-Flash-Image",
+    "credits": "x1.14 credits",
+    "tags": [
+     "text-to-image",
+     "image-to-image"
+    ]
+   },
+   {
+    "id": "hunyuan-image-v3.0",
+    "name": "Hunyuan-Image-V3",
+    "credits": "x5.00 credits",
+    "tags": [
+     "text-to-image"
+    ]
+   },
+   {
+    "id": "hunyuan-image-v2.0-general-edit",
+    "name": "Hunyuan-Image-Edit",
+    "credits": "x5.00 credits",
+    "tags": [
+     "image-to-image"
+    ]
+   },
+   {
+    "id": "hunyuan-video-art",
+    "name": "Hunyuan-Video-Art",
+    "credits": "x10.00 credits",
+    "tags": [
+     "text-to-video",
+     "image-to-video"
+    ]
+   },
+   {
+    "id": "gpt-5.6-sol",
+    "name": "GPT-5.6-Sol",
+    "credits": "x3.47 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "badge:企业版:#3B82F6"
+    ],
+    "descriptionZh": "OpenAI 旗舰模型，擅长复杂推理与长程任务"
+   },
+   {
+    "id": "gpt-5.6-terra",
+    "name": "GPT-5.6-Terra",
+    "credits": "x1.39 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "badge:企业版:#3B82F6"
+    ],
+    "descriptionZh": "OpenAI 均衡模型，兼顾能力、速度与成本"
+   },
+   {
+    "id": "gpt-5.6-luna",
+    "name": "GPT-5.6-Luna",
+    "credits": "x0.14 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "badge:企业版:#3B82F6"
+    ],
+    "descriptionZh": "OpenAI 轻量模型，响应快速，适合日常任务"
+   },
+   {
+    "id": "glm-5.3",
+    "name": "GLM-5.3",
+    "credits": "x0.79 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 48000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "能力均衡，适合日常使用"
+   },
+   {
+    "id": "glm-5.2",
+    "name": "GLM-5.2",
+    "credits": "x0.79 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 48000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "e",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "1M 上下文，擅长长程任务"
+   },
+   {
+    "id": "hy3",
+    "name": "Hy3",
+    "credits": "x0.00",
+    "maxInputTokens": 192000,
+    "maxOutputTokens": 64000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "j",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "混元思考模型，具有增强的推理能力"
+   },
+   {
+    "id": "kimi-k3",
+    "name": "Kimi-K3",
+    "credits": "x1.62 credits",
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f",
+    "descriptionZh": "擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。"
+   },
+   {
+    "id": "kimi-k2.6",
+    "name": "Kimi-K2.6",
+    "credits": "x0.52 credits",
+    "maxInputTokens": 256000,
+    "maxOutputTokens": 32000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f",
+    "tags": [
+     "craft"
+    ],
+    "descriptionZh": "多模态模型，适合日常任务"
+   },
+   {
+    "id": "minimax-m3",
+    "name": "MiniMax-M3",
+    "credits": "x0.25 credits",
+    "maxInputTokens": 512000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "supportsReasoning": true,
+    "vendor": "f",
+    "descriptionZh": "原生多模态，擅长代码、智能体任务"
+   }
+  ],
+  "apk-trae": [
+   {
+    "id": "auto",
+    "name": "Auto",
+    "desc": "自动路由"
+   },
+   {
+    "id": "claude-opus-4-6-thinking",
+    "name": "Claude Opus 4.6 Thinking",
+    "desc": "Anthropic 旗舰带思维链"
+   },
+   {
+    "id": "claude-sonnet-4-6",
+    "name": "Claude Sonnet 4.6",
+    "desc": "Anthropic 均衡款"
+   },
+   {
+    "id": "DeepSeek-v3.2",
+    "name": "DeepSeek v3.2",
+    "desc": "DeepSeek 上一代"
+   },
+   {
+    "id": "deepseek-v4-flash",
+    "name": "DeepSeek V4 Flash",
+    "desc": "低延迟"
+   },
+   {
+    "id": "deepseek-v4-pro",
+    "name": "DeepSeek V4 Pro",
+    "desc": "能力最强"
+   },
+   {
+    "id": "DeepSeek-V4-Flash-Official",
+    "name": "DeepSeek V4 Flash (Official)",
+    "desc": "官方直连通道"
+   },
+   {
+    "id": "doubao-seed-2.0-pro",
+    "name": "Doubao Seed 2.0 Pro",
+    "desc": "字节豆包"
+   },
+   {
+    "id": "Doubao-Seed-2.0-Code",
+    "name": "Doubao Seed 2.0 Code",
+    "desc": "字节豆包代码版"
+   },
+   {
+    "id": "Doubao-Seed-2.1-Pro",
+    "name": "Doubao Seed 2.1 Pro",
+    "desc": "字节豆包新一代"
+   },
+   {
+    "id": "Doubao-Seed-2.1-Turbo",
+    "name": "Doubao Seed 2.1 Turbo",
+    "desc": "字节豆包低延迟"
+   },
+   {
+    "id": "gemini-3-pro-high",
+    "name": "Gemini 3 Pro High",
+    "desc": "Google 高算力档"
+   },
+   {
+    "id": "gemini-3-pro-low",
+    "name": "Gemini 3 Pro Low",
+    "desc": "Google 低延迟档"
+   },
+   {
+    "id": "glm-5",
+    "name": "GLM-5",
+    "desc": "智谱"
+   },
+   {
+    "id": "glm-5-turbo",
+    "name": "GLM-5 Turbo",
+    "desc": "智谱低延迟"
+   },
+   {
+    "id": "glm-5.2",
+    "name": "GLM-5.2",
+    "desc": "智谱"
+   },
+   {
+    "id": "glm-5.3",
+    "name": "GLM-5.3",
+    "desc": "智谱新一代"
+   },
+   {
+    "id": "gpt-oss-120b-medium",
+    "name": "GPT-OSS 120B Medium",
+    "desc": "开源 120B"
+   },
+   {
+    "id": "kimi-k2.5",
+    "name": "Kimi K2.5",
+    "desc": "月之暗面"
+   },
+   {
+    "id": "kimi-k2.6",
+    "name": "Kimi K2.6",
+    "desc": "月之暗面"
+   },
+   {
+    "id": "kimi-k2.7-code",
+    "name": "Kimi K2.7 Code",
+    "desc": "月之暗面代码版"
+   },
+   {
+    "id": "kimi-k3",
+    "name": "Kimi K3",
+    "desc": "月之暗面新一代"
+   },
+   {
+    "id": "minimax-m2.5",
+    "name": "MiniMax M2.5",
+    "desc": "MiniMax"
+   },
+   {
+    "id": "minimax-m3",
+    "name": "MiniMax M3",
+    "desc": "MiniMax 新一代"
+   }
+  ],
+  "apk-go": [
+   {
+    "id": "deepseek-v4-flash",
+    "name": "deepseek-v4-flash",
+    "context_length": 1000000,
+    "max_output_tokens": 384000,
+    "desc": "上下文 1000K"
+   },
+   {
+    "id": "deepseek-v4-pro",
+    "name": "deepseek-v4-pro",
+    "context_length": 1000000,
+    "max_output_tokens": 384000,
+    "desc": "上下文 1000K"
+   },
+   {
+    "id": "deepseek-v4.1-flash",
+    "name": "deepseek-v4.1-flash",
+    "context_length": 1000000,
+    "max_output_tokens": 384000,
+    "desc": "上下文 1000K"
+   },
+   {
+    "id": "gemini-3.5-flash",
+    "name": "gemini-3.5-flash",
+    "context_length": 1048576,
+    "max_output_tokens": 65536,
+    "desc": "上下文 1048K"
+   },
+   {
+    "id": "glm-5.1",
+    "name": "glm-5.1",
+    "context_length": 200000,
+    "max_output_tokens": 131072,
+    "desc": "上下文 200K"
+   },
+   {
+    "id": "glm-5.2",
+    "name": "glm-5.2",
+    "context_length": 1000000,
+    "max_output_tokens": 131072,
+    "desc": "上下文 1000K"
+   },
+   {
+    "id": "glm-5.3",
+    "name": "glm-5.3",
+    "context_length": 1000000,
+    "max_output_tokens": 131072,
+    "desc": "上下文 1000K"
+   },
+   {
+    "id": "glm-5.3-flash",
+    "name": "glm-5.3-flash",
+    "context_length": 1000000,
+    "max_output_tokens": 131072,
+    "desc": "上下文 1000K"
+   },
+   {
+    "id": "glm-5v-turbo",
+    "name": "glm-5v-turbo",
+    "context_length": 1000000,
+    "max_output_tokens": 131072,
+    "desc": "上下文 1000K"
+   },
+   {
+    "id": "gpt-5.3-codex",
+    "name": "gpt-5.3-codex",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "gpt-5.4",
+    "name": "gpt-5.4",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "gpt-5.5",
+    "name": "gpt-5.5",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "gpt-5.6-luna",
+    "name": "gpt-5.6-luna",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "gpt-5.6-sol",
+    "name": "gpt-5.6-sol",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "gpt-5.6-terra",
+    "name": "gpt-5.6-terra",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "gpt-6-astra",
+    "name": "gpt-6-astra",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "kimi-k2.5",
+    "name": "kimi-k2.5",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "kimi-k2.6",
+    "name": "kimi-k2.6",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "kimi-k2.7",
+    "name": "kimi-k2.7",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "kimi-k2.8-preview",
+    "name": "kimi-k2.8-preview",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "kimi-k3",
+    "name": "kimi-k3",
+    "context_length": 1050000,
+    "max_output_tokens": 128000,
+    "desc": "上下文 1050K"
+   },
+   {
+    "id": "auto",
+    "name": "auto",
+    "context_length": 168000,
+    "max_output_tokens": null,
+    "desc": "上下文 168K"
+   }
+  ],
+  "apk-yuanbao": [
+   {
+    "id": "hunyuan",
+    "name": "混元",
+    "desc": "通用对话"
+   },
+   {
+    "id": "hunyuan-expert",
+    "name": "混元 专家版",
+    "desc": "深度推理"
+   },
+   {
+    "id": "hunyuan-fast",
+    "name": "混元 快速版",
+    "desc": "低延迟"
+   },
+   {
+    "id": "hunyuan-thinking",
+    "name": "混元 深度思考",
+    "desc": "带思维链"
+   },
+   {
+    "id": "hunyuan_fast",
+    "name": "混元 快速版（下划线）",
+    "desc": "低延迟，与 hunyuan-fast 同源"
+   },
+   {
+    "id": "hunyuan_gpt_175B_0404",
+    "name": "混元 GPT 175B",
+    "desc": "2024-04 版 175B"
+   },
+   {
+    "id": "hunyuan_omnipotent",
+    "name": "混元 全能版",
+    "desc": "综合能力"
+   },
+   {
+    "id": "hunyuan_t1",
+    "name": "混元 T1",
+    "desc": "T1 版本"
+   },
+   {
+    "id": "hy92",
+    "name": "混元 92",
+    "desc": "9 系列"
+   },
+   {
+    "id": "gpt_175B_0404",
+    "name": "GPT 175B",
+    "desc": "2024-04 版"
+   },
+   {
+    "id": "deepseek",
+    "name": "DeepSeek",
+    "desc": "深度求索"
+   },
+   {
+    "id": "deepseek-thinking",
+    "name": "DeepSeek 深度思考",
+    "desc": "带思维链"
+   }
+  ],
+  "apk-doubao": [
+   {
+    "id": "doubao-pro",
+    "name": "豆包 · doubao-pro",
+    "desc": "原生中继"
+   },
+   {
+    "id": "doubao-fast",
+    "name": "豆包 · doubao-fast",
+    "desc": "原生中继"
+   },
+   {
+    "id": "doubao-lite",
+    "name": "豆包 · doubao-lite",
+    "desc": "原生中继"
+   },
+   {
+    "id": "doubao-think",
+    "name": "豆包 · doubao-think",
+    "desc": "原生中继"
+   },
+   {
+    "id": "doubao-expert",
+    "name": "豆包 · doubao-expert",
+    "desc": "原生中继"
+   },
+   {
+    "id": "doubao-coding",
+    "name": "豆包 · doubao-coding",
+    "desc": "原生中继"
+   },
+   {
+    "id": "doubao-2.1-turbo",
+    "name": "豆包 · doubao-2.1-turbo",
+    "desc": "原生中继"
+   },
+   {
+    "id": "doubao-2.1-turbo-alt",
+    "name": "豆包 · doubao-2.1-turbo-alt",
+    "desc": "原生中继"
+   },
+   {
+    "id": "doubao-2.1-pro",
+    "name": "豆包 · doubao-2.1-pro",
+    "desc": "原生中继"
+   },
+   {
+    "id": "doubao-2.1-lite",
+    "name": "豆包 · doubao-2.1-lite",
+    "desc": "原生中继"
+   },
+   {
+    "id": "0",
+    "name": "豆包 · 0",
+    "desc": "原生中继"
+   },
+   {
+    "id": "3",
+    "name": "豆包 · 3",
+    "desc": "原生中继"
+   },
+   {
+    "id": "4",
+    "name": "豆包 · 4",
+    "desc": "原生中继"
+   },
+   {
+    "id": "5",
+    "name": "豆包 · 5",
+    "desc": "原生中继"
+   },
+   {
+    "id": "9",
+    "name": "豆包 · 9",
+    "desc": "原生中继"
+   },
+   {
+    "id": "seed-lite-7b",
+    "name": "豆包 · seed-lite-7b",
+    "desc": "原生中继"
+   }
+  ]
+ },
+ "relay_specs": {
+  "apk-codebuddy": {
+   "name": "CodeBuddy 国际（copilot 直连）",
+   "base": "https://copilot.tencent.com",
+   "path": "/v2/chat/completions",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": []
+  },
+  "apk-codebuddy-cn": {
+   "name": "CodeBuddy 国内（copilot 直连）",
+   "base": "https://www.codebuddy.cn",
+   "path": "/v2/chat/completions",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": []
+  },
+  "apk-trae": {
+   "name": "Trae（api.trae.cn 直连）",
+   "base": "https://api.trae.cn",
+   "path": "/api/v1/chat/completions",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": []
+  },
+  "apk-doubao": {
+   "name": "豆包（samantha 直连）",
+   "base": "https://www.doubao.com",
+   "path": "/samantha/chat/completion",
+   "auth": "cookie",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": []
+  },
+  "apk-yuanbao": {
+   "name": "元宝（hy 直连）",
+   "base": "https://yuanbao.tencent.com",
+   "path": "/api/chat/completions",
+   "auth": "cookie",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": []
+  },
+  "web-lobster": {
+   "name": "网易 Lobster AI（有道龙虾）",
+   "base": "@lobster",
+   "path": "/api/proxy/v1/chat/completions",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": []
+  },
+  "web-glm": {
+   "name": "智谱清言网页版（glm2api 逆向）",
+   "base": "https://chatglm.cn",
+   "path": "/chatglm/backend-api/assistant/stream",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": true,
+   "free": false,
+   "models_static": [
+    {
+     "id": "glm-4-flash",
+     "name": "GLM-4 Flash",
+     "desc": "智谱清言网页版（免费快）"
+    },
+    {
+     "id": "glm-4",
+     "name": "GLM-4",
+     "desc": "智谱清言网页版"
+    },
+    {
+     "id": "glm-4-plus",
+     "name": "GLM-4 Plus",
+     "desc": "智谱清言网页版（增强）"
+    },
+    {
+     "id": "glm-4-air",
+     "name": "GLM-4 Air",
+     "desc": "智谱清言网页版"
+    },
+    {
+     "id": "glm-4-all",
+     "name": "GLM-4 All",
+     "desc": "智谱清言网页版（All 工具）"
+    },
+    {
+     "id": "glm-zero-preview",
+     "name": "GLM Zero Preview",
+     "desc": "智谱清言网页版（深度思考）"
+    }
+   ]
+  },
+  "web-trae": {
+   "name": "Trae 直连（Trae2api-cn 逆向）",
+   "base": "https://trae-api-cn.mchost.guru",
+   "path": "/api/ide/v1/chat",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": true,
+   "free": false,
+   "models_static": [
+    {
+     "id": "gpt-4o",
+     "name": "GPT-4o",
+     "desc": "Trae 直连"
+    },
+    {
+     "id": "claude-3-7-sonnet",
+     "name": "Claude 3.7 Sonnet",
+     "desc": "Trae 直连"
+    },
+    {
+     "id": "claude-3-5-sonnet",
+     "name": "Claude 3.5 Sonnet",
+     "desc": "Trae 直连"
+    },
+    {
+     "id": "deepseek-v3",
+     "name": "DeepSeek V3",
+     "desc": "Trae 直连"
+    },
+    {
+     "id": "deepseek-r1",
+     "name": "DeepSeek R1",
+     "desc": "Trae 直连（推理）"
+    }
+   ]
+  },
+  "web-deepseek": {
+   "name": "DeepSeek 网页版（deepseek-free-api 逆向）",
+   "base": "https://chat.deepseek.com",
+   "path": "/api/v0/chat/completion",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": true,
+   "free": false,
+   "models_static": [
+    {
+     "id": "deepseek-chat",
+     "name": "DeepSeek Chat",
+     "desc": "DeepSeek 网页版"
+    },
+    {
+     "id": "deepseek-reasoner",
+     "name": "DeepSeek Reasoner",
+     "desc": "DeepSeek 网页版（R1 深度思考）"
+    }
+   ]
+  },
+  "anon-zen": {
+   "name": "Our Free Model（OpenCode Zen 匿名车道）",
+   "base": "https://opencode.ai",
+   "path": "/zen/v1/chat/completions",
+   "auth": "bearer",
+   "secret_fixed": "public",
+   "web_relay": false,
+   "free": false,
+   "models_static": []
+  },
+  "kilo": {
+   "name": "Kilo Gateway（免凭据免费池）",
+   "base": "https://api.kilo.ai/api/gateway",
+   "path": "/chat/completions",
+   "auth": "none",
+   "secret_fixed": "public",
+   "web_relay": false,
+   "free": false,
+   "models_static": []
+  },
+  "pollinations": {
+   "name": "Pollinations（免密钥匿名免费池）",
+   "base": "https://text.pollinations.ai",
+   "path": "/openai/chat/completions",
+   "auth": "none",
+   "secret_fixed": "public",
+   "web_relay": false,
+   "free": false,
+   "models_static": [
+    {
+     "id": "openai",
+     "name": "OpenAI 路由（gpt-oss-20b）",
+     "desc": "免密钥匿名；Pollinations 公共转发层"
+    },
+    {
+     "id": "gpt-oss-20b",
+     "name": "GPT-OSS 20B",
+     "desc": "免密钥匿名；OpenAI 兼容"
+    }
+   ]
+  },
+  "web-qoder": {
+   "name": "Qoder（直连模型端点，社区 Qoder2Api 逆向）",
+   "base": "https://api2-v2.qoder.sh",
+   "path": "/model/v1/chat/completions",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": [
+    {
+     "id": "qwen3.8-flash",
+     "name": "Qwen3.8 Flash",
+     "desc": "免费，不扣积分"
+    },
+    {
+     "id": "qwen3.7-plus",
+     "name": "Qwen3.7 Plus",
+     "desc": "trial credits"
+    },
+    {
+     "id": "kimi-k2.7-code",
+     "name": "Kimi K2.7 Code",
+     "desc": "trial credits"
+    },
+    {
+     "id": "deepseek-v4-pro",
+     "name": "DeepSeek V4 Pro",
+     "desc": "trial credits"
+    },
+    {
+     "id": "minimax-m2.5",
+     "name": "MiniMax M2.5",
+     "desc": "trial credits"
+    }
+   ]
+  },
+  "apk-raccoon": {
+   "name": "小浣熊（llm v2 直连）",
+   "base": "https://xiaohuanxiong.com",
+   "path": "/api/web/llm/v2/chat/completions",
+   "auth": "cookie",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": []
+  },
+  "kimi-code": {
+   "name": "Kimi Code（订阅）",
+   "base": "https://api.kimi.com/coding/v1",
+   "path": "/chat/completions",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": [
+    {
+     "id": "kimi-k2",
+     "name": "Kimi K2",
+     "desc": "Kimi Code 订阅"
+    },
+    {
+     "id": "kimi-k2-0905-preview",
+     "name": "Kimi K2 0905",
+     "desc": "Kimi Code 订阅"
+    },
+    {
+     "id": "kimi-latest",
+     "name": "Kimi Latest",
+     "desc": "Kimi Code 订阅"
+    }
+   ]
+  },
+  "codex": {
+   "name": "Codex（OpenAI 订阅）",
+   "base": "https://api.openai.com/v1",
+   "path": "/chat/completions",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": [
+    {
+     "id": "gpt-4o",
+     "name": "GPT-4o",
+     "desc": "ChatGPT Plus 订阅"
+    },
+    {
+     "id": "gpt-4o-mini",
+     "name": "GPT-4o Mini",
+     "desc": "ChatGPT Plus 订阅"
+    },
+    {
+     "id": "o1",
+     "name": "o1",
+     "desc": "ChatGPT Plus 订阅"
+    },
+    {
+     "id": "o1-mini",
+     "name": "o1 Mini",
+     "desc": "ChatGPT Plus 订阅"
+    }
+   ]
+  },
+  "claude-code": {
+   "name": "Claude Code（Anthropic 订阅）",
+   "base": "https://api.anthropic.com/v1",
+   "path": "/messages",
+   "auth": "bearer",
+   "secret_fixed": null,
+   "web_relay": false,
+   "free": false,
+   "models_static": [
+    {
+     "id": "claude-3-5-sonnet-20241022",
+     "name": "Claude 3.5 Sonnet",
+     "desc": "Anthropic Pro/Max 订阅"
+    },
+    {
+     "id": "claude-3-5-haiku-20241022",
+     "name": "Claude 3.5 Haiku",
+     "desc": "Anthropic Pro/Max 订阅"
+    },
+    {
+     "id": "claude-3-opus-20240229",
+     "name": "Claude 3 Opus",
+     "desc": "Anthropic Pro/Max 订阅"
+    }
+   ]
+  }
+ },
+ "free_lanes": {
+  "anon-zen": {
+   "name": "Our Free Model（OpenCode Zen 匿名车道）",
+   "models_anon": "https://opencode.ai/zen/v1/models"
+  },
+  "kilo": {
+   "name": "Kilo Gateway（免凭据免费池）",
+   "models_anon": "https://api.kilo.ai/api/gateway/models"
+  },
+  "pollinations": {
+   "name": "Pollinations 免费池",
+   "models_anon": [
+    {
+     "id": "gpt-oss-20b",
+     "name": "gpt-oss-20b",
+     "desc": "OpenCode 开源权重 · 免密钥"
+    },
+    {
+     "id": "openai",
+     "name": "openai",
+     "desc": "OpenAI 兼容 · 免密钥"
+    }
+   ]
+  }
+ }
+}

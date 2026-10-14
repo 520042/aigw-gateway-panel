@@ -1,0 +1,873 @@
+{
+ "wb-gateway": {
+  "name": "WorkBuddy 账号 · 国内站（扫码 · 面板原生直连）",
+  "paste_type": "token",
+  "method": "qrcode",
+  "edition": "cn",
+  "gateway": true,
+  "upstream": "copilot.tencent.com",
+  "hint": "扫码登录 WorkBuddy / CodeBuddy 国内账号。凭据由面板直接持有并直连 copilot.tencent.com 拉倍率/签到 —— 不需要启动网关 EXE；「本地网关 EXE」是另一个东西（外部可选组件）",
+  "verify": {
+   "url": "https://copilot.tencent.com/console/account",
+   "type": "bearer",
+   "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
+   "ok_keys": [
+    "uid",
+    "nick",
+    "userId"
+   ]
+  }
+ },
+ "wb-gateway-intl": {
+  "name": "WorkBuddy 账号 · 国际站（扫码 · 面板原生直连）",
+  "paste_type": "token",
+  "method": "qrcode",
+  "edition": "intl",
+  "gateway": true,
+  "upstream": "copilot.tencent.com",
+  "hint": "国际站账号，扫码走 copilot.tencent.com 国际授权；同样由面板原生直连，不需要网关 EXE",
+  "verify": {
+   "url": "https://copilot.tencent.com/console/account",
+   "type": "bearer",
+   "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
+   "ok_keys": [
+    "uid",
+    "nick",
+    "userId"
+   ]
+  }
+ },
+ "web-lobster": {
+  "name": "网易 Lobster AI（有道龙虾 · 0.05 倍率）",
+  "method": "oauth_lobster",
+  "hosts": [
+   "lobsterai.youdao.com"
+  ],
+  "login_url": "https://lobsterai.youdao.com/#/index?keyfrom=invitation",
+  "gateway": false,
+  "upstream": "lobsterai.youdao.com",
+  "hint": "★ 客户端 0.05 倍率。点击「启动登录」后，在浏览器打开授权链接，完成手机/微信登录，面板会自动获取 token。对话 model 写 模型id@web-lobster 即走面板原生中继。",
+  "verify": {
+   "url": "https://@lobster/api/user/profile-summary",
+   "type": "bearer",
+   "ok_keys": [
+    "data",
+    "uid",
+    "email",
+    "credits"
+   ]
+  }
+ },
+ "web-glm": {
+  "name": "智谱清言网页版（glm2api 逆向）",
+  "method": "cookie",
+  "hosts": [
+   "chatglm.cn"
+  ],
+  "login_url": "https://chatglm.cn",
+  "login_click": [
+   "微信扫码登录",
+   "扫码登录"
+  ],
+  "gateway": false,
+  "upstream": "chatglm.cn",
+  "placeholder": "粘贴 chatglm_refresh_token（登录 chatglm.cn 后 F12 → Application → Cookies）",
+  "hint": "支持微信扫码登录（点开始登录后用手机扫二维码即可）；或手动粘贴 chatglm_refresh_token（F12 → Cookies）。对话 model 写 模型id@web-glm（glm-4-flash / glm-4 / glm-4-plus / glm-4-air / glm-4-all / glm-zero-preview）。",
+  "verify": {
+   "session_markers": [
+    "chatglm_refresh_token"
+   ]
+  },
+  "extract_secret_from_cookie": "chatglm_refresh_token"
+ },
+ "web-trae": {
+  "name": "Trae 直连（Trae2api-cn 逆向）",
+  "method": "file",
+  "hosts": [
+   "trae-api-cn.mchost.guru",
+   "trae.cn",
+   "trae.com.cn"
+  ],
+  "login_url": "https://www.trae.com.cn",
+  "browser_capture": true,
+  "gateway": false,
+  "upstream": "trae-api-cn.mchost.guru",
+  "placeholder": "粘贴 Trae x-ide-token（桌面端登录态 leveldb 或 OAuth refresh 换取）",
+  "hint": "★ 直连 Trae 国内版，无需手机开 App。取 x-ide-token：桌面端登录一次后，从 Trae 的 leveldb/Electron LocalStorage 取 ideToken（或用 OAuth refresh 换）。对话 model 写 模型id@web-trae（gpt-4o / claude-3-7-sonnet / deepseek-v3 / deepseek-r1 等）。★ 嫌手动抠麻烦？在「腾讯/原生登录」页点「读取本机 Trae 登录态」（/api/tencent?action=trae_local）可一键自动提取并落库（需面板与本机 Trae 同一台电脑）。",
+  "verify": {
+   "type": "bearer",
+   "ok_keys": [
+    "data",
+    "choices",
+    "output"
+   ]
+  }
+ },
+ "web-deepseek": {
+  "name": "DeepSeek 网页版（deepseek-free-api 逆向）",
+  "method": "file",
+  "hosts": [
+   "chat.deepseek.com"
+  ],
+  "login_url": "https://chat.deepseek.com",
+  "gateway": false,
+  "upstream": "chat.deepseek.com",
+  "paste_type": "token",
+  "placeholder": "粘贴 userToken（登录 chat.deepseek.com 后 F12 → Application → LocalStorage）",
+  "hint": "★ 免 API Key，用免费网页额度。登录 chat.deepseek.com 后 F12 拿 LocalStorage 的 userToken 粘这里。对话 model 写 deepseek-chat@web-deepseek 或 deepseek-reasoner@web-deepseek（深度思考）。首次对话需系统装有 node（用于解 POW 校验）。",
+  "browser_capture": true,
+  "storage_keys": [
+   "userToken"
+  ],
+  "storage_json_field": "value",
+  "login_click": [
+   "扫码登录",
+   "登录",
+   "手机号登录"
+  ],
+  "verify": {
+   "type": "bearer",
+   "ok_keys": [
+    "data",
+    "choices",
+    "id"
+   ]
+  }
+ },
+ "apk-trae": {
+  "name": "Trae 国内版",
+  "paste_type": "token",
+  "method": "file",
+  "hosts": [
+   "trae.com.cn",
+   "www.trae.com.cn",
+   "trae.cn",
+   "api.trae.cn"
+  ],
+  "login_url": "https://www.trae.com.cn",
+  "login_click": [
+   "登录",
+   "扫码登录",
+   "立即登录"
+  ],
+  "browser_capture": true,
+  "storage_keys": [
+   "ideToken",
+   "x-ide-token",
+   "iCubeAuthInfo",
+   "authInfo"
+  ],
+  "gateway": false,
+  "upstream": "api.trae.cn",
+  "hint": "Trae 国内版，三种方式任选：① 本机装着并登录过 Trae 桌面端 → 点「读取本机 Trae 登录态」一键提取入库；② 点「↗ 接入并打开登录页」在 Trae 官网登录，面板自动抓取凭据；③ 手动粘贴桌面端 x-ide-token。对话 model 写 模型id@apk-trae。",
+  "placeholder": "粘贴 Trae x-ide-token（桌面端 leveldb 或 OAuth refresh 换取）",
+  "verify": {
+   "url": "https://api.trae.cn/trae/api/v2/ug/checkin_credits/status",
+   "type": "bearer",
+   "ok_keys": [
+    "checked_in",
+    "enable",
+    "credits",
+    "data"
+   ]
+  }
+ },
+ "apk-doubao": {
+  "name": "豆包 网页版",
+  "method": "cookie",
+  "hosts": [
+   "doubao.com"
+  ],
+  "login_url": "https://www.doubao.com/",
+  "login_click": [
+   "账号登录",
+   "登录"
+  ],
+  "gateway": false,
+  "upstream": "www.doubao.com",
+  "hint": "在打开的浏览器里登录豆包，面板自动取 Cookie（也支持手动粘贴）",
+  "verify": {
+   "url": "https://www.doubao.com/alice/user/config/pull?version_code=20800&language=zh&device_platform=web&doubao_device_platform=web&aid=497858&real_aid=497858",
+   "type": "cookie"
+  }
+ },
+ "apk-yuanbao": {
+  "name": "元宝 网页版",
+  "method": "cookie",
+  "hosts": [
+   "yuanbao.tencent.com"
+  ],
+  "login_url": "https://yuanbao.tencent.com/",
+  "login_click": [
+   "Log In",
+   "登录",
+   "Sign in",
+   "扫码登录"
+  ],
+  "gateway": false,
+  "upstream": "yuanbao.tencent.com",
+  "storage_keys": [
+   "LOCAL_AUTH_INFO_KEY_yuanbao.tencent.com"
+  ],
+  "hint": "⚠ 元宝的会话在 localStorage（不是 Cookie）：请在打开的浏览器里登录元宝后再点「我已登录」。若只在 Cookie 里看到 _TDID_CK / 561553b2 这类设备 ID，说明还没登录成功。",
+  "verify": {
+   "url": "https://yuanbao.tencent.com/api/getuserinfo",
+   "type": "cookie",
+   "ok_keys": [
+    "user",
+    "data",
+    "userId"
+   ]
+  }
+ },
+ "apk-raccoon": {
+  "name": "小浣熊 dev.raccoon2api",
+  "method": "cookie",
+  "hosts": [
+   "xiaohuanxiong.com"
+  ],
+  "login_url": "https://xiaohuanxiong.com/",
+  "login_click": [
+   "同意并继续",
+   "同意",
+   "扫码登录",
+   "登录",
+   "立即登录"
+  ],
+  "gateway": false,
+  "upstream": "xiaohuanxiong.com",
+  "hint": "登录小浣熊；登录后可调「登录送积分」接口领积分",
+  "verify": {
+   "url": "https://xiaohuanxiong.com/api/web/points/v1/balance",
+   "type": "cookie",
+   "ok_keys": [
+    "balance",
+    "points",
+    "data"
+   ]
+  },
+  "bonus": {
+   "url": "https://xiaohuanxiong.com/api/web/desktop/v1/login/points/grant",
+   "method": "POST"
+  }
+ },
+ "apk-go": {
+  "name": "Go 原生网关 com.joy4fire.wb2apimobile",
+  "paste_type": "token",
+  "method": "qrcode",
+  "edition": "cn",
+  "gateway": false,
+  "upstream": "copilot.tencent.com",
+  "hint": "Go 版网关未提供网页授权入口，支持导入凭据文件 / 直接填 API Key",
+  "verify": {
+   "url": "https://copilot.tencent.com/console/account",
+   "type": "bearer",
+   "ua": "CLI/2.143.1 CodeBuddy/2.143.1",
+   "ok_keys": [
+    "uid",
+    "nick",
+    "userId"
+   ]
+  }
+ },
+ "apk-loomy": {
+  "name": "Loomy 讯飞（loomy.xunfei.cn）",
+  "method": "loomy",
+  "hosts": [
+   "loomy.xunfei.cn",
+   "xunfei.cn",
+   "xfinfr.com"
+  ],
+  "login_url": "https://loomy.xunfei.cn/login",
+  "no_remote_scan": true,
+  "gateway": false,
+  "upstream": "loomyad.xunfei.cn",
+  "paste_type": "token",
+  "placeholder": "粘贴 session（32 字符，登录后服务端下发）",
+  "hint": "讯飞 Loomy。★ 支持三种登录（均无需浏览器）：① 手机号+短信验证码 ② 手机号+密码 ③ 粘贴 session。登录后模型清单实时拉取（含倍率）。",
+  "verify": {
+   "url": "https://loomyad.xunfei.cn/api/v1/models",
+   "type": "bearer",
+   "ok_keys": [
+    "data",
+    "models",
+    "id"
+   ]
+  }
+ },
+ "apk-antigravity": {
+  "name": "Antigravity / Google Cloud Code",
+  "method": "cookie",
+  "hosts": [
+   "google.com",
+   "googleapis.com"
+  ],
+  "login_url": "https://accounts.google.com/",
+  "gateway": false,
+  "upstream": "cloudcode-pa.googleapis.com",
+  "hint": "Google 官方 Antigravity（APK 内 UA antigravity/1.15.8，pluginType=GEMINI）。需 Google 账号，取 oauth2 token 或 Cookie。⚠ 2026-10-06 实测：accounts.google.com 在服务端无头浏览器里抓不到二维码——Google 官方说明 QR 登录是「用已登录手机给电脑做二次验证」，且明确写了「电脑端可能无法扫描」，遇风控/VPN 更会直接隐藏 QR 选项退回密码登录。故本平台**不支持远程扫码**，请在自己电脑浏览器登录后手动粘贴 Cookie（或 oauth2 token）",
+  "verify": {
+   "url": "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+   "method": "POST",
+   "type": "bearer"
+  }
+ },
+ "apk-coze": {
+  "browser_capture": true,
+  "name": "扣子 Coze（api.coze.cn 官方 API）",
+  "method": "file",
+  "type": "api_key",
+  "placeholder": "pat_xxxxxxxxxxxx",
+  "hosts": [
+   "coze.cn"
+  ],
+  "login_url": "https://www.coze.cn/",
+  "gateway": false,
+  "upstream": "api.coze.cn",
+  "hint": "唯一有完整开放 API 的国内 Agent 平台。在扣子控制台「个人访问令牌」生成 pat_ 开头的 PAT，粘到下面即可（浏览器 Cookie 会被 401 拒绝）",
+  "verify": {
+   "url": "https://api.coze.cn/v3/chat/retrieve",
+   "type": "bearer"
+  }
+ },
+ "apk-qwenwork": {
+  "name": "千问办公 QwenWork（阿里）",
+  "method": "cookie",
+  "hosts": [
+   "qwenwork.cn",
+   "aliyun.com"
+  ],
+  "login_url": "https://qwenwork.cn/signin",
+  "gateway": false,
+  "upstream": "qwenwork.cn",
+  "hint": "⚠ qwenwork.cn 是 JWT 鉴权（实测 2026-10-05）：网关中间件只认 cookie 名 token=eyJ… 或 Authorization Bearer 头，其它 Cookie 一律「JWT is missing」。自动捕获会双发 Bearer；若仍校验失败，请在登录后浏览器 DevTools→Application→Cookies 里找 token=开头为 eyJ 的那条手动粘贴。每日登录奖 100 积分",
+  "login_click": [
+   "扫码登录",
+   "登录",
+   "立即登录"
+  ],
+  "verify": {
+   "url": "https://qwenwork.cn/api/user/info",
+   "type": "cookie",
+   "ok_keys": [
+    "user",
+    "data",
+    "nick",
+    "avatar"
+   ]
+  }
+ },
+ "apk-kuku": {
+  "name": "库库 AI（百度文库+网盘）",
+  "method": "cookie",
+  "hosts": [
+   "baidu.com",
+   "kuku.baidu.com"
+  ],
+  "login_url": "https://kuku.baidu.com/",
+  "login_click": [
+   "立即登录",
+   "登录",
+   "扫码登录",
+   "账号登录",
+   "去登录"
+  ],
+  "gateway": false,
+  "upstream": "kuku.baidu.com",
+  "hint": "每日登录 +50、完成一次对话 +50、邀请新用户最高 +450；连续签到 3/5/7 天各再送百度网盘 SVIP。1 积分 ≈ 1 万 Token。活动期制，规则可能变",
+  "verify": {
+   "url": "https://kuku.baidu.com/api/genflowpro/settings/profile",
+   "type": "cookie",
+   "ok_keys": [
+    "nickname",
+    "account",
+    "avatar_url"
+   ],
+   "errno_field": "errno",
+   "unlogin_errno": -6,
+   "unlogin_msg": "未登录 / need login",
+   "note": "200 + errno:-6 = 未登录；errno:0 = 已登录"
+  }
+ },
+ "apk-wps": {
+  "name": "WPS AI（金山办公）",
+  "method": "cookie",
+  "hosts": [
+   "wps.cn",
+   "kdocs.cn"
+  ],
+  "login_url": "https://www.wps.cn/",
+  "login_click": [
+   "登录",
+   "立即登录",
+   "免费登录",
+   "扫码登录"
+  ],
+  "gateway": false,
+  "upstream": "www.wps.cn",
+  "hint": "⚠ WPS 是「积分 / 灵犀智点」双轨制，别把两者当同一个。端点需登录后探测",
+  "verify": {
+   "url": "https://drive.kdocs.cn/api/v3/userinfo",
+   "type": "cookie",
+   "ok_keys": [
+    "id",
+    "name",
+    "avatar",
+    "status"
+   ],
+   "note": "AI 积分在 lingxi.kdocs.cn/api/public/v1/credits/balance"
+  }
+ },
+ "apk-nano": {
+  "name": "纳米 AI（360）",
+  "method": "cookie",
+  "hosts": [
+   "n.cn",
+   "360.cn"
+  ],
+  "login_url": "https://www.n.cn/",
+  "login_click": [
+   "立即登录",
+   "登录",
+   "扫码登录",
+   "账号登录",
+   "去登录"
+  ],
+  "gateway": false,
+  "upstream": "www.n.cn",
+  "hint": "360 旗下 AI 搜索/办公。端点需登录后探测",
+  "verify": {
+   "url": "https://www.n.cn/api/user/info",
+   "type": "cookie",
+   "ok_keys": [
+    "user",
+    "data",
+    "nickname",
+    "avatar"
+   ]
+  }
+ },
+ "anon-zen": {
+  "name": "Our Free Model（OpenCode Zen 匿名车道）",
+  "method": "anon",
+  "hosts": [
+   "opencode.ai"
+  ],
+  "login_url": "https://opencode.ai",
+  "gateway": false,
+  "upstream": "opencode.ai",
+  "placeholder": "无需填写（公共凭据自动落池）",
+  "hint": "★ 免登录、免 Key、免注册：点接入即把公共凭据写入账号池。模型含 DeepSeek V4.1 Flash、Kimi K3 等前沿款（动态清单）。免费额度按会话计，短时间打满会 429（换会话或稍后再用）；个别地区 403。上游仅 OpenCode Zen 一家，无中转无号池。",
+  "verify": {
+   "url": "https://opencode.ai/zen/v1/models",
+   "type": "bearer",
+   "ua": "opencode/1.18.31",
+   "ok_keys": [
+    "data",
+    "id",
+    "model"
+   ]
+  }
+ },
+ "kilo": {
+  "name": "Kilo Gateway（免凭据免费池）",
+  "method": "anon",
+  "hosts": [
+   "api.kilo.ai",
+   "kilo.ai"
+  ],
+  "login_url": "https://kilo.ai",
+  "gateway": false,
+  "upstream": "api.kilo.ai",
+  "placeholder": "无需填写（免凭据车道，点接入即用）",
+  "hint": "★ 免登录、免 Key、免注册：Kilo 的免费池对匿名请求直接应答，点「接入」只是把它登记进路由。清单取上游 models 的 isFree 切片。⚠ 上游明确说明免费池的提示可能被记录用于改进其服务，请勿用它处理敏感内容。"
+ },
+ "web-qoder": {
+  "browser_capture": true,
+  "name": "Qoder（直连模型端点 · qwen3.8-flash 免费）",
+  "method": "file",
+  "hosts": [
+   "qoder.com",
+   "api2-v2.qoder.sh"
+  ],
+  "login_url": "https://www.qoder.com/",
+  "gateway": false,
+  "upstream": "api2-v2.qoder.sh",
+  "placeholder": "粘贴 Qoder 的 accessToken（桌面端登录态）",
+  "hint": "★ 直连模型端点（社区 Qoder2Api 逆向）：qwen3.8-flash 免费，qwen3.7-plus/kimi-k2.7-code/deepseek-v4-pro/minimax-m2.5 走 trial credits。获取 token：运行 Qoder2Api 的设备登录（python main.py --login），token 存于 ~/.qoder2api-auth.json，把 accessToken 粘到这里。粘好后对话 model 写 模型id@web-qoder 即走面板原生中继。",
+  "verify": {
+   "url": "https://www.qoder.com/api/v1/user/info",
+   "type": "bearer",
+   "ok_keys": [
+    "data",
+    "id",
+    "model",
+    "choices"
+   ]
+  }
+ },
+ "apk-qoder": {
+  "browser_capture": true,
+  "name": "Qoder（阿里桌面端，原通义灵码国际版）",
+  "method": "file",
+  "hosts": [
+   "qoder.com",
+   "lingma.aliyun.com"
+  ],
+  "login_url": "https://www.qoder.com/",
+  "gateway": false,
+  "upstream": "www.qoder.com",
+  "placeholder": "粘贴 Qoder 的 token/Cookie",
+  "hint": "★ 桌面端应用：凭据在 Qoder 桌面客户端本地，浏览器 Cookie 接入无意义（已移除该流程）。每日 10:00 领 100 Credits 要在桌面端里领（官方写明仅桌面端主动领取，未公布 API）。CLIProxyAPI v8.0.13 尚无 -qoder-login。若你能从客户端取到凭据，可手动粘贴这里（验活走 /api/v1/user/info）",
+  "verify": {
+   "url": "https://www.qoder.com/api/v1/user/info",
+   "type": "cookie",
+   "ok_keys": [
+    "user",
+    "data",
+    "email",
+    "credits"
+   ]
+  }
+ },
+ "apk-metaso": {
+  "name": "秘塔 AI（metaso.cn）",
+  "method": "cookie",
+  "hosts": [
+   "metaso.cn"
+  ],
+  "login_url": "https://metaso.cn/",
+  "login_click": [
+   "登录",
+   "立即登录",
+   "扫码登录",
+   "登录/注册"
+  ],
+  "gateway": false,
+  "upstream": "metaso.cn",
+  "hint": "唯一有官方 Open API + MCP 的国内办公 AI（¥0.03/次）。它的积分是「每日自动刷新到账」，**不需要签到** —— 别给它做签到按钮",
+  "verify": {
+   "url": "https://metaso.cn/api/user/info",
+   "type": "cookie",
+   "ok_keys": [
+    "user",
+    "data",
+    "id",
+    "name"
+   ]
+  }
+ },
+ "api-deepseek": {
+  "name": "DeepSeek 官方 API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://platform.deepseek.com/",
+  "upstream": "api.deepseek.com",
+  "placeholder": "sk-...",
+  "hint": "在 DeepSeek 开放平台「API keys」创建后粘贴",
+  "verify": {
+   "url": "https://api.deepseek.com/models",
+   "type": "api_key"
+  }
+ },
+ "api-moonshot": {
+  "name": "Kimi 月之暗面 API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://platform.moonshot.cn/",
+  "upstream": "api.moonshot.cn",
+  "placeholder": "sk-...",
+  "hint": "在 Moonshot 开放平台「API Key 管理」创建后粘贴",
+  "verify": {
+   "url": "https://api.moonshot.cn/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-zhipu": {
+  "name": "智谱 BigModel API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://open.bigmodel.cn/usercenter/apikeys",
+  "upstream": "open.bigmodel.cn",
+  "placeholder": "id.xxx",
+  "hint": "在智谱「API keys」创建后粘贴；GLM-Flash 系免费",
+  "verify": {
+   "url": "https://open.bigmodel.cn/api/paas/v4/models",
+   "type": "api_key"
+  }
+ },
+ "api-dashscope": {
+  "name": "阿里云百炼 API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://bailian.console.aliyun.com/",
+  "upstream": "dashscope.aliyuncs.com",
+  "placeholder": "sk-...",
+  "hint": "在百炼控制台「API-KEY 管理」创建后粘贴；新用户赠大量 token",
+  "verify": {
+   "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-bailian": {
+  "name": "阿里百炼 API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://bailian.console.aliyun.com/",
+  "upstream": "dashscope.aliyuncs.com",
+  "placeholder": "sk-...",
+  "hint": "与阿里云百炼同一套 Key（DashScope 兼容模式）",
+  "verify": {
+   "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-volcengine": {
+  "name": "火山方舟 API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://console.volcengine.com/ark",
+  "upstream": "ark.cn-beijing.volces.com",
+  "placeholder": "key...",
+  "hint": "在火山方舟「API Key 管理」创建后粘贴",
+  "verify": {
+   "url": "https://ark.cn-beijing.volces.com/api/v3/models",
+   "type": "api_key"
+  }
+ },
+ "api-minimax": {
+  "name": "MiniMax API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://platform.minimaxi.com/",
+  "upstream": "api.minimax.chat",
+  "placeholder": "eyJ...",
+  "hint": "在 MiniMax 开放平台创建后粘贴",
+  "verify": {
+   "url": "https://api.minimax.chat/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-stepfun": {
+  "name": "阶跃星辰 API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://platform.stepfun.com/",
+  "upstream": "api.stepfun.com",
+  "placeholder": "sk-...",
+  "hint": "在阶跃「API 密钥」创建后粘贴",
+  "verify": {
+   "url": "https://api.stepfun.com/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-baichuan": {
+  "name": "百川智能 API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://platform.baichuan-ai.com/",
+  "upstream": "api.baichuan-ai.com",
+  "placeholder": "sk-...",
+  "hint": "在百川开放平台「API Keys」创建后粘贴",
+  "verify": {
+   "url": "https://api.baichuan-ai.com/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-siliconflow": {
+  "name": "硅基流动 API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://cloud.siliconflow.cn/",
+  "upstream": "api.siliconflow.cn",
+  "placeholder": "sk-...",
+  "hint": "在硅基流动「API 密钥」创建后粘贴；部分模型永久免费",
+  "verify": {
+   "url": "https://api.siliconflow.cn/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-groq": {
+  "name": "Groq API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://console.groq.com/keys",
+  "upstream": "api.groq.com",
+  "placeholder": "gsk_...",
+  "hint": "在 Groq Console 创建后粘贴（免费档极低延迟）",
+  "verify": {
+   "url": "https://api.groq.com/openai/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-openrouter": {
+  "name": "OpenRouter API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://openrouter.ai/keys",
+  "upstream": "openrouter.ai",
+  "placeholder": "sk-or-...",
+  "hint": "在 OpenRouter「Keys」创建后粘贴；有 free 标签免费模型",
+  "verify": {
+   "url": "https://openrouter.ai/api/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-modelscope": {
+  "name": "魔搭 ModelScope API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://modelscope.cn/my/myaccesstoken",
+  "upstream": "api-inference.modelscope.cn",
+  "placeholder": "ms-...",
+  "hint": "在魔搭「访问令牌」创建后粘贴；3000+ 模型",
+  "verify": {
+   "url": "https://api-inference.modelscope.cn/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-xfyun": {
+  "name": "讯飞星辰 MaaS API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://console.xfyun.cn/",
+  "upstream": "spark-api-open.xf-yun.com",
+  "placeholder": "sk-...",
+  "hint": "用星辰 MaaS 的 http key（Bearer 直用）；注意 spark-api.xf-yun.com 老星火是 HMAC 签名，不适用",
+  "verify": {
+   "url": "https://spark-api-open.xf-yun.com/v1/models",
+   "type": "api_key"
+  }
+ },
+ "api-qianfan": {
+  "name": "百度千帆 API",
+  "method": "file",
+  "type": "api_key",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "https://console.bce.baidu.com/iam/",
+  "upstream": "qianfan.baidubce.com",
+  "placeholder": "bce-...",
+  "hint": "在百度智能云创建千帆 API Key 后粘贴；ERNIE-Speed/Lite 永久免费",
+  "verify": {
+   "url": "https://qianfan.baidubce.com/v2/models",
+   "type": "api_key"
+  }
+ },
+ "sub-kimi": {
+  "name": "Kimi Code 国内站",
+  "method": "oauth_device",
+  "type": "subscription",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "",
+  "upstream": "",
+  "hint": "Kimi Code 订阅登录。国内站 auth.kimi.com。设备码登录后自动获取 token，网关直接反代。",
+  "verify": null
+ },
+ "sub-kimi-ai": {
+  "name": "Kimi Code 国际站",
+  "method": "oauth_device",
+  "type": "subscription",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "",
+  "upstream": "",
+  "hint": "Kimi Code 订阅登录。国际站 auth.kimi.ai。设备码登录后自动获取 token，网关直接反代。",
+  "verify": null
+ },
+ "sub-codex": {
+  "name": "OpenAI Codex",
+  "method": "oauth_pkce",
+  "type": "subscription",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "",
+  "upstream": "",
+  "hint": "ChatGPT Plus/Pro 订阅登录。PKCE OAuth 流程，登录后自动获取 access_token，网关直接反代。",
+  "verify": null
+ },
+ "sub-claude": {
+  "name": "Anthropic Claude Code",
+  "method": "oauth_pkce",
+  "type": "subscription",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "",
+  "upstream": "",
+  "hint": "Claude Pro/Max 订阅登录。PKCE OAuth 流程，登录后自动获取 access_token，网关直接反代。",
+  "verify": null
+ },
+ "sub-grok": {
+  "name": "xAI Grok",
+  "method": "oauth_device",
+  "type": "subscription",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "",
+  "upstream": "",
+  "hint": "Grok Build 订阅登录。设备码 OAuth 流程，登录后自动获取 access_token，网关直接反代。",
+  "verify": null
+ },
+ "sub-antigravity": {
+  "name": "Google Antigravity",
+  "method": "oauth_google",
+  "type": "subscription",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "",
+  "upstream": "",
+  "hint": "Google Gemini 订阅登录。Google OAuth 流程：点「接入」生成授权链接 → 浏览器登录授权 → 地址栏跳 localhost:51121/callback?code=…（页面打不开是正常的）→ 把 code= 后面那段粘贴到下方即完成登录，token 自动入库。",
+  "verify": null
+ },
+ "sub-devin": {
+  "name": "Devin",
+  "method": "oauth_pkce",
+  "type": "subscription",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "",
+  "upstream": "",
+  "hint": "Devin 订阅登录。PKCE OAuth 流程，登录后自动获取 session_token，网关直接反代。",
+  "verify": null
+ },
+ "sub-meta": {
+  "name": "Meta Muse",
+  "method": "oauth_device",
+  "type": "subscription",
+  "gateway": false,
+  "hosts": [],
+  "login_url": "",
+  "upstream": "",
+  "hint": "Meta AI 订阅登录。设备码 OAuth 流程，登录后自动获取 access_token，网关直接反代。",
+  "verify": null
+ }
+}

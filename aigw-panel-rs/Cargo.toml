@@ -1,0 +1,44 @@
+[package]
+name = "aigw-panel"
+version = "0.3.0"
+edition = "2021"
+description = "本地 AI 资源整合网关面板（Rust · 大厂级分层架构）"
+license = "MIT"
+
+[lib]
+name = "aigw_panel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aigw-panel"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["original-uri"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+http = "1"
+# Windows 桌面面板：用 native-tls(Schannel) 支持 HTTPS 上游，纯 Rust、无需 OpenSSL/ring/C 工具链。
+# 链接器用 rustc 自带的 rust-lld（self-contained），无需外部 MinGW。
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "native-tls"] }
+futures-util = "0.3"
+anyhow = "1"
+http-body-util = "0.1"
+md-5 = "0.10"
+bytes = "1"
+
+# ── 大厂级基建 ─────────────────────────────────────────────
+thiserror = "1"                              # 统一错误类型
+tracing = "0.1"                             # 结构化日志（替代 println!）
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }  # CLI
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 1

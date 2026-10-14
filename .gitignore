@@ -63,3 +63,6 @@ aigw-panel/data/cliproxy/
 
 # 打包产物里的运行数据（首次运行会在此生成）
 aigw-panel/dist/data/
+
+# Rust 重构产物
+aigw-panel-rs/target/

@@ -1,0 +1,3 @@
+# 目标：x86_64-pc-windows-msvc（使用系统 MSVC 链接器 link.exe）。
+# 需先安装 Visual Studio Build Tools（C++ 桌面开发工作负载，含 link.exe 与 Windows SDK）。
+# 构建：rustup target add x86_64-pc-windows-msvc && cargo +stable build --target x86_64-pc-windows-msvc
