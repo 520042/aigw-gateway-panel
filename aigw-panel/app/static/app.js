@@ -849,6 +849,17 @@ function srcPatch(pid){
 
 /** 右侧抽屉：某源的详情面（登录流程 + 账号 + 模型，new-api Drawer 范式）
  *  animate=false → 不加入场动画（轮询重绘时不能重播，否则每 2 秒闪一次） */
+/** ★ 2026-10-14：抽屉局部刷新 —— 只换 srcDrawerBox，不整页 render（不闪）。
+ *  返回 false 表示抽屉未开/元素缺失，调用方回落 render()。 */
+function srcDrawerPatch(){
+  const box=document.getElementById('srcDrawerBox');
+  if(!box || !SRC_EXPAND) return false;
+  const ds = sourceList().find(x=>x.key===SRC_EXPAND);
+  if(!ds) return false;
+  box.innerHTML = srcDrawer(ds, false);
+  return true;
+}
+
 function srcDrawer(s, animate){
   const on=!!s.logged;
   let body='';
@@ -1117,7 +1128,10 @@ function viewSources(){
     if(ds){
       const animate = !SRC_POP_ANIM;
       SRC_POP_ANIM = true;
-      h += srcDrawer(ds, animate);
+      // ★ 2026-10-14（Rust 面板用户反馈「点跳转登录整页闪一下」）：
+      //   抽屉加容器 id，登录会话等局部刷新只换这个盒子（srcDrawerPatch），
+      //   不再整页 render —— 对齐 2026-10-13 srcPatch 的既定修法。
+      h += '<div id="srcDrawerBox">' + srcDrawer(ds, animate) + '</div>';
     }
   }
   return h;
@@ -3611,24 +3625,34 @@ async function loadLogin(){
 }
 
 async function startLogin(pid,edition,headless,forceBrowser){
-  // headless=1：不依赖你本机 Chrome/Edge，由服务器起无头浏览器打开登录页，
-  // 二维码抓回面板里用手机扫，登录后 Cookie 自动捕捉入库（远程部署也全流程可用）
-  // forceBrowser=1：file 类平台走「跳转登录」——弹出浏览器打开登录页，
-  // 用户登录后面板自动抓取 Cookie/localStorage 凭据（2026-10-12 补第二方式）
+  // ★ 2026-10-14（用户实拍「点跳转登录不跳转」）：后端拉默认浏览器不可靠
+  //   （explorer/cmd 在服务型进程里可能静默不出窗）。改为前端 window.open：
+  //   在点击手势内先开空标签占位（绕过弹窗拦截），拿到 auth_url 后导航过去
+  //   —— 同一个浏览器实例、必前台、与面板同源可见。
   toast(headless?'正在启动服务端无头浏览器…'
     :(forceBrowser?'正在打开浏览器，请在里面完成登录…':'正在发起登录…'));
+  let loginWin=null;
+  try{ loginWin=window.open('about:blank','_blank'); }catch(e){}
   const body={platform:pid};
   if(edition)body.edition=edition;
   if(headless)body.headless=1;
   if(forceBrowser)body.force_browser=1;
   const r=await api('api/login?action=start',body).catch(e=>({ok:false,message:e.message}));
-  if(r.ok===false){toast(r.message||'发起登录失败','err');return;}
+  if(r.ok===false){
+    if(loginWin&&!loginWin.closed)loginWin.close();
+    toast(r.message||'发起登录失败','err');return;
+  }
   S.data.loginSession=r.session||null;
-  render();
+  // 抽屉开着 → 只换抽屉盒子（不闪整页）；否则才全量 render
+  if(!(S.v==='sources' && SRC_EXPAND && srcDrawerPatch())){ render(); }
   const s=S.data.loginSession;
+  if(s&&s.auth_url&&loginWin&&!loginWin.closed){ loginWin.location.href=s.auth_url; }
+  else if(loginWin&&!loginWin.closed){ loginWin.close(); }
+  else if(s&&s.auth_url){ toast('浏览器拦截了弹出窗口，请点「打开授权页」手动跳转','warn'); }
+  const sess=S.data.loginSession;
   // cookie 会话（尤其服务端无头模式）也轮询：看守线程自动捕捉到 Cookie 能即时反馈到 UI
-  if(s&&(s.method==='qrcode'||s.method==='remotescan'||s.method==='cookie')
-     &&(s.status==='pending'||s.status==='waiting'))startLoginPoll();
+  if(sess&&(sess.method==='qrcode'||sess.method==='remotescan'||sess.method==='cookie')
+    &&(sess.status==='pending'||sess.status==='waiting'))startLoginPoll();
 }
 
 // 服务端远程扫码（无需本机浏览器）：直接打平台 Web 二维码接口
@@ -3658,7 +3682,7 @@ function startLoginPoll(){
                (r.session.message||'').slice(0,80)].join('|');
     const changed = sig!==lastSig;
     lastSig = sig;
-    if(SRC_EXPAND){ if(changed) render(); } else { paintLoginSession(); }
+    if(SRC_EXPAND){ if(changed && !srcDrawerPatch()) render(); } else { paintLoginSession(); }
     if(r.session.status==='success'){
       stopLoginPoll();
       toast('登录成功，凭据已保存','ok');
@@ -3669,7 +3693,7 @@ function startLoginPoll(){
     }else if(r.session.status==='error'||r.session.status==='expired'){
       stopLoginPoll();
       toast(r.session.message||r.session.error||'登录结束','err');
-      if(SRC_EXPAND){ render(); } else { paintLoginSession(); }
+      if(SRC_EXPAND){ if(!srcDrawerPatch()) render(); } else { paintLoginSession(); }
     }
   },2000);
 }
