@@ -1099,10 +1099,24 @@ pub async fn growth(State(st): State<AppState>) -> impl IntoResponse {
     }}))
 }
 
-/// 外部站点任务清单（`api/tasks`）：Rust 尚未接入站点任务存储，如实回空。
-#[tracing::instrument]
-pub async fn tasks() -> impl IntoResponse {
-    Json(json!({"ok": true, "tasks": [], "note": "站点任务模块待接入"}))
+/// 外部站点任务清单（`api/tasks`）：GET 读清单，POST 支持 add/delete/toggle/run_all。
+/// Rust 侧站点任务存储待接入，POST 操作如实回状态（不伪造执行结果）。
+#[tracing::instrument(skip(st))]
+pub async fn tasks(
+    State(st): State<AppState>,
+    q: Query<HashMap<String, String>>,
+    body: Option<Json<Value>>,
+) -> impl IntoResponse {
+    let _ = &st;
+    let action = q.get("action").map(|s| s.as_str()).unwrap_or("");
+    let _b: Value = body.map(|Json(v)| v).unwrap_or(Value::Null);
+    match action {
+        "add" => Json(json!({"ok": true, "message": "站点任务存储待接入（当前不持久化）"})),
+        "delete" => Json(json!({"ok": true, "message": "站点任务存储待接入"})),
+        "toggle" => Json(json!({"ok": true, "message": "站点任务存储待接入"})),
+        "run_all" => Json(json!({"ok": true, "executed": [], "message": "站点任务存储待接入（无任务可执行）"})),
+        _ => Json(json!({"ok": true, "tasks": [], "note": "站点任务模块待接入"})),
+    }
 }
 
 /// 每日免费模型榜单（`api/free_models?refresh=1`）：ClawLabsAI 数据源。

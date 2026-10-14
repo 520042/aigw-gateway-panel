@@ -60,7 +60,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/route", get(handlers::api::route))
         .route("/api/usage", get(handlers::api::usage))
         .route("/api/growth", get(handlers::api::growth))
-        .route("/api/tasks", get(handlers::api::tasks))
+        .route("/api/tasks", get(handlers::api::tasks).post(handlers::api::tasks))
         .route("/api/free_models", get(handlers::api::free_models))
         .route("/api/notify", get(handlers::api::notify).post(handlers::api::notify))
         .route("/api/logs", get(handlers::api::logs))
