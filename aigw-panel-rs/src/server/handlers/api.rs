@@ -381,7 +381,16 @@ pub async fn login(
                            Cookie / Token 粘贴到下方输入框保存。"
                     .to_string();
             }
-            let sess = st.inner.login.start_ex_state(platform, &method, &login_url, &message, &wb_state);
+            let mut sess = st.inner.login.start_ex_state(platform, &method, &login_url, &message, &wb_state);
+            // MiniMax 设备码会话：method 对齐前端 oauth_device 分支（显示设备码框），
+            // user_code 从 state 里取出单列（前端 viewLoginSession 读 sess.user_code）。
+            if platform == "minimax" && wb_state.starts_with("minimax:") {
+                sess["method"] = json!("oauth_device");
+                let parts: Vec<&str> = wb_state.splitn(4, ':').collect();
+                if parts.len() >= 4 {
+                    sess["user_code"] = json!(parts[3]);
+                }
+            }
             // ★ 跳转由前端 window.open 完成（点击手势内开标签，同一浏览器实例
             //   必前台）；后端 explorer 拉默认浏览器在部分环境静默不出窗，已弃用。
             Json(json!({"ok": true, "session": sess}))
@@ -514,6 +523,46 @@ pub async fn login(
                 }
             }
             Json(json!({"ok": true, "session": sess}))
+        }
+        "loomy_sms_send" => {
+            // Loomy 短信登录第一步（签名协议复刻自 Python loomy_client.send_sms）
+            let phone = b.get("phone").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if phone.is_empty() {
+                return Json(json!({"ok": false, "message": "手机号必填"}));
+            }
+            match crate::server::loomy_auth::send_sms(&phone).await {
+                Ok(msgid) => Json(json!({"ok": true, "msgid": msgid, "message": "验证码已发送"})),
+                Err(e) => Json(json!({"ok": false, "message": e})),
+            }
+        }
+        "loomy_sms_verify" => {
+            let phone = b.get("phone").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            let code = b.get("code").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            let msgid = b.get("msgid").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if phone.is_empty() || code.is_empty() || msgid.is_empty() {
+                return Json(json!({"ok": false, "message": "手机号/验证码/msgid 必填"}));
+            }
+            match crate::server::loomy_auth::verify_sms(&phone, &code, &msgid).await {
+                Ok((session, uid)) => {
+                    st.inner.login.add_account("apk-loomy", &format!("Loomy（{}）", phone), "token", &session);
+                    Json(json!({"ok": true, "message": "Loomy 登录成功，session 已入账号池（14 天有效）", "uid": uid}))
+                }
+                Err(e) => Json(json!({"ok": false, "message": e})),
+            }
+        }
+        "loomy_pwd" => {
+            let phone = b.get("phone").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            let password = b.get("password").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if phone.is_empty() || password.is_empty() {
+                return Json(json!({"ok": false, "message": "手机号/密码必填"}));
+            }
+            match crate::server::loomy_auth::pwd_login(&phone, &password).await {
+                Ok((session, uid)) => {
+                    st.inner.login.add_account("apk-loomy", &format!("Loomy（{}）", phone), "token", &session);
+                    Json(json!({"ok": true, "message": "Loomy 登录成功，session 已入账号池（14 天有效）", "uid": uid}))
+                }
+                Err(e) => Json(json!({"ok": false, "message": e})),
+            }
         }
         "submit" => {
             let platform = b.get("platform").and_then(|v| v.as_str()).unwrap_or("").to_string();

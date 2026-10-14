@@ -3650,9 +3650,13 @@ async function startLogin(pid,edition,headless,forceBrowser){
   else if(loginWin&&!loginWin.closed){ loginWin.close(); }
   else if(s&&s.auth_url){ toast('浏览器拦截了弹出窗口，请点「打开授权页」手动跳转','warn'); }
   const sess=S.data.loginSession;
-  // cookie 会话（尤其服务端无头模式）也轮询：看守线程自动捕捉到 Cookie 能即时反馈到 UI
-  if(sess&&(sess.method==='qrcode'||sess.method==='remotescan'||sess.method==='cookie')
-    &&(sess.status==='pending'||sess.status==='waiting'))startLoginPoll();
+  // ★ 2026-10-15（用户实测「登录成功前端没反应」根因）：轮询启动条件原来只有
+  //   qrcode/remotescan/cookie 三种 method —— MiniMax(oauth_device) 与 wb 族
+  //   (file 但后端真实轮询设备授权) 会话永远不轮询，用户在授权页完成登录后
+  //   前端毫无反应，只能靠 F5。改为：**只要会话处于未完结状态就轮询**
+  //   （pending/waiting），后端 poll 对无设备码的平台是纯查库（无害），有设备码
+  //   的平台真实轮询上游，成功/过期都能即时反馈到 UI。
+  if(sess&&(sess.status==='pending'||sess.status==='waiting'))startLoginPoll();
 }
 
 // 服务端远程扫码（无需本机浏览器）：直接打平台 Web 二维码接口

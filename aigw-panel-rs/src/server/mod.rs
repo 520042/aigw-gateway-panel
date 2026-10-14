@@ -4,6 +4,7 @@ pub mod checkin;
 pub mod free_lane_models;
 pub mod free_models;
 pub mod handlers;
+pub mod loomy_auth;
 pub mod login;
 pub mod notify;
 pub mod state;
