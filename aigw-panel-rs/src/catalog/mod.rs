@@ -268,6 +268,10 @@ impl Catalog {
         }
 
         // ⑥ 免凭据车道（anon-zen / kilo / pollinations…）
+        //   models_anon 有两种形态：
+        //   - 数组：静态清单（pollinations），直接用
+        //   - URL 字符串：需联网拉动态清单（anon-zen/kilo），读 free_lane_models 缓存
+        let lane_cache = crate::server::free_lane_models::get_cached();
         if let Some(obj) = free.as_object() {
             for (pid, spec) in obj {
                 let name = spec
@@ -277,7 +281,15 @@ impl Catalog {
                     .to_string();
                 let rows = match spec.get("models_anon") {
                     Some(Value::Array(a)) => Value::Array(a.clone()),
-                    _ => Value::Array(vec![]),
+                    _ => {
+                        // 动态车道：从缓存取（无缓存回空，前端显示"点刷新拉取"）
+                        lane_cache
+                            .as_ref()
+                            .and_then(|c| c.get(pid.as_str()))
+                            .filter(|v| v.is_array())
+                            .cloned()
+                            .unwrap_or_else(|| Value::Array(vec![]))
+                    }
                 };
                 let g = self.suffixed_group(
                     pid,

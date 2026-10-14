@@ -1140,6 +1140,24 @@ pub async fn free_models(q: Query<HashMap<String, String>>) -> impl IntoResponse
     }
 }
 
+/// 免费车道动态模型拉取（`api/free_lane_models?refresh=1`）：anon-zen + kilo。
+/// refresh=1 强制现场拉取；否则回缓存。
+#[tracing::instrument]
+pub async fn free_lane_models(q: Query<HashMap<String, String>>) -> impl IntoResponse {
+    let refresh = q.get("refresh").map(|s| s == "1").unwrap_or(false);
+    if refresh {
+        match crate::server::free_lane_models::fetch_all().await {
+            Some(d) => Json(json!({"ok": true, "lanes": d})),
+            None => Json(json!({"ok": false, "message": "免费车道拉取失败（网络或源不可达）"})),
+        }
+    } else {
+        match crate::server::free_lane_models::get_cached() {
+            Some(d) => Json(json!({"ok": true, "lanes": d})),
+            None => Json(json!({"ok": true, "lanes": {}, "note": "首次加载，请点刷新拉取"})),
+        }
+    }
+}
+
 /// 通知配置（`api/notify`）：GET 读配置，POST 支持 add/delete/test/send/save_flags。
 #[tracing::instrument(skip(st))]
 pub async fn notify(
