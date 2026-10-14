@@ -663,6 +663,21 @@
     "type": "api_key"
    }
   },
+  "minimax": {
+   "name": "MiniMax Code（网页版·设备码）",
+   "method": "file",
+   "type": "api_key",
+   "gateway": false,
+   "hosts": [],
+   "login_url": "https://account.minimax.cn",
+   "upstream": "agent.minimax.cn",
+   "placeholder": "eyJ...",
+   "hint": "点「接入」→ 打开验证页输入码完成授权，面板自动拿 token；支持每日签到领积分",
+   "verify": {
+    "url": "https://agent.minimax.cn/mavis/api/v1/models",
+    "type": "api_key"
+   }
+  },
   "api-stepfun": {
    "name": "阶跃星辰 API",
    "method": "file",

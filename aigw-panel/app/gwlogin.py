@@ -588,6 +588,14 @@ _API_KEY_PLATFORMS = {
     "api-minimax": ("MiniMax API", "https://platform.minimaxi.com/",
                     "https://api.minimax.chat/v1/models", "eyJ...",
                     "在 MiniMax 开放平台创建后粘贴"),
+    # ★ 2026-10-15 新增（对齐 dsh-our-free-model MiniMax Code 渠道）：
+    #   MiniMax 网页版 OAuth 设备码登录（account.minimax.cn，client_id=mcode-public，
+    #   PKCE S256）→ access_token 入库 → 签到(/minimax-cloud/api/v1/signin/claim)
+    #   + 模型(/mavis/api/v1/models) + 对话。Rust 端 start/poll 已接全自动。
+    "minimax": ("MiniMax Code（网页版·设备码）", "https://account.minimax.cn",
+                "https://agent.minimax.cn/mavis/api/v1/models", "eyJ...",
+                "点「接入」→ 打开验证页输入码完成授权，面板自动拿 token；"
+                "支持每日签到领积分"),
     "api-stepfun": ("阶跃星辰 API", "https://platform.stepfun.com/",
                     "https://api.stepfun.com/v1/models", "sk-...",
                     "在阶跃「API 密钥」创建后粘贴"),

@@ -356,6 +356,26 @@ pub async fn login(
                         message = "已打开网页登录页。登录后 F12 抓 /v2/ 请求的 Bearer 粘贴。".to_string();
                     }
                 }
+            } else if platform == "minimax" {
+                // ★ MiniMax Code 设备码登录（对齐 dsh-our-free-model 渠道实现）：
+                //   POST https://account.minimax.cn/oauth2/device/code
+                //   (client_id=mcode-public, scope=agent.default, audience=agent-backend,
+                //    PKCE S256) → user_code + verification_uri
+                //   轮询 POST /oauth2/token (grant_type=device_code + code_verifier)
+                //   → access_token 入库 → 签到/模型可用。
+                match minimax_device_start().await {
+                    Ok((device_code, user_code, verify_url, verifier)) => {
+                        login_url = verify_url;
+                        message = format!(
+                            "MiniMax 设备码：打开验证页输入码 {} 完成授权，面板自动拿到 token 并入库。",
+                            user_code
+                        );
+                        wb_state = format!("minimax:{}:{}:{}", device_code, verifier, user_code);
+                    }
+                    Err(e) => {
+                        message = format!("MiniMax 设备码申请失败：{} —— 回退手动粘贴 access_token", e);
+                    }
+                }
             } else if !login_url.is_empty() {
                 message = "已在你的浏览器打开登录页（新标签页）。完成登录后把 \
                            Cookie / Token 粘贴到下方输入框保存。"
@@ -437,6 +457,61 @@ pub async fn login(
                     }
                 }
                 st.inner.login.update_session(&sess);
+            }
+            // MiniMax 设备码轮询：state="minimax:{device_code}:{verifier}:{user_code}"
+            //   POST /oauth2/token (grant_type=device_code + code_verifier) → access_token 入库
+            else if platform == "minimax" && state.starts_with("minimax:") {
+                let parts: Vec<&str> = state.splitn(4, ':').collect();
+                if parts.len() >= 3 {
+                    let device_code = parts[1];
+                    let verifier = parts[2];
+                    let client = reqwest::Client::new();
+                    let resp = client
+                        .post("https://account.minimax.cn/oauth2/token")
+                        .timeout(std::time::Duration::from_secs(15))
+                        .header("Accept", "application/json")
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .body(format!(
+                            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}&client_id=mcode-public&code_verifier={}",
+                            device_code, verifier
+                        ))
+                        .send()
+                        .await;
+                    if let Ok(r) = resp {
+                        if let Ok(v) = r.json::<Value>().await {
+                            let tok = v
+                                .get("access_token")
+                                .or_else(|| v.pointer("/data/access_token"))
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if !tok.is_empty() {
+                                let refresh = v
+                                    .get("refresh_token")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                st.inner.login.add_account("minimax", "MiniMax（设备码自动登录）", "token", &tok);
+                                st.inner.login.update_refresh("minimax", &refresh);
+                                if let Some(done) = st.inner.login.complete(id, "MiniMax 自动登录成功，token 已入库") {
+                                    sess = done;
+                                }
+                            } else {
+                                let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
+                                // authorization_pending = 用户还没完成授权，继续等
+                                if err == "authorization_pending" || err == "slow_down" {
+                                    sess["message"] = json!(format!("等待你在验证页输入码完成授权（{}）…", parts.get(3).map(|s| s.to_string()).unwrap_or_default()));
+                                } else if err == "expired_token" || err == "access_denied" {
+                                    sess["status"] = json!("error");
+                                    sess["message"] = json!(format!("设备码已过期或被拒绝（{}），请重新发起登录", err));
+                                } else {
+                                    sess["message"] = json!(format!("轮询中：{}", v.to_string().chars().take(120).collect::<String>()));
+                                }
+                            }
+                        }
+                    }
+                    st.inner.login.update_session(&sess);
+                }
             }
             Json(json!({"ok": true, "session": sess}))
         }
@@ -1035,6 +1110,89 @@ fn extract_model_rows(v: &Value) -> Vec<Value> {
                 break;
             }
         }
+    }
+    out
+}
+
+/// MiniMax OAuth 设备码第一步：申请 device_code + user_code。
+/// 返回 (device_code, user_code, verification_uri, code_verifier)。
+/// PKCE S256：verifier 随机 43 字节 base62，challenge=SHA256(verifier) base64url。
+async fn minimax_device_start() -> Result<(String, String, String, String), String> {
+    use sha2::{Digest, Sha256};
+    let verifier: String = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        // 伪随机 48 字符 base62（够用；verifier 只需唯一性与长度）
+        const CH: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let mut v = String::new();
+        let mut x = nanos as u64 ^ 0x9E3779B97F4A7C15;
+        for _ in 0..48 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            v.push(CH[(x >> 33) as usize % CH.len()] as char);
+        }
+        v
+    };
+    let digest = Sha256::digest(verifier.as_bytes());
+    let challenge = base64url_nopad(&digest);
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://account.minimax.cn/oauth2/device/code")
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        )
+        .body(format!(
+            "client_id=mcode-public&scope=agent.default&audience=agent-backend&code_challenge={}&code_challenge_method=S256",
+            challenge
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("{}", e))?;
+    let code = resp.status().as_u16();
+    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    if !(200..300).contains(&code) {
+        return Err(format!("HTTP {} {}", code, v.to_string().chars().take(150).collect::<String>()));
+    }
+    let dc = v
+        .get("device_code")
+        .or_else(|| v.pointer("/data/device_code"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let uc = v
+        .get("user_code")
+        .or_else(|| v.pointer("/data/user_code"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let vu = v
+        .get("verification_uri")
+        .or_else(|| v.pointer("/data/verification_uri"))
+        .or_else(|| v.get("verification_url"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("https://account.minimax.cn/activate")
+        .to_string();
+    if dc.is_empty() || uc.is_empty() {
+        return Err(format!("响应缺 device_code/user_code: {}", v.to_string().chars().take(150).collect::<String>()));
+    }
+    Ok((dc, uc, vu, verifier))
+}
+
+fn base64url_nopad(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 { out.push(T[(n >> 6) as usize & 63] as char); }
+        if chunk.len() > 2 { out.push(T[n as usize & 63] as char); }
     }
     out
 }

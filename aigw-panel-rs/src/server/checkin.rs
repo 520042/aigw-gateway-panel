@@ -340,7 +340,169 @@ pub async fn run_platform(st: &AppState, pid: &str) -> (bool, String, bool) {
         "apk-kuku" => kuku_checkin(secret).await,
         "apk-wps" => wps_checkin(secret).await,
         "wb-gateway" | "wb-gateway-intl" => wb_checkin(secret, pid).await,
+        "apk-loomy" => loomy_tasks(secret).await,
+        "minimax" => minimax_checkin(secret).await,
         _ => (false, format!("平台 {} 没有签到执行器", pid), true),
+    }
+}
+
+/// Loomy 新手任务领取（对齐 dsh-our-free-model loomy-onboarding.ts）：
+/// GET /onboarding/tasks 查状态 → 对未完成的逐个 POST /onboarding/tasks/complete {key}。
+/// 8 个任务共 10000 积分（first_message 500 / pick_skill 1000 / generate_ppt 1500 /
+/// set_schedule 1000 / install_skill 1500 / configure_remote 1000 / create_soul 1500 /
+/// share_soul 2000）。凭据：Authorization Bearer <session> + token: <session>。
+const LOOMY_TASKS: &[(&str, i64)] = &[
+    ("first_message", 500),
+    ("pick_skill", 1000),
+    ("generate_ppt", 1500),
+    ("set_schedule", 1000),
+    ("install_skill", 1500),
+    ("configure_remote", 1000),
+    ("create_soul", 1500),
+    ("share_soul", 2000),
+];
+
+async fn loomy_request(
+    secret: &str,
+    path: &str,
+    method: &str,
+    body: Option<Value>,
+) -> Result<(u16, Value), String> {
+    let client = reqwest::Client::new();
+    let url = format!("https://loomyad.xunfei.cn/api/v1{}", path);
+    let mut req = match method {
+        "POST" => client.post(&url),
+        _ => client.get(&url),
+    };
+    req = req
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Authorization", format!("Bearer {}", secret))
+        .header("token", secret)
+        .header("loomy-version", "1.0.0")
+        .header("User-Agent", "Loomy|Desktop|Electron|macOS");
+    if let Some(b) = body {
+        req = req.header("Content-Type", "application/json").body(b.to_string());
+    }
+    match req.send().await {
+        Ok(r) => {
+            let code = r.status().as_u16();
+            let txt = r.text().await.unwrap_or_default();
+            let v: Value = serde_json::from_str(&txt)
+                .unwrap_or(json!({"raw": txt.chars().take(300).collect::<String>()}));
+            Ok((code, v))
+        }
+        Err(e) => Err(format!("{}", e)),
+    }
+}
+
+async fn loomy_tasks(secret: &str) -> (bool, String, bool) {
+    // 1. 查任务状态
+    let (code, d) = match loomy_request(secret, "/onboarding/tasks", "GET", None).await {
+        Ok(v) => v,
+        Err(e) => return (false, format!("Loomy 任务状态请求失败: {}", e), false),
+    };
+    if code >= 400 {
+        return (false, format!("Loomy 任务状态 HTTP {}", code), false);
+    }
+    // 信封结构：{code:"000000", envelope:{data:{tasks:{...}}}} 或直接 tasks
+    let data = d
+        .pointer("/envelope/data")
+        .or_else(|| d.get("data"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let tasks = data.get("tasks").cloned().unwrap_or(Value::Null);
+    if tasks.is_null() {
+        return (false, "Loomy 任务状态未返回 tasks 字段".to_string(), false);
+    }
+    // 2. 逐个完成未完成的任务
+    let mut done = 0;
+    let mut earned = 0i64;
+    let mut already = 0;
+    let mut failed = 0;
+    let mut last_err = String::new();
+    for (key, points) in LOOMY_TASKS {
+        if tasks.get(*key).and_then(|v| v.as_bool()).unwrap_or(false) {
+            already += 1;
+            earned += points;
+            continue;
+        }
+        match loomy_request(
+            secret,
+            "/onboarding/tasks/complete",
+            "POST",
+            Some(json!({"key": key})),
+        )
+        .await
+        {
+            Ok((c, _)) if c < 400 => {
+                done += 1;
+                earned += points;
+            }
+            Ok((c, v)) => {
+                failed += 1;
+                last_err = format!("{} HTTP{} {}", key, c, v.to_string().chars().take(80).collect::<String>());
+            }
+            Err(e) => {
+                failed += 1;
+                last_err = format!("{} {}", key, e);
+            }
+        }
+    }
+    if failed > 0 && done == 0 && already == 0 {
+        return (false, format!("Loomy 任务全部失败（{}个），最后错误: {}", failed, last_err), false);
+    }
+    let msg = format!(
+        "Loomy 任务：新完成 {}，已完成 {}，失败 {}，累计积分 {}",
+        done, already, failed, earned
+    );
+    (failed == 0 || done > 0, msg, false)
+}
+
+/// MiniMax 网页签到（对齐 dsh-our-free-model credits.ts）：
+/// POST /minimax-cloud/api/v1/signin/claim（body {}），GET status 查状态。
+/// 凭据：OAuth 设备码换来的 Bearer access_token（apiHost=agent.minimax.cn）。
+async fn minimax_checkin(secret: &str) -> (bool, String, bool) {
+    let client = reqwest::Client::new();
+    let base = "https://agent.minimax.cn";
+    let tz = "Asia/Shanghai";
+    // 先查状态（幂等：已签直接返回）
+    let status_url = format!("{}/minimax-cloud/api/v1/signin/status?timezoneId={}", base, tz);
+    let claim_url = format!("{}/minimax-cloud/api/v1/signin/claim?timezoneId={}", base, tz);
+    let auth = format!("Bearer {}", secret);
+    let _ = status_url;
+    let resp = client
+        .post(&claim_url)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Authorization", &auth)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        )
+        .body("{}")
+        .send()
+        .await;
+    match resp {
+        Ok(r) => {
+            let code = r.status().as_u16();
+            let txt = r.text().await.unwrap_or_default();
+            let v: Value = serde_json::from_str(&txt).unwrap_or(Value::Null);
+            if code < 400 {
+                // 信封：{base:{code}, ...} 或 {data:{credit}}
+                let env_code = v.pointer("/base/status_code").and_then(|x| x.as_str()).unwrap_or("");
+                if env_code.is_empty() || env_code == "0" || env_code == "success" {
+                    (true, format!("MiniMax 签到成功 (HTTP {})", code), false)
+                } else {
+                    (true, format!("MiniMax 签到响应: {} (HTTP {})", env_code, code), false)
+                }
+            } else {
+                let brief: String = txt.chars().take(160).collect();
+                (false, format!("MiniMax 签到 HTTP {}: {}", code, brief), false)
+            }
+        }
+        Err(e) => (false, format!("MiniMax 签到请求失败: {}", e), false),
     }
 }
 
