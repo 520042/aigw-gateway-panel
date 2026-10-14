@@ -1,7 +1,10 @@
 //! HTTP 服务层：状态、鉴权中间件、静态资源、handlers、路由装配。
 pub mod auth;
+pub mod checkin;
+pub mod free_models;
 pub mod handlers;
 pub mod login;
+pub mod notify;
 pub mod state;
 pub mod static_files;
 pub mod store;
@@ -59,7 +62,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/growth", get(handlers::api::growth))
         .route("/api/tasks", get(handlers::api::tasks))
         .route("/api/free_models", get(handlers::api::free_models))
-        .route("/api/notify", get(handlers::api::notify))
+        .route("/api/notify", get(handlers::api::notify).post(handlers::api::notify))
         .route("/api/logs", get(handlers::api::logs))
         .route("/auth/callback", get(handlers::callback::auth_callback))
         .route("/v1/models", get(handlers::v1::models))

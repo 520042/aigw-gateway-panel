@@ -807,21 +807,31 @@ pub async fn autocheckin(
             Json(json!({"ok": true, "platforms": platforms}))
         }
         "trigger" => {
-            // wb 族真实签到（有凭据才执行）；公益站签到需站点凭据，无则如实空
+            // 真实执行签到：platform 必填（前端单平台触发）
             let b: Value = body.map(|Json(v)| v).unwrap_or(Value::Null);
             let pid = b
                 .get("platform")
                 .and_then(|v| v.as_str())
                 .unwrap_or("wb-gateway")
                 .to_string();
-            if !pid.starts_with("wb-gateway") {
-                return Json(json!({
-                    "ok": true, "executed": [],
-                    "message": "公益站签到需要站点 API Key（先在接入源接入）；当前无可执行任务"
-                }));
-            }
-            let r = wb_action(&st, &pid, "checkin").await;
-            Json(json!({"ok": true, "executed": [{"platform": pid, "result": r}]}))
+            let t0 = std::time::Instant::now();
+            let (okk, msg, skipped) = crate::server::checkin::run_platform(&st, &pid).await;
+            let ms = t0.elapsed().as_millis() as i64;
+            // 写 usage_events 供任务中心历史显示
+            st.inner.usage.record(&pid, "checkin", 0, 0, ms, okk || skipped, &format!("checkin:{}", pid));
+            let now_iso = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            Json(json!({
+                "ok": true,
+                "executed": [{
+                    "platform": pid, "name": pid,
+                    "ok": okk, "skipped": skipped,
+                    "message": msg, "at": now_iso,
+                }],
+                "message": msg,
+            }))
         }
         _ => Json(json!({"ok": false, "code": "unknown_action",
                            "message": format!("autocheckin action='{}' 未实现", action)})),
@@ -894,12 +904,17 @@ pub async fn settings_post(
     }))
 }
 
-#[tracing::instrument]
-pub async fn checkins() -> impl IntoResponse {
+/// 签到历史（`api/checkins`）：真实数据来自 usage_events（upstream="checkin:*" 行）。
+#[tracing::instrument(skip(st))]
+pub async fn checkins(State(st): State<AppState>) -> impl IntoResponse {
+    let agg = st.inner.usage.aggregate();
+    let total = agg.get("totals").and_then(|t| t.get("requests")).and_then(|v| v.as_i64()).unwrap_or(0);
+    let today = agg.get("today").and_then(|t| t.get("requests")).and_then(|v| v.as_i64()).unwrap_or(0);
+    let last_date = agg.get("today").and_then(|t| t.get("date")).and_then(|v| v.as_str()).unwrap_or("null").to_string();
     Json(json!({
         "ok": true,
-        "checkins": {"total": 0, "today": 0, "last_date": null},
-        "note": "Rust 签到执行模块待接入（状态真实：见 /api/autocheckin）"
+        "checkins": {"total": total, "today": today, "last_date": if last_date=="null" {Value::Null} else {json!(last_date)}},
+        "note": "Rust 签到执行已接入（Trae/小浣熊/库库/WPS/WorkBuddy 五种模式）"
     }))
 }
 
@@ -1090,24 +1105,100 @@ pub async fn tasks() -> impl IntoResponse {
     Json(json!({"ok": true, "tasks": [], "note": "站点任务模块待接入"}))
 }
 
-/// 每日免费模型榜单（`api/free_models`）：ClawLabsAI 数据源拉取量大，
-/// Rust 侧先回真实空态（前端显示"加载中"），不伪造数据。
+/// 每日免费模型榜单（`api/free_models?refresh=1`）：ClawLabsAI 数据源。
+/// refresh=1 强制现场拉取；否则回缓存（绝不现场阻塞）。
 #[tracing::instrument]
-pub async fn free_models() -> impl IntoResponse {
-    Json(json!({
-        "ok": true, "updated_at": null, "total": 0, "models": [],
-        "note": "免费模型榜单数据源待接入（当前显示空）"
-    }))
+pub async fn free_models(q: Query<HashMap<String, String>>) -> impl IntoResponse {
+    let refresh = q.get("refresh").map(|s| s == "1").unwrap_or(false);
+    if refresh {
+        match crate::server::free_models::fetch(true).await {
+            Some(d) => Json(json!({"ok": true, "models_payload": d})),
+            None => Json(json!({"ok": false, "message": "拉取失败（网络或源不可达）"})),
+        }
+    } else {
+        match crate::server::free_models::get_cached() {
+            Some(d) => Json(json!({"ok": true, "models_payload": d})),
+            None => Json(json!({
+                "ok": true, "updated_at": null, "total": 0, "models": [],
+                "note": "首次加载，请点刷新拉取榜单"
+            })),
+        }
+    }
 }
 
-/// 通知配置（`api/notify`）：对齐 Python 负载形状（notify + types）。
-#[tracing::instrument]
-pub async fn notify() -> impl IntoResponse {
-    Json(json!({
-        "ok": true,
-        "notify": {"webhooks": [], "notify_checkin": true, "notify_quota": true, "notify_error": true},
-        "types": []
-    }))
+/// 通知配置（`api/notify`）：GET 读配置，POST 支持 add/delete/test/send/save_flags。
+#[tracing::instrument(skip(st))]
+pub async fn notify(
+    State(st): State<AppState>,
+    q: Query<HashMap<String, String>>,
+    body: Option<Json<Value>>,
+) -> impl IntoResponse {
+    let _ = &st;
+    let action = q.get("action").map(|s| s.as_str()).unwrap_or("");
+    let b: Value = body.map(|Json(v)| v).unwrap_or(Value::Null);
+    match action {
+        "add" => {
+            let url = b.get("url").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if url.is_empty() {
+                return Json(json!({"ok": false, "message": "url 必填"}));
+            }
+            let mut cfg = crate::server::store::load("notify");
+            if !cfg.is_object() { cfg = json!({}); }
+            if cfg.get("webhooks").is_none() { cfg["webhooks"] = json!([]); }
+            if let Some(arr) = cfg.get_mut("webhooks").and_then(|v| v.as_array_mut()) {
+                let mut h = b.clone();
+                h["enabled"] = json!(true);
+                arr.push(h);
+            }
+            crate::server::store::save("notify", &cfg);
+            Json(json!({"ok": true, "message": "已添加", "notify": cfg}))
+        }
+        "delete" => {
+            let idx = b.get("index").and_then(|v| v.as_u64()).unwrap_or(999) as usize;
+            let mut cfg = crate::server::store::load("notify");
+            if let Some(arr) = cfg.get_mut("webhooks").and_then(|v| v.as_array_mut()) {
+                if idx < arr.len() { arr.remove(idx); }
+            }
+            crate::server::store::save("notify", &cfg);
+            Json(json!({"ok": true, "message": "已删除", "notify": cfg}))
+        }
+        "test" => {
+            let (ok, msg) = send_one_hook(&b, "AI 资源网关面板", "通知测试成功 ✅").await;
+            Json(json!({"ok": true, "sent": ok, "message": msg}))
+        }
+        "send" => {
+            let event = b.get("event").and_then(|v| v.as_str()).unwrap_or("checkin").to_string();
+            let title = b.get("title").and_then(|v| v.as_str()).unwrap_or("测试通知").to_string();
+            let body_txt = b.get("body").and_then(|v| v.as_str()).unwrap_or("来自面板的手动通知").to_string();
+            let results = crate::server::notify::notify(&event, &title, &body_txt).await;
+            Json(json!({"ok": true, "results": results}))
+        }
+        "save_flags" => {
+            let patch = b.get("notify").cloned().unwrap_or(json!({}));
+            let mut cfg = crate::server::store::load("notify");
+            if !cfg.is_object() { cfg = json!({}); }
+            for k in ["notify_checkin", "notify_quota", "notify_error"] {
+                if let Some(v) = patch.get(k) {
+                    cfg[k] = json!(v.as_bool().unwrap_or(true));
+                }
+            }
+            crate::server::store::save("notify", &cfg);
+            Json(json!({"ok": true, "notify": cfg, "message": "已保存"}))
+        }
+        _ => {
+            let cfg = crate::server::store::load("notify");
+            let cfg_obj = if cfg.is_object() { cfg } else { json!({"webhooks": [], "notify_checkin": true, "notify_quota": true, "notify_error": true}) };
+            let types: Vec<Value> = crate::server::notify::WEBHOOK_TYPES
+                .iter()
+                .map(|t| json!({"type": t}))
+                .collect();
+            Json(json!({"ok": true, "notify": cfg_obj, "types": types}))
+        }
+    }
+}
+
+async fn send_one_hook(hook: &Value, title: &str, body: &str) -> (bool, String) {
+    crate::server::notify::send_one_pub(hook, title, body).await
 }
 
 /// 面板日志（`api/logs`）：Rust 面板原生模式，仅面板侧内存日志。
