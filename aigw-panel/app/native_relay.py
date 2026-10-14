@@ -187,7 +187,16 @@ RELAY_SPECS = {
         "extra_headers_fn": "zen",
         "secret_fixed": "public",
         "evidence": "dsh-our-free-model src/upstream.js（2026-09-24 逐条实测）",
-        "pending_live": True,
+        # ★★★ 2026-10-14 实测复核：Zen 免费层**已被上游按账号级收紧**——
+        #   带齐四件套指纹(bash/glob/grep/read)+tool_choice:auto+ses_/msg_ 会话头，
+        #   所有 *-free 模型仍统一返回 FreeTierError:
+        #   "OpenCode's free tier can only be used from within OpenCode."
+        #   即：旧的"补请求特征"绕过已失效，服务端现在校验的是"来源是否 OpenCode 客户端"。
+        #   dsh-our-free-model 2.2.0 也已弃用 Zen 账号渠道（README: "默认停用"），
+        #   全面转向 Kilo 免费池 + 13 个账号渠道。模型清单(/zen/v1/models)仍可拉取展示，
+        #   但对话走不通。**免密对话请用 kilo 或 pollinations 车道**。
+        "pending_live": False,
+        "status_note": "2026-10-14 实测已被上游收紧：FreeTierError（非客户端），对话不可用；仅模型清单可读",
         "models_anon": "https://opencode.ai/zen/v1/models",
     },
     # ★ 2026-10-07 新增（参照 dsh-our-free-model src/kilo.js）：

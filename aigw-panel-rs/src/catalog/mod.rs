@@ -291,10 +291,18 @@ impl Catalog {
                             .unwrap_or_else(|| Value::Array(vec![]))
                     }
                 };
+                // 状态提示：被上游收紧的车道（如 anon-zen 2026-10-14 FreeTierError）
+                // 在描述里如实标注，避免用户看到模型清单以为能对话。
+                let status_note = spec.get("status_note").and_then(|v| v.as_str()).unwrap_or("");
+                let hint = if status_note.is_empty() {
+                    "免凭据直连：无需登录/注册/填 Key（点「接入」只是登记进路由）".to_string()
+                } else {
+                    format!("免凭据直连（无需登录/注册/填 Key）· ⚠ {}", status_note)
+                };
                 let g = self.suffixed_group(
                     pid,
                     &name,
-                    "免凭据直连：无需登录/注册/填 Key（点「接入」只是登记进路由）",
+                    &hint,
                     Some(&rows),
                     disabled,
                 );

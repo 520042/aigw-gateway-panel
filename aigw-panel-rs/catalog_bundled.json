@@ -1106,13 +1106,13 @@
    {
     "id": "gateway",
     "name": "workbuddy-gateway",
-    "desc": "CodeBuddy / WorkBuddy 的反代（腾讯，Go 1.24.5；已弃用，面板原生直连替代）",
+    "desc": "CodeBuddy / WorkBuddy 的反代（腾讯，Go 1.24.5）",
     "endpoint": "http://127.0.0.1:8317/v1"
    },
    {
     "id": "localproxy",
-    "name": "CLIProxyAPI（可选，未内置）",
-    "desc": "Kimi / Codex / Claude / Antigravity 等订阅 OAuth 反代；默认不打进 EXE，需要时自行提供 cli-proxy-api.exe 并设 AIGW_BUNDLE_CLIPROXY=1",
+    "name": "CLIProxyAPI",
+    "desc": "Kimi / Codex / Claude / Antigravity 等 CLI 订阅反代",
     "endpoint": "http://127.0.0.1:8318/v1"
    }
   ]
@@ -3158,11 +3158,15 @@
  "free_lanes": {
   "anon-zen": {
    "name": "Our Free Model（OpenCode Zen 匿名车道）",
-   "models_anon": "https://opencode.ai/zen/v1/models"
+   "models_anon": "https://opencode.ai/zen/v1/models",
+   "status_note": "2026-10-14 实测已被上游收紧：FreeTierError（非客户端），对话不可用；仅模型清单可读",
+   "pending_live": false
   },
   "kilo": {
    "name": "Kilo Gateway（免凭据免费池）",
-   "models_anon": "https://api.kilo.ai/api/gateway/models"
+   "models_anon": "https://api.kilo.ai/api/gateway/models",
+   "status_note": "",
+   "pending_live": true
   },
   "pollinations": {
    "name": "Pollinations 免费池",

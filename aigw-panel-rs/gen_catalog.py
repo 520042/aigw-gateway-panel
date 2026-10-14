@@ -86,6 +86,9 @@ try:
             free_lanes[pid] = {
                 "name": spec.get("name") or pid,
                 "models_anon": spec.get("models_anon"),
+                # 状态说明（如 anon-zen 2026-10-14 已被上游按账号级收紧）
+                "status_note": spec.get("status_note") or "",
+                "pending_live": bool(spec.get("pending_live")),
             }
 except Exception as e:
     print("native_relay import failed:", e)
