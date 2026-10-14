@@ -559,13 +559,23 @@ pub async fn platform_actions(
     let b: Value = body.map(|Json(v)| v).unwrap_or(Value::Null);
     match action.as_str() {
         "actions" => Json(json!({"ok": true, "actions": {}})),
-        "checkin" | "points" => {
-            let pid = b.get("platform").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // wb 族全套动作：签到/积分/成长任务（growth/streak/lottery/travel/buddy）
+        "checkin" | "points" | "checkin_status"
+        | "growth_tasks" | "growth_task_accept" | "growth_task_claim"
+        | "streak_status" | "streak_redeem" | "lottery_summary" | "lottery_draw"
+        | "buddy_info" | "buddy_adopt" | "travel_status" | "travel_depart" | "travel_claim" => {
+            // platform：body 优先，query 兜底（GET 请求无 body）
+            let pid = b
+                .get("platform")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| q.get("platform").cloned())
+                .unwrap_or_default();
             if pid.is_empty() {
                 return Json(json!({"ok": false, "message": "platform 必填"}));
             }
             if !pid.starts_with("wb-gateway") {
-                return Json(json!({"ok": false, "message": "该平台的签到/积分动作属原生中继模块待接入"}));
+                return Json(json!({"ok": false, "message": "该平台的签到/积分/成长任务动作仅 WorkBuddy 族支持"}));
             }
             Json(wb_action(&st, &pid, &action).await)
         }
@@ -833,6 +843,30 @@ pub async fn autocheckin(
                 "message": msg,
             }))
         }
+        "growth_run" => {
+            // ★ 一键成长任务闭环（对齐 dsh-our-free-model 的自动任务）：
+            //   连登兑换 → 抽奖 → 旅行(出发+领取) → 任务接受。仅 wb 族有这套端点。
+            //   每一步独立容错，某步失败不阻断其余；结果逐条回显。
+            let b: Value = body.map(|Json(v)| v).unwrap_or(Value::Null);
+            let pid = b.get("platform").and_then(|v| v.as_str()).unwrap_or("wb-gateway").to_string();
+            if !pid.starts_with("wb-gateway") {
+                return Json(json!({"ok": false, "message": "成长任务仅 WorkBuddy 族支持"}));
+            }
+            let mut steps: Vec<Value> = Vec::new();
+            for act in ["streak_redeem", "lottery_draw", "travel_depart", "travel_claim", "growth_task_accept"] {
+                let r = wb_action(&st, &pid, act).await;
+                let ok = r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                steps.push(json!({"action": act, "ok": ok, "status": r.get("status").cloned().unwrap_or(Value::Null)}));
+            }
+            let done = steps.iter().filter(|s| s.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)).count();
+            st.inner.usage.record(&pid, "growth", 0, 0, 0, done > 0, &format!("growth:{}", pid));
+            Json(json!({
+                "ok": true,
+                "platform": pid,
+                "summary": format!("成长任务执行 {} 步，{} 步返回成功", steps.len(), done),
+                "steps": steps,
+            }))
+        }
         _ => Json(json!({"ok": false, "code": "unknown_action",
                            "message": format!("autocheckin action='{}' 未实现", action)})),
     }
@@ -1005,27 +1039,57 @@ fn extract_model_rows(v: &Value) -> Vec<Value> {
     out
 }
 
-/// wb 族动作执行：签到 / 积分余额（真实端点，gwextra verified）。
+/// wb 族动作执行：签到 / 积分 / 成长任务全套（真实端点，gwextra verified）。
+/// 成长任务端点来自 gwextra.ACTIONS["wb-gateway"]（activity/growth/*），
+/// 对齐 dsh-our-free-model 的成长任务闭环：accept → claim → streak/redeem/lottery/travel。
+/// 注：growth_task_claim 走 Web 域 www.workbuddy.cn（不是 CLI 域），其余走 CLI 域。
 async fn wb_action(st: &AppState, pid: &str, action: &str) -> Value {
-    let base = if pid == "wb-gateway-intl" {
+    let cli_base = if pid == "wb-gateway-intl" {
         "https://www.codebuddy.ai"
     } else {
         "https://copilot.tencent.com"
     };
+    let web_base = if pid == "wb-gateway-intl" {
+        "https://www.codebuddy.ai"
+    } else {
+        "https://www.workbuddy.cn"
+    };
     let Some(sec) = st.inner.login.secrets_for(pid).first().cloned() else {
         return json!({"ok": false, "message": format!("{} 未登录（先跳转登录/粘贴 token）", pid)});
     };
-    let (method, path) = match action {
-        "checkin" => ("POST", "/v2/billing/meter/daily-checkin"),
-        "points" => ("POST", "/v2/billing/meter/get-user-resource"),
-        _ => return json!({"ok": false, "message": "未知动作"}),
+    // (method, path, base_domain)：cli 或 web
+    let (method, path, domain): (&str, &str, &str) = match action {
+        // —— 基础 ——
+        "checkin" => ("POST", "/v2/billing/meter/daily-checkin", "cli"),
+        "points" => ("POST", "/v2/billing/meter/get-user-resource", "cli"),
+        "checkin_status" => ("GET", "/v2/billing/meter/checkin-activity-status", "cli"),
+        // —— 成长任务 ——
+        "growth_tasks" => ("GET", "/activity/growth/tasks", "cli"),
+        "growth_task_accept" => ("POST", "/activity/growth/tasks/accept", "cli"),
+        "growth_task_claim" => ("POST", "/activity/growth/tasks/claim", "web"),
+        // —— 连登 & 抽奖 ——
+        "streak_status" => ("GET", "/activity/growth/streak", "cli"),
+        "streak_redeem" => ("POST", "/activity/growth/redeem", "cli"),
+        "lottery_summary" => ("GET", "/activity/growth/lottery/summary", "cli"),
+        "lottery_draw" => ("POST", "/activity/growth/lottery/draw", "cli"),
+        // —— 猫猫旅行 ——
+        "buddy_info" => ("GET", "/activity/growth/buddy/info", "cli"),
+        "buddy_adopt" => ("POST", "/activity/growth/buddy/first", "cli"),
+        "travel_status" => ("GET", "/activity/growth/buddy/travel/status", "cli"),
+        "travel_depart" => ("POST", "/activity/growth/buddy/travel/depart", "cli"),
+        "travel_claim" => ("POST", "/activity/growth/buddy/travel/claim", "cli"),
+        _ => return json!({"ok": false, "message": format!("未知 wb 动作: {}", action)}),
     };
+    let base = if domain == "web" { web_base } else { cli_base };
     let client = reqwest::Client::new();
-    let mut req = client
-        .post(format!("{}{}", base, path))
+    let mut req = if method == "POST" {
+        client.post(format!("{}{}", base, path))
+    } else {
+        client.get(format!("{}{}", base, path))
+    };
+    req = req
         .timeout(std::time::Duration::from_secs(20))
         .header("Authorization", format!("Bearer {}", sec))
-        .header("Content-Type", "application/json")
         .header("X-No-Department-Info", "true")
         .header("X-No-Authorization", "true")
         .header(
@@ -1033,7 +1097,7 @@ async fn wb_action(st: &AppState, pid: &str, action: &str) -> Value {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
         );
     if method == "POST" {
-        req = req.body("{}");
+        req = req.header("Content-Type", "application/json").body("{}");
     }
     match req.send().await {
         Ok(r) => {
