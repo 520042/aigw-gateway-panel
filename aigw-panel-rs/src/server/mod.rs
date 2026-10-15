@@ -16,27 +16,21 @@ use crate::server::state::AppState;
 use axum::{middleware, routing::{get, post}, Router};
 
 /// 用系统默认浏览器打开 URL（带前台焦点）。
-/// ★ 首选 `explorer.exe <url>`——explorer 必然运行在用户交互桌面会话，
-///   由它拉起默认浏览器并聚焦（`cmd start` 从服务型进程 spawn 时可能
-///   静默不显窗）。explorer 失败再退 cmd start。
+/// ★ 2026-10-15：改为首选 `cmd /c start`——explorer.exe 从面板进程 spawn 时
+///   在部分环境报 0xc0000142（DLL 初始化失败，弹错误框，用户截图实锤）；
+///   cmd start 是 Windows 拉默认浏览器的标准方式，CREATE_NO_WINDOW 防 cmd 窗口闪现。
+///   登录跳转已全部走前端 window.open，此处仅面板启动开首页，失败无碍。
 pub fn open_browser(url: &str) {
-    let opened = (|| -> bool {
-        std::process::Command::new("explorer.exe")
-            .arg(url)
-            .spawn()
-            .is_ok()
-    })();
-    if opened {
-        tracing::info!(url, "已通过 explorer 打开默认浏览器");
-        return;
-    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
     let cmd = std::path::Path::new(&sysroot).join("System32").join("cmd.exe");
     match std::process::Command::new(cmd)
         .args(["/C", "start", "", url])
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
     {
-        Ok(_) => tracing::info!(url, "已打开默认浏览器（cmd start 兜底）"),
+        Ok(_) => tracing::info!(url, "已打开默认浏览器（cmd start）"),
         Err(e) => tracing::warn!(error = %e, url, "打开浏览器失败（可手动访问该地址）"),
     }
 }
