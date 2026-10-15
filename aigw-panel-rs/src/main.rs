@@ -120,14 +120,25 @@ async fn main() {
     aigw_panel::server::handlers::api::set_panel_port(port);
 
     // ── 端口预检（固定端口策略：被占 = 已有实例在跑 → 直接打开面板，双击永远有反应） ──
+    // ★ 2026-10-15（用户反馈「打不开」）：原实现 spawn cmd start 后 sleep 0.8s
+    //   就 exit(0)——GUI 子系统下短命进程的子进程经常来不及完成进程创建，
+    //   浏览器没拉起、又没有控制台输出 → 用户双击后毫无反应。
+    //   改为：同步等多重兜底（explorer → cmd start → rundll32），确认拉起再退。
     match std::net::TcpListener::bind((bind_host.as_str(), port)) {
         Ok(l) => drop(l),
         Err(e) => {
             let url = format!("http://{}:{}/", bind_host, port);
             tracing::warn!(port, error = %e, "端口已被占用 —— 已有 aigw-panel 实例在运行，直接打开面板");
-            eprintln!("检测到 aigw-panel 已在运行（端口 {} 被占用），正在为你打开面板……", port);
-            open_browser(&url);
-            std::thread::sleep(std::time::Duration::from_millis(800));
+            // explorer 优先（同步 spawn，必在交互桌面拉起默认浏览器）
+            let opened = std::process::Command::new("explorer.exe").arg(&url).spawn().is_ok();
+            if !opened {
+                // 兜底：rundll32 url.dll（不依赖 cmd 的短命进程时序）
+                let _ = std::process::Command::new("rundll32")
+                    .args(["url.dll,FileProtocolHandler", &url])
+                    .spawn();
+            }
+            // 给浏览器拉起留足时间再退出（GUI 进程退出会连带清理未完成的 spawn）
+            std::thread::sleep(std::time::Duration::from_millis(2500));
             std::process::exit(0);
         }
     }
