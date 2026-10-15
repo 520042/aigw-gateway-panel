@@ -36,6 +36,7 @@ bytes = "1"
 thiserror = "1"                              # 统一错误类型
 tracing = "0.1"                             # 结构化日志（替代 println!）
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 clap = { version = "4", features = ["derive", "env"] }  # CLI
 
 [dev-dependencies]

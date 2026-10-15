@@ -1506,12 +1506,30 @@ async fn send_one_hook(hook: &Value, title: &str, body: &str) -> (bool, String) 
 
 /// 面板日志（`api/logs`）：Rust 面板原生模式，仅面板侧内存日志。
 #[tracing::instrument]
+/// 面板日志（`api/logs`）：读 data/panel.log 尾部（真实 tracing 输出，GUI 子系统
+/// 下日志落这里；对齐前端日志页的 panel 行数组契约，最新在前）。
+#[tracing::instrument]
 pub async fn logs() -> impl IntoResponse {
+    // 读文件尾部 300 行（每行截断 500 字符防爆内存）
+    let path = crate::core::config::data_dir().join("panel.log");
+    let mut lines: Vec<String> = std::fs::read_to_string(&path)
+        .map(|s| {
+            s.lines()
+                .rev()
+                .take(300)
+                .map(|l| l.chars().take(500).collect::<String>())
+                .collect()
+        })
+        .unwrap_or_default();
+    if lines.is_empty() {
+        lines.push("（日志文件暂无内容——面板刚启动或本轮无 INFO 级以上事件）".to_string());
+    }
     Json(json!({
         "ok": true,
         "gateway": {"ok": false, "code": "unreachable",
-                     "message": "网关 EXE 已移除（Rust 面板原生模式，仅面板侧日志）"},
-        "panel": []
+                     "message": "网关 EXE 已移除（Rust 面板原生模式，日志见下方面板侧）"},
+        "panel": lines,
+        "log_file": path.display().to_string(),
     }))
 }
 

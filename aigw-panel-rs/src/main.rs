@@ -2,6 +2,13 @@
 //!
 //! 大厂级风格：bin 只做「装配 + 启动」，所有业务在 lib（`aigw_panel`）里，
 //! 便于集成测试直接调用 `build_app` 走 tower oneshot，无需真实监听端口。
+//!
+//! ★ windows_subsystem="windows"：GUI 子系统，双击启动**不再弹黑色控制台窗口**
+//!   （2026-10-15 用户反馈「为啥启动还附带命令窗口」）。日志改走面板内日志文件，
+//!   需要看日志用 `--console` 或直接看 data/panel.log。
+// 编译期开关：`--features console` 可保留控制台（调试用）
+#![cfg_attr(not(feature = "console"), windows_subsystem = "windows")]
+
 use aigw_panel::catalog::Catalog;
 use aigw_panel::core::config::{self, Settings};
 use aigw_panel::core::model::VERSION;
@@ -52,12 +59,38 @@ fn open_browser(url: &str) {
 #[tokio::main]
 async fn main() {
     // ── 结构化日志 ─────────────────────────────────────────────
+    // GUI 子系统（windows_subsystem）下没有 stdout：日志落到 data/panel.log
+    //（追加，10MB 轮转），同时保留 stdout（console feature / 手动 --console 时可见）。
+    let log_dir = config::data_dir();
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("panel.log");
+    let logfile = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+    // 简单大小轮转：>10MB 时改名 panel.log.1 重新开
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > 10 * 1024 * 1024 {
+            let _ = std::fs::rename(&log_path, log_dir.join("panel.log.1"));
+        }
+    }
+    let file_appender = tracing_appender::rolling::never(&log_dir, "panel.log");
+    let (writer, _guard) = tracing_appender::non_blocking(file_appender);
+    // _guard 需要活到进程结束：leak 出去（面板是常驻进程，一次初始化）
+    std::mem::forget(_guard);
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
         )
+        .with_writer(tracing_subscriber::fmt::writer::MakeWriterExt::and(
+            std::io::stdout,
+            writer,
+        ))
+        .with_ansi(false)
         .init();
+    tracing::info!("日志文件：{}", log_path.display());
 
     let cli = Cli::parse();
 

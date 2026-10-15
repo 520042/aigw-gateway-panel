@@ -2440,7 +2440,59 @@ function viewUsage(){
       </tbody></table>
     </div>
   </div>
+  ${viewUsageDetail(r.usage)}
   ${viewPanelUsage(r.panel)}`;
+}
+
+/** ★ 2026-10-15 详细用量看板：模型排行/平台排行/24h 分布/延迟分位/峰值时段
+ *  （数据来自 Rust 后端 usage.aggregate 新增的 by_model/by_platform/hours/latency） */
+function viewUsageDetail(u){
+  if(!u)return '';
+  const bm=(u.by_model||[]).slice(0,15);
+  const bp=(u.by_platform||[]);
+  const hours=(u.hours||[]);
+  const lat=(u.latency||{});
+  const totReq=(u.totals&&u.totals.requests)||0;
+  if(!totReq)return '';
+  // 24h 柱状（纯 CSS，无依赖）：取最大值归一
+  const maxH=Math.max(1,...hours.map(h=>h.requests||0));
+  const hourBars=hours.map(h=>{
+    const n=h.requests||0;
+    const pct=Math.round(n/maxH*100);
+    return `<td style="vertical-align:bottom;height:70px;text-align:center;padding:0 1px">`
+      +(n?`<div style="display:inline-block;width:70%;background:#2f6fed;border-radius:3px 3px 0 0;height:${Math.max(pct,4)}%" title="${h.hour}:00 · ${n} 次"></div>`:'')
+      +`</td>`;
+  }).join('');
+  const hourLbl=hours.map(h=>`<td style="text-align:center;font-size:9.5px;color:var(--faint)">${h.hour}</td>`).join('');
+  // 排行表格通用渲染
+  const rankTable=(rows,keyLabel)=>rows.length?rows.map(x=>`<tr>
+      <td class="mono">${esc(x.key)}</td>
+      <td>${nraw(x.requests)}</td>
+      <td>${nraw(x.success)}</td>
+      <td class="mono">${x.okRate}%</td>
+      <td>${nraw(x.tokensIn)}</td>
+      <td>${nraw(x.tokensOut)}</td>
+    </tr>`).join(''):'<tr><td colspan="6">'+empty('暂无数据')+'</td></tr>';
+  return `
+  <div class="card">
+    <h2>详细看板 <span class="faint" style="font-size:11.5px">（峰值时段 ${esc(u.peak_hour||'—')} · 平均 ${lat.avg_ms||0}ms · P50 ${lat.p50_ms||0}ms · P95 ${lat.p95_ms||0}ms · 样本 ${nraw(lat.samples||0)}）</span></h2>
+    <div class="card mb" style="margin-bottom:12px">
+      <div class="faint" style="font-size:11.5px;margin-bottom:4px">24 小时请求分布（北京时间）</div>
+      <table style="width:100%;border-collapse:collapse"><tbody><tr>${hourBars}</tr><tr>${hourLbl}</tr></tbody></table>
+    </div>
+    <div class="grid g2">
+      <div>
+        <div class="sc-sect"><i>模型排行 Top15</i></div>
+        <div class="scroll sm"><table><thead><tr><th>模型</th><th>请求</th><th>成功</th><th>成功率</th><th>入</th><th>出</th></tr></thead>
+        <tbody>${rankTable(bm)}</tbody></table></div>
+      </div>
+      <div>
+        <div class="sc-sect"><i>平台排行</i></div>
+        <div class="scroll sm"><table><thead><tr><th>平台</th><th>请求</th><th>成功</th><th>成功率</th><th>入</th><th>出</th></tr></thead>
+        <tbody>${rankTable(bp)}</tbody></table></div>
+      </div>
+    </div>
+  </div>`;
 }
 
 /** 面板原生直连用量（路由 / 原生中继 / @pid 直连，独立于网关 EXE） */
