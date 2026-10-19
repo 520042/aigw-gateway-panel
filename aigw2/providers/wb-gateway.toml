@@ -1,0 +1,29 @@
+# WorkBuddy（CodeBuddy 腾讯系）—— 协议已核、待客户端仿真专项（当前停用）
+# 一手来源：catalog relay_specs/apk-codebuddy + workbuddy2api-master（converter.py/models
+#          + proxy.py 头族 + client_profile.py 仿真 + turing_token.py，本地 _refs/ 有全文）
+# 裸透传实测：copilot.tencent.com/v2/chat/completions 直接回官网 HTML（WAF 拦非官方客户端）。
+# 上游要求完整头族（缺任一即 11128/非官方特征）：
+#   X-Agent-Purpose / risk_headers 档案(UA+X-IDE-Version 等) / X-IDE-Name·X-IDE-Type·X-Product /
+#   X-Machine-ID·X-Session-ID(stable_device_id(uid)) / X-Device-Token(Turing Shield，缺失=11128) /
+#   会话头族 X-Conversation-ID·X-Conversation-Request-ID·X-Request-ID·B3（换号重试必须复用同一 ID）
+id = "wb-gateway"
+name = "WorkBuddy（原生中继）"
+enabled = false
+
+auth = "api_key"
+base_url = "https://copilot.tencent.com"
+format = "openai"
+
+models = [
+    "auto", "hy4-preview", "hy3", "hy3-x",
+    "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
+    "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5v-turbo",
+    "kimi-k3-1", "kimi-k2.8-preview", "kimi-k2.7", "kimi-k2.6",
+    "minimax-m3",
+]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+biz_err = ["登录", "失效", "授权"]
+
+notes = "凭据：池内 JWT（RS256，实测 27 天有效）经 /api/auth wb-gateway 设备授权获取。激活前提=客户端仿真专项：client_profile 头族仿真 + turing_token.py 的 X-Device-Token 获取链（_refs/workbuddy2api-master 全文一手）。"

@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/minimax
+id = "minimax"
+name = "MiniMax Code（网页版·设备码）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://agent.minimax.cn/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://account.minimax.cn"
+
+notes = "点「接入」→ 打开验证页输入码完成授权，面板自动拿 token；支持每日签到领积分"

@@ -1,0 +1,17 @@
+# 糯喵喵 AI 驿站（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-nuomiaomiao"
+name = "糯喵喵 AI 驿站（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://ai.yangwj.me/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://ai.yangwj.me/sign-up?aff=gs6u"
+
+notes = "每日签到；47 个；—"

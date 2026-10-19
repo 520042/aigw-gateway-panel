@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-dashscope
+id = "api-dashscope"
+name = "阿里云百炼 API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://bailian.console.aliyun.com/"
+
+notes = "在百炼控制台「API-KEY 管理」创建后粘贴；新用户赠大量 token"

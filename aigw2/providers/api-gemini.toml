@@ -1,0 +1,17 @@
+# Google Gemini（AI Studio） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "api-gemini"
+name = "Google Gemini（AI Studio）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://aistudio.google.com/apikey"
+
+notes = "Gemini 免费层 15 RPM/1500 RPD。key 在 AI Studio 创建，Bearer 直连。"

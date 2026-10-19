@@ -1,0 +1,17 @@
+# 维云模型（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-vsllm"
+name = "维云模型（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://vsllm.cc/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://vsllm.cc/i/z2IN"
+
+notes = "每日任务换额度；69 个；注册无限制"

@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-stepfun
+id = "api-stepfun"
+name = "阶跃星辰 API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.stepfun.com/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://platform.stepfun.com/"
+
+notes = "在阶跃「API 密钥」创建后粘贴"

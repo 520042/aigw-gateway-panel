@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-baichuan
+id = "api-baichuan"
+name = "百川智能 API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.baichuan-ai.com/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://platform.baichuan-ai.com/"
+
+notes = "在百川开放平台「API Keys」创建后粘贴"

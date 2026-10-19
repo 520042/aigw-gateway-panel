@@ -1,0 +1,16 @@
+# 订阅反代 —— Google Antigravity（OAuth oauth_google）
+# 一手来源：旧版 catalog platforms/sub-antigravity
+# 登录：v2 登录引擎（设备码/PKCE）后续接入；当前可手动粘贴 token 走 @sub-* 路由
+id = "sub-antigravity"
+name = "Google Antigravity"
+enabled = true
+
+auth = "api_key"
+base_url = "https://cloudcode-pa.googleapis.com"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+notes = "Google Gemini 订阅登录。Google OAuth 流程：点「接入」生成授权链接 → 浏览器登录授权 → 地址栏跳 localhost:51121/callback?code=…（页面打不开是正常的）→ 把 code= 后面那段粘贴到下方即完成登录，token 自动入库。"

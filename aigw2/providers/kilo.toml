@@ -1,0 +1,18 @@
+# Kilo Gateway 免凭据免费池 —— M2 第二免密通道
+# 一手来源：aigw-panel-rs platforms.json#kilo + free_lane_models.rs（isFree 切片，id 带 org/ 前缀保留全名）
+# 上游：OpenAI 兼容网关，匿名直接应答（免费池提示会被上游记录，勿传敏感内容）
+id = "kilo"
+name = "Kilo Gateway（免凭据免费池）"
+enabled = true
+
+auth = "anon"
+base_url = "https://api.kilo.ai/api/gateway"
+format = "openai"
+
+models = []
+models_policy = "live"
+models_path = "/models"
+models_filter = "isFree"
+stream_dialect = "sse_delta"
+
+notes = "免登录免 Key 免注册；免费池 429 为速率限制。⚠ 上游明示免费池提示可能被记录用于改进服务。"

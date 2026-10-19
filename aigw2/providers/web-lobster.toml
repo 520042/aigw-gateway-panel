@@ -1,0 +1,16 @@
+# 网易 Lobster AI —— 经外部反代客户端（@lobster 占位符 → settings.lobster_server）
+# 一手来源：catalog relay_specs/web-lobster（base=@lobster /api/proxy/v1/chat/completions）
+# 外部反代：LobsterAI2API（本地 LobsterAI2API/ 源码，默认 127.0.0.1:8367，OpenAI 兼容 + sk-lobster-local）
+id = "web-lobster"
+name = "Lobster AI（反代客户端）"
+enabled = true
+
+auth = "api_key"
+base_url = "@lobster"
+format = "openai"
+
+models = ["DeepSeek-V4.1-Flash", "DeepSeek-V4-Pro", "glm-5.3", "kimi-k2.7-code", "qwen3.8-max"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+notes = "需在 settings 配置 lobster_server（如 http://127.0.0.1:8367）；凭据为反代服务的 API Key（sk-lobster-local）。协议参考：调研文档 lobsterai2api（错误分类→冷却映射）。"

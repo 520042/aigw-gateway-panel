@@ -1,0 +1,15 @@
+# WorkBuddy 账号 · 国际站（扫码 · 面板原生直连） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/wb-gateway-intl
+id = "wb-gateway-intl"
+name = "WorkBuddy 账号 · 国际站（扫码 · 面板原生直连）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://www.workbuddy.ai"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+notes = "国际站账号，扫码走 copilot.tencent.com 国际授权；同样由面板原生直连，不需要网关 EXE"

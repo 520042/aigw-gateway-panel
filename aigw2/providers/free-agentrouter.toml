@@ -1,0 +1,17 @@
+# AgentRouter（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-agentrouter"
+name = "AgentRouter（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://agentrouter.org/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://agentrouter.org/register?aff=jnrM"
+
+notes = "注册赠 $100，签到送 $25；Claude/GPT/GLM/DeepSeek；GitHub 注册满 5 年"

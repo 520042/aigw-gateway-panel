@@ -1,0 +1,18 @@
+# 库库 AI（百度文库+网盘） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/apk-kuku
+id = "apk-kuku"
+name = "库库 AI（百度文库+网盘）"
+enabled = true
+
+auth = "cookie"
+base_url = "https://kuku.baidu.com"
+format = "openai"
+
+models = []
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://kuku.baidu.com/"
+hosts = ["baidu.com", "kuku.baidu.com"]
+
+notes = "每日登录 +50、完成一次对话 +50、邀请新用户最高 +450；连续签到 3/5/7 天各再送百度网盘 SVIP。1 积分 ≈ 1 万 Token。活动期制，规则可能变"

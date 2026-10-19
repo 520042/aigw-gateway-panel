@@ -1,0 +1,15 @@
+# Trae 直连端点 —— OpenAI 兼容透传（bearer）
+# 一手来源：catalog relay_specs/apk-trae（api.trae.cn /api/v1/chat/completions）
+id = "apk-trae"
+name = "Trae（直连端点）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.trae.cn"
+format = "openai"
+
+models = []
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+notes = "凭据为 Trae 客户端 token（hook/导入）；协议细节见调研文档 wangqi233/trae2api 的 PROTOCOL.md。"

@@ -1,0 +1,17 @@
+# BER分公益站（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-berf"
+name = "BER分公益站（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://ai.berf1.cn/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://ai.berf1.cn/sign-up?aff=RQvt"
+
+notes = "每日签到；4 个；—"

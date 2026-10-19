@@ -1,0 +1,16 @@
+# 订阅反代 —— Meta Muse（OAuth oauth_device）
+# 一手来源：旧版 catalog platforms/sub-meta
+# 登录：v2 登录引擎（设备码/PKCE）后续接入；当前可手动粘贴 token 走 @sub-* 路由
+id = "sub-meta"
+name = "Meta Muse"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.meta.ai/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+notes = "Meta AI 订阅登录。设备码 OAuth 流程，登录后自动获取 access_token，网关直接反代。"

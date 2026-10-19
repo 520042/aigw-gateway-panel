@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-volcengine
+id = "api-volcengine"
+name = "火山方舟 API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://console.volcengine.com/ark"
+
+notes = "在火山方舟「API Key 管理」创建后粘贴"

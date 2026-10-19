@@ -1,0 +1,15 @@
+# Qoder 直连模型端点 —— OpenAI 兼容透传（bearer）
+# 一手来源：catalog relay_specs/web-qoder（api2-v2.qoder.sh /model/v1/chat/completions）+ qoder2api-hub
+id = "web-qoder"
+name = "Qoder（直连模型端点）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api2-v2.qoder.sh"
+format = "openai"
+
+models = ["qwen3.8-flash"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+notes = "qwen3.8-flash 免费；其余模型走 trial credits。凭据为 Qoder 桌面端 accessToken（Qoder2Api 设备登录获取）。"

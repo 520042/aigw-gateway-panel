@@ -1,0 +1,17 @@
+# AnyRouter（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-anyrouter"
+name = "AnyRouter（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://anyrouter.top/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://anyrouter.top/register?aff=pG9m"
+
+notes = "注册赠 $100，签到送 $25；Claude 系 10+；Linux Do 信任等级≥2"

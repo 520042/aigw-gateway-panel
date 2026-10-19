@@ -1,0 +1,17 @@
+# CM-API 公益站（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-cmapi"
+name = "CM-API 公益站（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.chengmo.cc.cd/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://api.chengmo.cc.cd/sign-up?aff=lz0Q"
+
+notes = "每日签到；46 个；注册无限制"

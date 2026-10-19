@@ -1,0 +1,17 @@
+# Cloudflare Workers AI —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "api-cloudflare"
+name = "Cloudflare Workers AI"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.cloudflare.com/client/v4/accounts/self/ai/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://developers.cloudflare.com/workers-ai/"
+
+notes = "免费层每天 10,000 Neurons。key 在 Cloudflare 控制台创建。"

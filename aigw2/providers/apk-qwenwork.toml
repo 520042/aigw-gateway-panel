@@ -1,0 +1,18 @@
+# 千问办公 QwenWork（阿里） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/apk-qwenwork
+id = "apk-qwenwork"
+name = "千问办公 QwenWork（阿里）"
+enabled = true
+
+auth = "cookie"
+base_url = "https://qwenwork.cn"
+format = "openai"
+
+models = []
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://qwenwork.cn/signin"
+hosts = ["qwenwork.cn", "aliyun.com"]
+
+notes = "⚠ qwenwork.cn 是 JWT 鉴权（实测 2026-10-05）：网关中间件只认 cookie 名 token=eyJ… 或 Authorization Bearer 头，其它 Cookie 一律「JWT is missing」。自动捕获会双发 Bearer；若仍校验失败，请在登录后浏览器 DevTools→Application→Cookies 里找 token=开头为 eyJ 的那条手动粘贴。每日登录奖 100 积分"

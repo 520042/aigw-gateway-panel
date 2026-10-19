@@ -1,0 +1,15 @@
+# Codex / 自有 OpenAI 兼容上游 —— 标准透传（bearer）
+# 一手来源：catalog relay_specs/codex（api.openai.com /v1/chat/completions）
+id = "codex"
+name = "Codex（自有 Key）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.openai.com/v1"
+format = "openai"
+
+models = ["gpt-5.1", "gpt-5.1-mini"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+notes = "用户自有 API Key（无免费额度）；模型路由可用 模型id@codex 后缀指定。"

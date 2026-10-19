@@ -1,0 +1,18 @@
+# 豆包 网页版 —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/apk-doubao
+id = "apk-doubao"
+name = "豆包 网页版"
+enabled = true
+
+auth = "cookie"
+base_url = "https://www.doubao.com"
+format = "openai"
+
+models = []
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://www.doubao.com/"
+hosts = ["doubao.com"]
+
+notes = "在打开的浏览器里登录豆包，面板自动取 Cookie（也支持手动粘贴）"

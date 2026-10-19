@@ -1,0 +1,17 @@
+# 可萌中转站（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-kemeng"
+name = "可萌中转站（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api456.me/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://api456.me/register?aff=76S3"
+
+notes = "每日签到；Claude/GPT/GLM/DS/Gemini/qwen 29；注册无限制"

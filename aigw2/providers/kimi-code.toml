@@ -1,0 +1,15 @@
+# Kimi Coding —— OpenAI 兼容透传（bearer）
+# 一手来源：catalog relay_specs/kimi-code（api.kimi.com /coding/v1/chat/completions）
+id = "kimi-code"
+name = "Kimi Coding（直连端点）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.kimi.com/coding/v1"
+format = "openai"
+
+models = ["kimi-k2.7-code"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+notes = "凭据为 Kimi coding token；模型路由可用 模型id@kimi-code 后缀指定。"

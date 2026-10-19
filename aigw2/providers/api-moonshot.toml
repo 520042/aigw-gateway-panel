@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-moonshot
+id = "api-moonshot"
+name = "Kimi 月之暗面 API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.moonshot.cn/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://platform.moonshot.cn/"
+
+notes = "在 Moonshot 开放平台「API Key 管理」创建后粘贴"

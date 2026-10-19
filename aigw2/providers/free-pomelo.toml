@@ -1,0 +1,17 @@
+# Pomelo（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-pomelo"
+name = "Pomelo（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.67.si/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://api.67.si/sign-up?aff=zpBO"
+
+notes = "每日签到；xAI/GPT/GLM/DS 17；—"

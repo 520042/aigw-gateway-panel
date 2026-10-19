@@ -1,0 +1,25 @@
+[package]
+name = "aigw-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aigw-core = { path = "../aigw-core" }
+aigw-registry = { path = "../aigw-registry" }
+aigw-store = { path = "../aigw-store" }
+aigw-pool = { path = "../aigw-pool" }
+aigw-relay = { path = "../aigw-relay" }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust-embed = { workspace = true, features = ["interpolate-folder-path"] }
+mime_guess = { workspace = true }
+tracing = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }
+http-body-util = { workspace = true }
+toml = { workspace = true }
+tempfile = "3"

@@ -1,0 +1,18 @@
+# Qoder（阿里桌面端，原通义灵码国际版） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/apk-qoder
+id = "apk-qoder"
+name = "Qoder（阿里桌面端，原通义灵码国际版）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://www.qoder.com"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://www.qoder.com/"
+hosts = ["qoder.com", "lingma.aliyun.com"]
+
+notes = "★ 桌面端应用：凭据在 Qoder 桌面客户端本地，浏览器 Cookie 接入无意义（已移除该流程）。每日 10:00 领 100 Credits 要在桌面端里领（官方写明仅桌面端主动领取，未公布 API）。CLIProxyAPI v8.0.13 尚无 -qoder-login。若你能从客户端取到凭据，可手动粘贴这里（验活走 /api/v1/user/info）"

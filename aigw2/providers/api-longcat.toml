@@ -1,0 +1,17 @@
+# 美团 LongCat —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "api-longcat"
+name = "美团 LongCat"
+enabled = true
+
+auth = "api_key"
+base_url = "https://longcat.chat/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://longcat.chat/platform"
+
+notes = "LongCat-2.5-Preview 资源包 + 活动赠送额度。"

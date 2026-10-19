@@ -1,0 +1,18 @@
+# 纳米 AI（360） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/apk-nano
+id = "apk-nano"
+name = "纳米 AI（360）"
+enabled = true
+
+auth = "cookie"
+base_url = "https://www.n.cn"
+format = "openai"
+
+models = []
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://www.n.cn/"
+hosts = ["n.cn", "360.cn"]
+
+notes = "360 旗下 AI 搜索/办公。端点需登录后探测"

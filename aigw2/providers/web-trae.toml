@@ -1,0 +1,18 @@
+# Trae 直连（Trae2api-cn 逆向） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/web-trae
+id = "web-trae"
+name = "Trae 直连（Trae2api-cn 逆向）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://trae-api-cn.mchost.guru"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://www.trae.com.cn"
+hosts = ["trae-api-cn.mchost.guru", "trae.cn", "trae.com.cn"]
+
+notes = "★ 直连 Trae 国内版，无需手机开 App。取 x-ide-token：桌面端登录一次后，从 Trae 的 leveldb/Electron LocalStorage 取 ideToken（或用 OAuth refresh 换）。对话 model 写 模型id@web-trae（gpt-4o / claude-3-7-sonnet / deepseek-v3 / deepseek-r1 等）。★ 嫌手动抠麻烦？在「腾讯/原生登录」页点「读取本机 Trae 登录态」（/api/tencent?action=trae_local）可一键自动提取并落库（需面板与本机 Trae 同一台电脑）。"

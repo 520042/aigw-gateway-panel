@@ -1,0 +1,17 @@
+# Token 能量站（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-token"
+name = "Token 能量站（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://factory.pub/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://factory.pub/sign-up?aff=6oZK"
+
+notes = "每日签到；20 个；仅 yaohuo/github 注册"

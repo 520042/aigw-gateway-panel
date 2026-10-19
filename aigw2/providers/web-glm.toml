@@ -1,0 +1,23 @@
+# 智谱清言（chatglm.cn）—— glm2api 逆向协议，v2 首个 adapter 形态平台
+# 一手来源：aigw-panel-rs catalog relay_specs/web-glm + relay/web.rs + glm2api yxc0915
+# 认证：chatglm_refresh_token（登录后 Cookie / 微信扫码），refresh → access_token（30min 缓存）
+# 签名：X-Sign 头组（aigw-crypto::glm_build_sign，毫秒 ts 校验位 + md5）
+# 上游：POST {base}/backend-api/assistant/stream（SSE parts 全量快照 → 差分转 OpenAI delta）
+id = "web-glm"
+name = "智谱清言（glm2api 逆向）"
+enabled = true
+
+auth = "cookie"
+base_url = "https://chatglm.cn/chatglm"
+format = "openai"
+login_url = "https://chatglm.cn"
+
+models = ["glm-4-flash", "glm-4", "glm-4-plus", "glm-4-air", "glm-4-all", "glm-zero-preview"]
+models_policy = "static"
+stream_dialect = "event_machine"
+
+upstream_kind = "chatglm"
+signer = "glm"
+biz_err = ["登录", "失效", "授权", "未登录"]
+
+notes = "glm-4-flash 免费；对话模型可带 -think/-search 变体后缀（自动映射 thinking/search 开关）。账号从旧版 accounts.json 导入。"

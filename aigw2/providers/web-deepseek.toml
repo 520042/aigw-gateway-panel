@@ -1,0 +1,18 @@
+# DeepSeek 网页版（deepseek-free-api 逆向） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/web-deepseek
+id = "web-deepseek"
+name = "DeepSeek 网页版（deepseek-free-api 逆向）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://chat.deepseek.com"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://chat.deepseek.com"
+hosts = ["chat.deepseek.com"]
+
+notes = "★ 免 API Key，用免费网页额度。登录 chat.deepseek.com 后 F12 拿 LocalStorage 的 userToken 粘这里。对话 model 写 deepseek-chat@web-deepseek 或 deepseek-reasoner@web-deepseek（深度思考）。首次对话需系统装有 node（用于解 POW 校验）。"

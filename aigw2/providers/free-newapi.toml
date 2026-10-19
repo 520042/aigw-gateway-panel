@@ -1,0 +1,17 @@
+# New API 福利站（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-newapi"
+name = "New API 福利站（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://new-api.abrdns.com/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://new-api.abrdns.com/register?aff=klPR"
+
+notes = "每日福利签到；69 个；Linux Do Lv1 + 注册满 1 天"

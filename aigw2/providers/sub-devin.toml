@@ -1,0 +1,16 @@
+# 订阅反代 —— Devin（OAuth oauth_pkce）
+# 一手来源：旧版 catalog platforms/sub-devin
+# 登录：v2 登录引擎（设备码/PKCE）后续接入；当前可手动粘贴 token 走 @sub-* 路由
+id = "sub-devin"
+name = "Devin"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.devin.ai/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+notes = "Devin 订阅登录。PKCE OAuth 流程，登录后自动获取 session_token，网关直接反代。"

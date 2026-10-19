@@ -1,0 +1,17 @@
+# NVIDIA NIM —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "api-nvidia"
+name = "NVIDIA NIM"
+enabled = true
+
+auth = "api_key"
+base_url = "https://integrate.api.nvidia.com/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://build.nvidia.com"
+
+notes = "100+ 模型，免费层 ~40 RPM。key 在 build.nvidia.com 创建。"

@@ -1,0 +1,18 @@
+# Antigravity / Google Cloud Code —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/apk-antigravity
+id = "apk-antigravity"
+name = "Antigravity / Google Cloud Code"
+enabled = true
+
+auth = "cookie"
+base_url = "https://cloudcode-pa.googleapis.com"
+format = "openai"
+
+models = []
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://accounts.google.com/"
+hosts = ["google.com", "googleapis.com"]
+
+notes = "Google 官方 Antigravity（APK 内 UA antigravity/1.15.8，pluginType=GEMINI）。需 Google 账号，取 oauth2 token 或 Cookie。⚠ 2026-10-06 实测：accounts.google.com 在服务端无头浏览器里抓不到二维码——Google 官方说明 QR 登录是「用已登录手机给电脑做二次验证」，且明确写了「电脑端可能无法扫描」，遇风控/VPN 更会直接隐藏 QR 选项退回密码登录。故本平台**不支持远程扫码**，请在自己电脑浏览器登录后手动粘贴 Cookie（或 oauth2 token）"

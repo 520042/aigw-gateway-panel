@@ -1,0 +1,22 @@
+# 免密车道：OpenCode Zen 匿名通道 —— v2 第一份声明式 spec
+# 一手来源：aigw-panel-rs/src/platforms.json#anon-zen + server/free_lane_models.rs（实测）
+# 上游契约：GET {base_url}/models，Authorization: Bearer public，UA opencode/1.18.31
+#           → {"data":[{id,...}]}，86 个模型（-free / :free 后缀为免费款）
+id = "anon-zen"
+name = "Our Free Model（OpenCode Zen 匿名车道）"
+enabled = true
+
+auth = "anon"
+base_url = "https://opencode.ai/zen/v1"
+format = "openai"
+
+# live 策略：模型实时拉取（M2 落地），失败回退本清单（当前为空）
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+[headers]
+Authorization = "Bearer public"
+User-Agent = "opencode/1.18.31"
+
+notes = "免登录免 Key。免费额度按会话计，短时打满会 429（换会话/稍后再用）；个别地区 403。M2 接 live 模型拉取与真实转发。"

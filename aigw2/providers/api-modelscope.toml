@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-modelscope
+id = "api-modelscope"
+name = "魔搭 ModelScope API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api-inference.modelscope.cn/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://modelscope.cn/my/myaccesstoken"
+
+notes = "在魔搭「访问令牌」创建后粘贴；3000+ 模型"

@@ -1,0 +1,16 @@
+# 订阅反代 —— Kimi Code 国际站（OAuth oauth_device）
+# 一手来源：旧版 catalog platforms/sub-kimi-ai
+# 登录：v2 登录引擎（设备码/PKCE）后续接入；当前可手动粘贴 token 走 @sub-* 路由
+id = "sub-kimi-ai"
+name = "Kimi Code 国际站"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.kimi.ai/coding/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+notes = "Kimi Code 订阅登录。国际站 auth.kimi.ai。设备码登录后自动获取 token，网关直接反代。"

@@ -1,0 +1,17 @@
+# Cerebras —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "api-cerebras"
+name = "Cerebras"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.cerebras.ai/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://cloud.cerebras.ai"
+
+notes = "$5 试用额度（需绑支付方式）；Llama/Mistral 高速推理。"

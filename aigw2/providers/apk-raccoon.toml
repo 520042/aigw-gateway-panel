@@ -1,0 +1,18 @@
+# 小浣熊 —— OpenAI 兼容透传（cookie 认证）
+# 一手来源：catalog relay_specs/apk-raccoon（xiaohuanxiong.com /api/web/llm/v2/chat/completions）
+id = "apk-raccoon"
+name = "小浣熊（网页版 cookie）"
+enabled = true
+
+auth = "cookie"
+base_url = "https://xiaohuanxiong.com"
+format = "openai"
+
+models = []
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://xiaohuanxiong.com/"
+hosts = ["xiaohuanxiong.com"]
+
+notes = "凭据为小浣熊网页登录 Cookie；登录后可调积分接口（gwextra，M6）。"

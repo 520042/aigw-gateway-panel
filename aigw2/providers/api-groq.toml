@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-groq
+id = "api-groq"
+name = "Groq API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.groq.com/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://console.groq.com/keys"
+
+notes = "在 Groq Console 创建后粘贴（免费档极低延迟）"

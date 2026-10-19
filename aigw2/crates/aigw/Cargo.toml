@@ -1,0 +1,27 @@
+[package]
+name = "aigw"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "aigw"
+path = "src/main.rs"
+
+[dependencies]
+aigw-registry = { path = "../aigw-registry" }
+aigw-server = { path = "../aigw-server" }
+aigw-store = { path = "../aigw-store" }
+aigw-pool = { path = "../aigw-pool" }
+aigw-relay = { path = "../aigw-relay" }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Registry",
+] }

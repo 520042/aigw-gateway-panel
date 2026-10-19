@@ -1,0 +1,6 @@
+# 固定 msvc 工具链（本机 rustup default 是 windows-gnu）。
+# 原因：windows-sys 0.61+ 的 raw-dylib 在 gnu 工具链上要调 dlltool.exe（本机无），
+#       msvc 工具链由 rustc 自生成 import lib + VS link.exe 链接，无此依赖。
+# 2026-10-16 M0 构建踩坑沉淀，勿删。
+[toolchain]
+channel = "stable-x86_64-pc-windows-msvc"

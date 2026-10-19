@@ -1,0 +1,17 @@
+# PM-API（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-pmapi"
+name = "PM-API（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://xn--wnup5g6so4wn.de5.net/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://xn--wnup5g6so4wn.de5.net/sign-up?aff=9b8a"
+
+notes = "完全免费无签到；240 个；—"

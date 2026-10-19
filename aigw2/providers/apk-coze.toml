@@ -1,0 +1,18 @@
+# 扣子 Coze（api.coze.cn 官方 API） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/apk-coze
+id = "apk-coze"
+name = "扣子 Coze（api.coze.cn 官方 API）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.coze.cn"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://www.coze.cn/"
+hosts = ["coze.cn"]
+
+notes = "唯一有完整开放 API 的国内 Agent 平台。在扣子控制台「个人访问令牌」生成 pat_ 开头的 PAT，粘到下面即可（浏览器 Cookie 会被 401 拒绝）"

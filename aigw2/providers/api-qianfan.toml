@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-qianfan
+id = "api-qianfan"
+name = "百度千帆 API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://qianfan.baidubce.com/v2"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://console.bce.baidu.com/iam/"
+
+notes = "在百度智能云创建千帆 API Key 后粘贴；ERNIE-Speed/Lite 永久免费"

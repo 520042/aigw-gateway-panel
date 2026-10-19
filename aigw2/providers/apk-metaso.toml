@@ -1,0 +1,18 @@
+# 秘塔 AI（metaso.cn） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/apk-metaso
+id = "apk-metaso"
+name = "秘塔 AI（metaso.cn）"
+enabled = true
+
+auth = "cookie"
+base_url = "https://metaso.cn"
+format = "openai"
+
+models = []
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://metaso.cn/"
+hosts = ["metaso.cn"]
+
+notes = "唯一有官方 Open API + MCP 的国内办公 AI（¥0.03/次）。它的积分是「每日自动刷新到账」，**不需要签到** —— 别给它做签到按钮"

@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-siliconflow
+id = "api-siliconflow"
+name = "硅基流动 API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://api.siliconflow.cn/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://cloud.siliconflow.cn/"
+
+notes = "在硅基流动「API 密钥」创建后粘贴；部分模型永久免费"

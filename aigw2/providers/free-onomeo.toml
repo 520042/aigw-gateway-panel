@@ -1,0 +1,17 @@
+# onomeo（公益） —— v2 声明式接入
+# 一手来源：旧版 catalog_sites（官方区/公益 relay）
+id = "free-onomeo"
+name = "onomeo（公益）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://onomeo.com/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://onomeo.com/?ref=AC-U4P69Q"
+
+notes = "签到积分：首日 5000，第 7 天起 10000/日；35 免费 + 9 付费；免费账号 5h/20 次"

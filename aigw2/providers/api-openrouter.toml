@@ -1,0 +1,17 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：旧版 catalog platforms/api-openrouter
+id = "api-openrouter"
+name = "OpenRouter API"
+enabled = true
+
+auth = "api_key"
+base_url = "https://openrouter.ai/api/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://openrouter.ai/keys"
+
+notes = "在 OpenRouter「Keys」创建后粘贴；有 free 标签免费模型"
