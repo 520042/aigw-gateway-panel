@@ -3198,5 +3198,2104 @@
     }
    ]
   }
+ },
+ "catalog_page": {
+  "verified_at": "2026-10-02",
+  "local_gateways": [
+   {
+    "id": "wb-gateway",
+    "name": "WorkBuddy Local Gateway",
+    "kind": "exe",
+    "file": "workbuddy-gateway-windows-1.29.6.exe",
+    "version": "1.29.6",
+    "arch": "x86_64",
+    "upstream": [
+     "copilot.tencent.com",
+     "www.codebuddy.cn",
+     "api.trae.cn"
+    ],
+    "auth_mode": "cookie-session",
+    "default_port": 8317,
+    "default_api_key": "admin",
+    "free": "账号自带额度，每日 09:00 自动签到、10:00 成长任务",
+    "checkin": true,
+    "tasks": true,
+    "usage": true,
+    "endpoints": [
+     "/v1/chat/completions",
+     "/v1/models",
+     "/v1/responses",
+     "/v1/messages",
+     "/admin/api/status",
+     "/admin/api/checkins",
+     "/admin/api/growth",
+     "/admin/api/growth/lottery",
+     "/admin/api/growth/redeem",
+     "/admin/api/growth/bonus",
+     "/admin/api/growth/makeup",
+     "/admin/api/growth/travel",
+     "/admin/api/growth/report",
+     "/admin/api/usage",
+     "/admin/api/usage/series",
+     "/admin/api/models",
+     "/admin/api/models/probe",
+     "/admin/api/credentials",
+     "/admin/api/credentials/delete",
+     "/admin/api/login/start",
+     "/admin/api/login/poll",
+     "/admin/api/login/import",
+     "/admin/api/apikeys",
+     "/admin/api/webhooks",
+     "/admin/api/settings",
+     "/admin/api/logs",
+     "/admin/api/setup",
+     "/admin/api/probe"
+    ],
+    "note": "自带账号池轮询、429 冷却、用量统计、Webhook 通知、模型免费/收费探测"
+   },
+   {
+    "id": "apk-codebuddy",
+    "name": "CodeBuddy 国际版网关 (Android)",
+    "kind": "apk",
+    "file": "base(3).apk",
+    "package": "com.joy4fire.workbuddy2api",
+    "version": "1.1.0-native-international",
+    "upstream": [
+     "copilot.tencent.com",
+     "www.codebuddy.ai"
+    ],
+    "local_endpoint": "http://127.0.0.1:8788/v1",
+    "free": "CodeBuddy 国际版账号额度",
+    "checkin": false,
+    "tasks": false,
+    "usage": false,
+    "endpoints": [
+     "/v1/chat/completions",
+     "/v1/models",
+     "/v1/messages",
+     "/v1/messages/count_tokens",
+     "/v1/responses"
+    ],
+    "note": "含 codebuddy-international-models.json（22 个模型，含 gpt-5.6 系列）"
+   },
+   {
+    "id": "apk-trae",
+    "name": "Trae / WorkBuddy 国内网关 (Android)",
+    "kind": "apk",
+    "file": "base.apk",
+    "package": "aigw.app",
+    "version": "0.1.18",
+    "upstream": [
+     "api.trae.cn",
+     "api.trae.com.cn",
+     "www.codebuddy.cn",
+     "www.workbuddy.ai",
+     "trae-api-cn.mchost.guru",
+     "cloudcode-pa.googleapis.com",
+     "accounts.google.com"
+    ],
+    "oauth_ports": [
+     51120,
+     51121
+    ],
+    "free": "Trae 国内站积分 + 签到积分",
+    "checkin": true,
+    "tasks": true,
+    "usage": true,
+    "endpoints": [
+     "/api/v1/chat/completions",
+     "/api/v1/models",
+     "/api/v2/ug/checkin_credits/status",
+     "/api/v2/ug/checkin_credits/claim",
+     "/api/v1/onboarding/tasks",
+     "/api/v1/onboarding/tasks/complete",
+     "/api/v1/points/records",
+     "/api/v1/points/activation",
+     "/api/v1/points/redemption-codes/redeem",
+     "/api/v1/team-points/balance",
+     "/api/v2/pay/ide_user_ent_usage",
+     "/api/v2/pay/web_user_ent_usage",
+     "/api/v2/pay/user_current_entitlement_list",
+     "/api/v3/trae/GetUserInfo",
+     "/api/v3/trae/oauth/ExchangeToken",
+     "/v2/billing/meter/daily-checkin",
+     "/v2/billing/meter/get-user-resource"
+    ],
+    "note": "功能最全的 Android 网关：签到 / 成长任务 / 兑换码 / 积分明细 / 用量账单 / OAuth"
+   },
+   {
+    "id": "apk-yuanbao",
+    "name": "腾讯元宝网关 (Android)",
+    "kind": "apk",
+    "file": "base(5).apk",
+    "package": "dev.yuanbao2api",
+    "version": "1.2.0",
+    "upstream": [
+     "yuanbao.tencent.com"
+    ],
+    "free": "元宝对话额度（消费 APP 内置广告换额度）",
+    "checkin": false,
+    "tasks": false,
+    "usage": false,
+    "endpoints": [
+     "/v1/chat/completions",
+     "/v1/models",
+     "/api/getuserinfo",
+     "/api/chat/",
+     "/api/user/agent/conversation/create"
+    ],
+    "note": "把元宝 APP 变成 OpenAI 端点"
+   },
+   {
+    "id": "apk-doubao",
+    "name": "豆包网关 (Android)",
+    "kind": "apk",
+    "file": "base(1).apk",
+    "package": "dev.doubao2api",
+    "version": "1.0.6",
+    "upstream": [
+     "www.doubao.com"
+    ],
+    "free": "豆包 APP 免费对话额度",
+    "checkin": false,
+    "tasks": false,
+    "usage": false,
+    "endpoints": [
+     "/v1/chat/completions",
+     "/v1/models",
+     "/v1/images/generations",
+     "/alice/message/get_file_url",
+     "/samantha/pages/upload_image"
+    ],
+    "note": "支持图片上传 + 文生图，唯一带 /v1/images/generations 的"
+   },
+   {
+    "id": "apk-xiaohuanxiong",
+    "name": "小浣熊 AI 网关 (Android)",
+    "kind": "apk",
+    "file": "base(4).apk",
+    "package": "dev.raccoon2api",
+    "version": "1.15",
+    "upstream": [
+     "xiaohuanxiong.com"
+    ],
+    "free": "登录送积分，每日登录赠送",
+    "checkin": true,
+    "tasks": false,
+    "usage": true,
+    "endpoints": [
+     "/v1/chat/completions",
+     "/v1/models",
+     "/api/web/llm/v2",
+     "/api/web/auth/v1",
+     "/api/web/auth/v1/entitlement_info",
+     "/api/web/points/v1/balance",
+     "/api/web/points/v1/bills",
+     "/api/web/office/v3/setting_info",
+     "/api/web/desktop/v1/login/points/grant"
+    ],
+    "note": "唯一带「登录送积分 /grant」端点的，可当每日签到"
+   },
+   {
+    "id": "apk-go-native",
+    "name": "Go 原生网关 (Android)",
+    "kind": "apk",
+    "file": "base(2).apk",
+    "package": "com.joy4fire.wb2apimobile",
+    "version": "—",
+    "upstream": [
+     "—"
+    ],
+    "free": "—",
+    "checkin": false,
+    "tasks": false,
+    "usage": false,
+    "endpoints": [
+     "http://127.0.0.1:<port>"
+    ],
+    "note": "libgojni.so × 4 架构（arm64/armv7/x86/x86_64），GoMobile 编译，体积 50MB"
+   }
+  ],
+  "relay_sites": [
+   {
+    "name": "AnyRouter",
+    "url": "https://anyrouter.top",
+    "signup": "https://anyrouter.top/register?aff=pG9m",
+    "bonus": "注册赠 $100，签到送 $25",
+    "models": "Claude 系 10+",
+    "checkin": true,
+    "limit": "Linux Do 信任等级≥2"
+   },
+   {
+    "name": "AgentRouter",
+    "url": "https://agentrouter.org",
+    "signup": "https://agentrouter.org/register?aff=jnrM",
+    "bonus": "注册赠 $100，签到送 $25",
+    "models": "Claude/GPT/GLM/DeepSeek",
+    "checkin": true,
+    "limit": "GitHub 注册满 5 年"
+   },
+   {
+    "name": "PM-API",
+    "url": "https://xn--wnup5g6so4wn.de5.net",
+    "signup": "https://xn--wnup5g6so4wn.de5.net/sign-up?aff=9b8a",
+    "bonus": "完全免费无签到",
+    "models": "240 个",
+    "checkin": false,
+    "limit": "—"
+   },
+   {
+    "name": "快跑 API",
+    "url": "https://kuaipao.ai",
+    "signup": "https://kuaipao.ai/register?aff=tOJg",
+    "bonus": "每日签到",
+    "models": "100+ 个",
+    "checkin": true,
+    "limit": "—"
+   },
+   {
+    "name": "维云模型",
+    "url": "https://vsllm.cc",
+    "signup": "https://vsllm.cc/i/z2IN",
+    "bonus": "每日任务换额度",
+    "models": "69 个",
+    "checkin": true,
+    "limit": "注册无限制"
+   },
+   {
+    "name": "New API 福利站",
+    "url": "https://new-api.abrdns.com",
+    "signup": "https://new-api.abrdns.com/register?aff=klPR",
+    "bonus": "每日福利签到",
+    "models": "69 个",
+    "checkin": true,
+    "limit": "Linux Do Lv1 + 注册满 1 天"
+   },
+   {
+    "name": "CM-API 公益站",
+    "url": "https://api.chengmo.cc.cd",
+    "signup": "https://api.chengmo.cc.cd/sign-up?aff=lz0Q",
+    "bonus": "每日签到",
+    "models": "46 个",
+    "checkin": true,
+    "limit": "注册无限制"
+   },
+   {
+    "name": "ZeroCat",
+    "url": "https://zero.cat",
+    "signup": "https://zero.cat/sign-up?aff=esyf",
+    "bonus": "每日签到",
+    "models": "Claude/DS/xAI/Gemini 40",
+    "checkin": true,
+    "limit": "—"
+   },
+   {
+    "name": "Huan API",
+    "url": "https://ai.huan666.de",
+    "signup": "https://ai.huan666.de/sign-up?aff=npLD",
+    "bonus": "每日签到",
+    "models": "17 个",
+    "checkin": true,
+    "limit": "—"
+   },
+   {
+    "name": "可萌中转站",
+    "url": "https://api456.me",
+    "signup": "https://api456.me/register?aff=76S3",
+    "bonus": "每日签到",
+    "models": "Claude/GPT/GLM/DS/Gemini/qwen 29",
+    "checkin": true,
+    "limit": "注册无限制"
+   },
+   {
+    "name": "Token 能量站",
+    "url": "https://factory.pub",
+    "signup": "https://factory.pub/sign-up?aff=6oZK",
+    "bonus": "每日签到",
+    "models": "20 个",
+    "checkin": true,
+    "limit": "仅 yaohuo/github 注册"
+   },
+   {
+    "name": "Pomelo",
+    "url": "https://api.67.si",
+    "signup": "https://api.67.si/sign-up?aff=zpBO",
+    "bonus": "每日签到",
+    "models": "xAI/GPT/GLM/DS 17",
+    "checkin": true,
+    "limit": "—"
+   },
+   {
+    "name": "BER分公益站",
+    "url": "https://ai.berf1.cn",
+    "signup": "https://ai.berf1.cn/sign-up?aff=RQvt",
+    "bonus": "每日签到",
+    "models": "4 个",
+    "checkin": true,
+    "limit": "—"
+   },
+   {
+    "name": "hkai",
+    "url": "https://share.hkai25.top",
+    "signup": "https://share.hkai25.top/sign-up?aff=0qe8",
+    "bonus": "每日签到",
+    "models": "xAI/minimax/GLM/DS 10",
+    "checkin": true,
+    "limit": "—"
+   },
+   {
+    "name": "糯喵喵 AI 驿站",
+    "url": "https://ai.yangwj.me",
+    "signup": "https://ai.yangwj.me/sign-up?aff=gs6u",
+    "bonus": "每日签到",
+    "models": "47 个",
+    "checkin": true,
+    "limit": "—"
+   },
+   {
+    "name": "onomeo",
+    "url": "https://onomeo.com",
+    "signup": "https://onomeo.com/?ref=AC-U4P69Q",
+    "bonus": "签到积分：首日 5000，第 7 天起 10000/日",
+    "models": "35 免费 + 9 付费",
+    "checkin": true,
+    "limit": "免费账号 5h/20 次"
+   },
+   {
+    "name": "奶昔 New API",
+    "url": "https://newapi.naixi.net",
+    "signup": "https://newapi.naixi.net/login",
+    "bonus": "开户送 $5，签到送 1-2 刀/日",
+    "models": "模型广场自选",
+    "checkin": true,
+    "limit": "需奶昔 SSO 账号"
+   }
+  ],
+  "official": [
+   {
+    "name": "智谱 BigModel",
+    "region": "国内",
+    "url": "https://open.bigmodel.cn",
+    "free": "GLM-4.7-Flash / GLM-4-Flash / GLM-4.6V-Flash 永久免费；签到送 1 万 token",
+    "note": "新用户赠 2000 万 token"
+   },
+   {
+    "name": "阿里云百炼",
+    "region": "国内",
+    "url": "https://bailian.aliyun.com",
+    "free": "通义千问全系免费；新人 7000 万 token + 100 张生图",
+    "note": "有效期 180 天，可开「用完即停」"
+   },
+   {
+    "name": "百度千帆",
+    "region": "国内",
+    "url": "https://qianfan.cloud.baidu.com",
+    "free": "ERNIE-Speed/Lite/Tiny 永久免费不限量；新用户 150 万 token",
+    "note": "需实名认证"
+   },
+   {
+    "name": "硅基流动 SiliconFlow",
+    "region": "国内",
+    "url": "https://cloud.siliconflow.cn",
+    "free": "部分模型永久免费 + 新户赠 14 元",
+    "note": "国内直连海外模型"
+   },
+   {
+    "name": "美团 LongCat",
+    "region": "国内",
+    "url": "https://longcat.chat/platform",
+    "free": "LongCat-2.5-Preview 资源包 + 活动赠送",
+    "note": "1M 上下文"
+   },
+   {
+    "name": "讯飞星辰 MaaS",
+    "region": "国内",
+    "url": "https://platform.xfyun.cn",
+    "free": "Qwen3-Coder-Next / Qwen3-1.7B 永久免费不限量",
+    "note": "星火 X2.5 限时免费"
+   },
+   {
+    "name": "魔搭 ModelScope",
+    "region": "国内",
+    "url": "https://modelscope.cn",
+    "free": "3000+ 模型，魔棒兑换调用",
+    "note": "需绑阿里云并实名"
+   },
+   {
+    "name": "Google AI Studio",
+    "region": "海外",
+    "url": "https://aistudio.google.com",
+    "free": "Gemini 全系免费层，15 RPM / 1500 RPD",
+    "note": "无需信用卡，额度最慷慨"
+   },
+   {
+    "name": "NVIDIA NIM",
+    "region": "海外",
+    "url": "https://build.nvidia.com",
+    "free": "100+ 模型无限额（速率限制 ~40 RPM）",
+    "note": "无需信用卡"
+   },
+   {
+    "name": "Groq",
+    "region": "海外",
+    "url": "https://groq.com",
+    "free": "免费 tier 极低延迟",
+    "note": "GPT-OSS / Qwen / Kimi"
+   },
+   {
+    "name": "OpenRouter",
+    "region": "海外",
+    "url": "https://openrouter.ai",
+    "free": "20+ free 模型，每日请求上限",
+    "note": "搜 free 标签"
+   },
+   {
+    "name": "Cloudflare Workers AI",
+    "region": "海外",
+    "url": "https://developers.cloudflare.com",
+    "free": "免费层每天 10,000 Neurons",
+    "note": "边缘推理"
+   },
+   {
+    "name": "HuggingFace",
+    "region": "海外",
+    "url": "https://huggingface.co",
+    "free": "每月 $0.10 credits",
+    "note": "模型生态最全"
+   },
+   {
+    "name": "Cerebras",
+    "region": "海外",
+    "url": "https://cerebras.ai",
+    "free": "$5 试用额度（需绑支付方式）",
+    "note": "推理极快"
+   }
+  ],
+  "open_source": [
+   {
+    "name": "New-API",
+    "url": "https://github.com/QuantumNous/new-api",
+    "desc": "国内最流行的统一网关，支持签到系统 / 额度分配 / 用量看板"
+   },
+   {
+    "name": "One API",
+    "url": "https://github.com/songquanpeng/one-api",
+    "desc": "38k+ Star，100+ 渠道，New-API 前身"
+   },
+   {
+    "name": "All API Hub",
+    "url": "https://github.com/Jekeer/all-api-hub",
+    "desc": "浏览器插件，统一管理所有 NewAPI 站点的余额/模型/密钥 + 自动签到"
+   },
+   {
+    "name": "newapi-ai-check-in",
+    "url": "https://github.com/chiocai/newapi-ai-check-in",
+    "desc": "NewAPI 多账号自动签到，支持 WAF/Turnstile 绕过与多种登录方式"
+   },
+   {
+    "name": "FreeLLMAPI",
+    "url": "https://github.com/Alvaro-Cintas/freellmapi",
+    "desc": "聚合 14+ 家免费额度为单一 OpenAI 端点，自动故障转移"
+   },
+   {
+    "name": "AI Proxy",
+    "url": "https://github.com/labring/aiproxy",
+    "desc": "企业级多租户网关，负载均衡 + 自动重试"
+   },
+   {
+    "name": "free-newapi 清单",
+    "url": "https://github.com/kirito8/free-newapi",
+    "desc": "本目录的公益站数据来源，持续维护"
+   },
+   {
+    "name": "One API Hub",
+    "url": "https://github.com/DaemonRamble/one-api-hub",
+    "desc": "轻量 Web 服务，SQLite + JWT，聚合 NewAPI 系站点签到与额度"
+   }
+  ],
+  "apk_analysis": {
+   "base.apk": {
+    "package": "aigw.app",
+    "version": "0.1.18",
+    "sdk": "min 24 / target 34",
+    "components": [
+     "aigw.app.service.GatewayService",
+     "androidx.core.app.CoreComponentFactory"
+    ],
+    "permissions": [
+     "INTERNET",
+     "FOREGROUND_SERVICE",
+     "FOREGROUND_SERVICE_SPECIAL_USE",
+     "WAKE_LOCK",
+     "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+     "ACCESS_WIFI_STATE",
+     "POST_NOTIFICATIONS",
+     "DUMP"
+    ],
+    "capabilities": [
+     "签到领积分",
+     "新用户任务",
+     "兑换码",
+     "积分流水",
+     "团队积分",
+     "权益套餐",
+     "用量账单"
+    ]
+   },
+   "base(1).apk": {
+    "package": "dev.doubao2api",
+    "version": "1.0.6",
+    "sdk": "min 24 / target 34",
+    "components": [
+     "dev.doubao2api.ui.MainActivity",
+     "dev.doubao2api.App",
+     "dev.doubao2api.service.GatewayService",
+     "dev.doubao2api.service.BootReceiver"
+    ],
+    "permissions": [
+     "INTERNET",
+     "FOREGROUND_SERVICE_SPECIAL_USE",
+     "RECEIVE_BOOT_COMPLETED",
+     "SYSTEM_ALERT_WINDOW",
+     "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+    ],
+    "capabilities": [
+     "开源自启",
+     "悬浮窗",
+     "图片生成",
+     "文件上传"
+    ]
+   },
+   "base(2).apk": {
+    "package": "com.joy4fire.wb2apimobile",
+    "version": "—",
+    "sdk": "min 21 / target 28",
+    "components": [
+     "com.joy4fire.wb2apimobile.MainActivity"
+    ],
+    "permissions": [
+     "INTERNET",
+     "FOREGROUND_SERVICE"
+    ],
+    "capabilities": [
+     "GoMobile 原生网关（libgojni.so × 4 架构）"
+    ]
+   },
+   "base(3).apk": {
+    "package": "com.joy4fire.workbuddy2api",
+    "version": "1.1.0-native-international",
+    "sdk": "min 24 / target 34",
+    "components": [
+     "com.joy4fire.workbuddy2api.MainActivity",
+     "com.joy4fire.workbuddy2api.ApiHostService",
+     "com.joy4fire.workbuddy2api.OAuthWebActivity"
+    ],
+    "permissions": [
+     "INTERNET",
+     "FOREGROUND_SERVICE_SPECIAL_USE",
+     "WAKE_LOCK"
+    ],
+    "capabilities": [
+     "OAuth 网页授权",
+     "Anthropic Messages 兼容",
+     "Responses API",
+     "token 计数"
+    ]
+   },
+   "base(4).apk": {
+    "package": "dev.raccoon2api",
+    "version": "1.15",
+    "sdk": "min 24 / target 34",
+    "components": [
+     "dev.raccoon2api.ui.MainActivity",
+     "dev.raccoon2api.App",
+     "dev.raccoon2api.service.GatewayService",
+     "dev.raccoon2api.service.BootReceiver",
+     "dev.raccoon2api.service.FloatingWindowService"
+    ],
+    "permissions": [
+     "INTERNET",
+     "FOREGROUND_SERVICE_SPECIAL_USE",
+     "RECEIVE_BOOT_COMPLETED",
+     "SYSTEM_ALERT_WINDOW",
+     "WAKE_LOCK"
+    ],
+    "capabilities": [
+     "登录送积分",
+     "积分余额",
+     "消费账单",
+     "权益查询",
+     "悬浮窗"
+    ]
+   },
+   "base(5).apk": {
+    "package": "dev.yuanbao2api",
+    "version": "1.2.0",
+    "sdk": "min 24 / target 34",
+    "components": [
+     "dev.yuanbao2api.ui.MainActivity",
+     "dev.yuanbao2api.App",
+     "dev.yuanbao2api.service.GatewayService",
+     "dev.yuanbao2api.service.BootReceiver"
+    ],
+    "permissions": [
+     "INTERNET",
+     "FOREGROUND_SERVICE_SPECIAL_USE",
+     "RECEIVE_BOOT_COMPLETED",
+     "SYSTEM_ALERT_WINDOW",
+     "WAKE_LOCK"
+    ],
+    "capabilities": [
+     "开源自启",
+     "悬浮窗",
+     "用户信息查询"
+    ]
+   }
+  }
+ },
+ "gwextra": {
+  "actions": {
+   "apk-trae": [
+    {
+     "id": "checkin_status",
+     "name": "签到状态",
+     "method": "GET",
+     "path": "/trae/api/v2/ug/checkin_credits/status",
+     "verified": true
+    },
+    {
+     "id": "checkin_claim",
+     "name": "领取签到积分",
+     "method": "POST",
+     "path": "/trae/api/v2/ug/checkin_credits/claim",
+     "verified": true
+    },
+    {
+     "id": "entitlement",
+     "name": "当前权益套餐",
+     "method": "GET",
+     "path": "/trae/api/v2/pay/user_current_entitlement_list",
+     "verified": true
+    },
+    {
+     "id": "usage",
+     "name": "用量账单",
+     "method": "GET",
+     "path": "/trae/api/v2/pay/ide_user_ent_usage",
+     "verified": true
+    },
+    {
+     "id": "usage_web",
+     "name": "网页版用量",
+     "method": "GET",
+     "path": "/trae/api/v2/pay/web_user_ent_usage",
+     "verified": true
+    },
+    {
+     "id": "points_activation",
+     "name": "积分激活",
+     "method": "POST",
+     "path": "/api/v1/points/activation",
+     "base": "https://www.trae.com.cn",
+     "local": true,
+     "unverified": true
+    },
+    {
+     "id": "redeem",
+     "name": "兑换码兑换",
+     "method": "POST",
+     "path": "/api/v1/points/redemption-codes/redeem",
+     "need": [
+      "code"
+     ],
+     "base": "https://www.trae.com.cn",
+     "local": true,
+     "unverified": true
+    },
+    {
+     "id": "team_points",
+     "name": "团队积分",
+     "method": "GET",
+     "path": "/api/v1/team-points/balance",
+     "base": "https://www.trae.com.cn",
+     "local": true,
+     "unverified": true
+    },
+    {
+     "id": "points_balance",
+     "name": "积分余额",
+     "method": "GET",
+     "path": "/v2/billing/meter/get-user-resource",
+     "base": "https://www.trae.com.cn",
+     "unverified": true,
+     "stale_note": "2026-10-04 实测返回 HTML，不是 API"
+    },
+    {
+     "id": "growth",
+     "name": "成长活动",
+     "method": "GET",
+     "path": "/v2/activity/growth",
+     "base": "https://www.trae.com.cn",
+     "unverified": true,
+     "stale_note": "2026-10-04 实测返回 HTML，不是 API"
+    },
+    {
+     "id": "user_info",
+     "name": "用户基础信息",
+     "method": "GET",
+     "path": "/userinfo/query/baseInfo",
+     "base": "https://www.trae.com.cn",
+     "unverified": true,
+     "stale_note": "2026-10-04 实测返回 HTML"
+    },
+    {
+     "id": "user_info_cloud",
+     "name": "云端用户信息",
+     "method": "GET",
+     "path": "/cloudide/api/v3/trae/GetUserInfo",
+     "base": "https://www.trae.com.cn",
+     "unverified": true,
+     "stale_note": "2026-10-04 www 域返 HTML / api 域 404"
+    },
+    {
+     "id": "quota",
+     "name": "剩余配额",
+     "method": "GET",
+     "path": "/buddy/quota",
+     "base": "https://www.trae.com.cn",
+     "unverified": true,
+     "stale_note": "2026-10-04 实测返回 HTML"
+    },
+    {
+     "id": "login_send_code",
+     "name": "手机登录·发验证码",
+     "method": "POST",
+     "path": "/login/phone/sendMsgCode",
+     "need": [
+      "phone"
+     ],
+     "base": "https://www.trae.com.cn",
+     "unverified": true,
+     "stale_note": "2026-10-04 实测返回 HTML"
+    },
+    {
+     "id": "login_check_code",
+     "name": "手机登录·校验码",
+     "method": "POST",
+     "path": "/login/phone/checkCode",
+     "need": [
+      "phone",
+      "code"
+     ],
+     "base": "https://www.trae.com.cn",
+     "unverified": true,
+     "stale_note": "2026-10-04 实测返回 HTML"
+    }
+   ],
+   "apk-raccoon": [
+    {
+     "id": "login_bonus",
+     "name": "登录送积分",
+     "method": "POST",
+     "path": "/api/web/desktop/v1/login/points/grant"
+    },
+    {
+     "id": "points_balance",
+     "name": "积分余额",
+     "method": "GET",
+     "path": "/api/web/points/v1/balance",
+     "verified": true
+    },
+    {
+     "id": "points_bills",
+     "name": "积分流水",
+     "method": "GET",
+     "path": "/api/web/points/v1/bills"
+    },
+    {
+     "id": "entitlement",
+     "name": "权益信息",
+     "method": "GET",
+     "path": "/api/web/auth/v1/entitlement_info",
+     "verified": true
+    },
+    {
+     "id": "setting_info",
+     "name": "站点设置",
+     "method": "GET",
+     "path": "/api/web/office/v3/setting_info"
+    },
+    {
+     "id": "model_catalog",
+     "name": "模型目录",
+     "method": "GET",
+     "path": "/model_catalog",
+     "unverified": true,
+     "stale_note": "2026-10-04 实测返回 HTML 页面（SPA 路由），不是 JSON API"
+    },
+    {
+     "id": "refresh",
+     "name": "刷新凭据",
+     "method": "POST",
+     "path": "/refresh",
+     "unverified": true,
+     "stale_note": "2026-10-04 实测返回 HTML 页面（SPA 路由），非接口"
+    }
+   ],
+   "apk-codebuddy": [
+    {
+     "id": "models",
+     "name": "模型目录",
+     "method": "GET",
+     "path": "/console/enterprises/personal/models",
+     "verified": true
+    },
+    {
+     "id": "checkin",
+     "name": "每日签到",
+     "method": "POST",
+     "path": "/v2/billing/meter/daily-checkin",
+     "verified": true
+    },
+    {
+     "id": "points_balance",
+     "name": "积分余额",
+     "method": "POST",
+     "path": "/v2/billing/meter/get-user-resource",
+     "verified": true
+    },
+    {
+     "id": "usage_summary",
+     "name": "用量摘要",
+     "method": "GET",
+     "path": "/billing/meter/get-user-resource-summary",
+     "unverified": true,
+     "stale_note": "2026-10-04 逆向登记为 404 已下线；本轮扫到 401（整站鉴权），拿不到数据"
+    },
+    {
+     "id": "auth_token",
+     "name": "官方登录轮询",
+     "method": "GET",
+     "path": "/v2/plugin/auth/token",
+     "base": "https://copilot.tencent.com",
+     "verified": true
+    },
+    {
+     "id": "auth_refresh",
+     "name": "刷新 token",
+     "method": "POST",
+     "path": "/v2/plugin/auth/token/refresh",
+     "base": "https://copilot.tencent.com",
+     "verified": true,
+     "header_token": "X-Refresh-Token",
+     "need": [
+      "refreshToken"
+     ]
+    },
+    {
+     "id": "login_account",
+     "name": "账密登录",
+     "method": "POST",
+     "path": "/v2/plugin/login/account",
+     "unverified": true,
+     "need": [
+      "username",
+      "password"
+     ],
+     "note": "2026-10-04 扫描返 401（需登录态）；面板主路走二维码，此口仅备用"
+    },
+    {
+     "id": "invite_bind",
+     "name": "邀请码绑定",
+     "method": "POST",
+     "path": "/activity/workbuddy/invitation/v2/bind",
+     "unverified": true,
+     "need": [
+      "code"
+     ],
+     "note": "2026-10-04 扫描返 401（需登录态）；需 body 带 invite_code"
+    }
+   ],
+   "apk-doubao": [
+    {
+     "id": "user_info",
+     "name": "账号信息",
+     "method": "GET",
+     "path": "/api/v1/user/info",
+     "verified": true
+    },
+    {
+     "id": "models",
+     "name": "模型清单",
+     "method": "GET",
+     "path": "/alice/basic/launch",
+     "unverified": true,
+     "query": {
+      "version_code": "20800",
+      "language": "zh",
+      "device_platform": "web",
+      "doubao_device_platform": "web",
+      "aid": "497858",
+      "real_aid": "497858"
+     },
+     "stale_note": "2026-10-04 抓包确认的真路径（/alice/*）；无登录态返 404，需登录后取"
+    },
+    {
+     "id": "user_config",
+     "name": "用户配置（验活）",
+     "method": "GET",
+     "path": "/alice/user/config/pull",
+     "verified": true,
+     "query": {
+      "version_code": "20800",
+      "language": "zh",
+      "device_platform": "web",
+      "doubao_device_platform": "web",
+      "aid": "497858",
+      "real_aid": "497858"
+     }
+    },
+    {
+     "id": "chat",
+     "name": "对话补全",
+     "method": "POST",
+     "path": "/samantha/chat/completion",
+     "verified": true,
+     "need": [
+      "messages"
+     ]
+    },
+    {
+     "id": "chat_openai",
+     "name": "对话补全（OpenAI 兼容）",
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "need": [
+      "messages"
+     ],
+     "unverified": true,
+     "stale_note": "云端无此路径（返 HTML）；/v1/* 是 APK 本地网关路由"
+    },
+    {
+     "id": "image_gen",
+     "name": "文生图",
+     "method": "POST",
+     "path": "/v1/images/generations",
+     "need": [
+      "prompt"
+     ],
+     "unverified": true,
+     "stale_note": "2026-10-04 实测返 HTML，非云端接口（原误标 verified）"
+    }
+   ],
+   "apk-yuanbao": [
+    {
+     "id": "models",
+     "name": "模型列表",
+     "method": "GET",
+     "path": "/api/agent/model/list"
+    },
+    {
+     "id": "models_legacy",
+     "name": "模型列表（旧路径）",
+     "method": "GET",
+     "path": "/api/models",
+     "verified": true,
+     "note": "实测 401 存在；抓包显示现在走 /api/agent/model/list"
+    },
+    {
+     "id": "user_info",
+     "name": "账号信息",
+     "method": "GET",
+     "path": "/api/getuserinfo",
+     "verified": true
+    },
+    {
+     "id": "conversation",
+     "name": "创建会话",
+     "method": "POST",
+     "path": "/api/user/agent/conversation/create"
+    },
+    {
+     "id": "chat",
+     "name": "对话",
+     "method": "POST",
+     "path": "/api/chat/completions",
+     "need": [
+      "messages"
+     ]
+    }
+   ],
+   "apk-go": [],
+   "apk-loomy": [
+    {
+     "id": "models",
+     "name": "模型目录",
+     "method": "GET",
+     "path": "/api/v1/models"
+    },
+    {
+     "id": "chat",
+     "name": "对话补全",
+     "method": "POST",
+     "path": "/api/v1/chat/completions",
+     "need": [
+      "messages"
+     ]
+    }
+   ],
+   "apk-antigravity": [
+    {
+     "id": "load_code_assist",
+     "name": "Cloud Code 会话",
+     "method": "POST",
+     "path": "/v1internal:loadCodeAssist",
+     "needs_proxy": true
+    },
+    {
+     "id": "onboard_user",
+     "name": "用户引导",
+     "method": "POST",
+     "path": "/v1internal:onboardUser",
+     "needs_proxy": true
+    },
+    {
+     "id": "models",
+     "name": "模型目录",
+     "method": "GET",
+     "path": "/v1internal:listModels",
+     "needs_proxy": true,
+     "unverified": true,
+     "stale_note": "2026-10-04 实测 GET/POST 均 404，路径未证实"
+    }
+   ],
+   "apk-codebuddy-cn": [
+    {
+     "id": "models",
+     "name": "模型目录",
+     "method": "GET",
+     "path": "/console/enterprises/personal/models"
+    },
+    {
+     "id": "checkin",
+     "name": "每日签到",
+     "method": "POST",
+     "path": "/v2/billing/meter/daily-checkin"
+    },
+    {
+     "id": "points_balance",
+     "name": "积分余额",
+     "method": "POST",
+     "path": "/v2/billing/meter/get-user-resource",
+     "verified": true
+    },
+    {
+     "id": "usage_summary",
+     "name": "用量摘要",
+     "method": "GET",
+     "path": "/billing/meter/get-user-resource-summary"
+    },
+    {
+     "id": "auth_refresh",
+     "name": "刷新 token",
+     "method": "POST",
+     "path": "/v2/plugin/auth/token/refresh",
+     "verified": true,
+     "header_token": "X-Refresh-Token",
+     "need": [
+      "refreshToken"
+     ]
+    },
+    {
+     "id": "login_account",
+     "name": "账密登录",
+     "method": "POST",
+     "path": "/v2/plugin/login/account",
+     "need": [
+      "username",
+      "password"
+     ]
+    }
+   ],
+   "apk-coze": [
+    {
+     "id": "chat",
+     "name": "对话补全",
+     "method": "POST",
+     "path": "/v3/chat",
+     "need": [
+      "bot_id",
+      "user_id",
+      "content"
+     ]
+    },
+    {
+     "id": "chat_retrieve",
+     "name": "查询会话状态",
+     "method": "GET",
+     "path": "/v3/chat/retrieve",
+     "need": [
+      "conversation_id",
+      "chat_id"
+     ]
+    },
+    {
+     "id": "chat_cancel",
+     "name": "停止生成",
+     "method": "POST",
+     "path": "/v3/chat/cancel",
+     "need": [
+      "conversation_id",
+      "chat_id"
+     ]
+    },
+    {
+     "id": "message_list",
+     "name": "消息列表",
+     "method": "GET",
+     "path": "/v3/chat/message/list",
+     "need": [
+      "conversation_id",
+      "chat_id"
+     ]
+    }
+   ],
+   "apk-kuku": [
+    {
+     "id": "profile",
+     "name": "用户资料",
+     "method": "GET",
+     "path": "/api/genflowpro/settings/profile",
+     "verified": true,
+     "ok_keys": [
+      "nickname",
+      "account",
+      "avatar_url",
+      "phone"
+     ]
+    },
+    {
+     "id": "userreport",
+     "name": "用户上报",
+     "method": "GET",
+     "path": "/api/genflowpro/common/userreport"
+    },
+    {
+     "id": "entcert",
+     "name": "企业认证",
+     "method": "GET",
+     "path": "/tobgfp/entcert/get",
+     "verified": true,
+     "note": "未登录时 show_msg=need login"
+    },
+    {
+     "id": "device_list",
+     "name": "设备列表",
+     "method": "GET",
+     "path": "/api/genflowpro/device/getdevicelist"
+    },
+    {
+     "id": "freepoint_taskstatus",
+     "name": "积分任务状态",
+     "method": "GET",
+     "path": "/api/genflowpro/freepoint/taskstatus",
+     "verified": true,
+     "note": "需 query: task_key（缺失报 validator 错）"
+    },
+    {
+     "id": "freepoint_homenew",
+     "name": "积分首页活动",
+     "method": "GET",
+     "path": "/api/genflowpro/freepoint/homenew",
+     "verified": true,
+     "note": "需 query 参数，无参返 400 params error"
+    },
+    {
+     "id": "session_params",
+     "name": "会话参数(取bdstoken)",
+     "method": "GET",
+     "path": "/api/genflowpro/common/userreport",
+     "query": {
+      "clienttype": "400",
+      "app_id": "123971023",
+      "web": "1",
+      "channel": "chunlei",
+      "version": "1.6.8"
+     },
+     "verified": true,
+     "ok_keys": [
+      "bdstoken",
+      "uinfo",
+      "uk"
+     ],
+     "note": "返回 bdstoken/uinfo/uk，签到/积分接口的必需 query"
+    },
+    {
+     "id": "checkin_claim",
+     "name": "每日签到领积分",
+     "method": "POST",
+     "path": "/api/genflowpro/freepoint/taskComplete",
+     "verified": true,
+     "need_query": [
+      "bdstoken",
+      "uinfo",
+      "clienttype",
+      "app_id",
+      "web",
+      "channel",
+      "version"
+     ],
+     "body_form": {
+      "task_type": "LOGIN"
+     },
+     "note": "任务表: daily_login+50 / daily_chat+50 / daily_invite_visit+150 / daily_invite_download+300"
+    },
+    {
+     "id": "activity_task_complete",
+     "name": "活动任务完成",
+     "method": "POST",
+     "path": "/api/genflowpro/activity/taskcomplete",
+     "note": "从 JS bundle 挖到，未实测"
+    },
+    {
+     "id": "model_list",
+     "name": "模型清单",
+     "method": "GET",
+     "path": "/wenchain/genflowpro/model/list",
+     "verified": true,
+     "ok_keys": [
+      "model_list"
+     ],
+     "note": "免登录可读"
+    },
+    {
+     "id": "model_list2",
+     "name": "模型清单（生成链）",
+     "method": "GET",
+     "path": "/wenchain/genflow/model/list",
+     "unverified": true,
+     "stale_note": "2026-10-04 实测 404；正确路径是 /wenchain/genflowpro/model/list"
+    },
+    {
+     "id": "skill_list",
+     "name": "技能清单",
+     "method": "POST",
+     "path": "/wenchain/genflowpro/skill/list",
+     "verified": true
+    },
+    {
+     "id": "skill_category",
+     "name": "技能分类",
+     "method": "POST",
+     "path": "/wenchain/genflowpro/skill/category/list",
+     "verified": true
+    },
+    {
+     "id": "skill_mine",
+     "name": "我的技能",
+     "method": "POST",
+     "path": "/wenchain/genflowpro/skill/mine",
+     "verified": true,
+     "note": "未登录返 code:401 请登录后使用"
+    },
+    {
+     "id": "chat_alloc",
+     "name": "会话分配",
+     "method": "POST",
+     "path": "/wenchain/genflow/idallochstr",
+     "verified": true
+    },
+    {
+     "id": "layout",
+     "name": "工作台布局",
+     "method": "GET",
+     "path": "/api/genflowpro/workspace/getlayout",
+     "verified": true
+    },
+    {
+     "id": "project_list",
+     "name": "项目列表",
+     "method": "GET",
+     "path": "/api/genflowpro/workspace/getprojectnamelist"
+    },
+    {
+     "id": "act_conf",
+     "name": "活动配置",
+     "method": "GET",
+     "path": "/act/api/conf",
+     "verified": true,
+     "note": "免登录可读"
+    },
+    {
+     "id": "ping",
+     "name": "连通性",
+     "method": "GET",
+     "path": "/api/genflowpro/ping",
+     "verified": true
+    },
+    {
+     "id": "models",
+     "name": "模型清单",
+     "method": "GET",
+     "path": "/wenchain/genflowpro/model/list",
+     "verified": true,
+     "ok_keys": [
+      "model_list"
+     ],
+     "note": "免登录可读",
+     "no_auth": true
+    }
+   ],
+   "apk-wps": [
+    {
+     "id": "userinfo",
+     "name": "账号信息",
+     "method": "GET",
+     "path": "/api/v3/userinfo",
+     "base": "https://drive.kdocs.cn",
+     "verified": true,
+     "ok_keys": [
+      "id",
+      "name",
+      "avatar",
+      "status"
+     ]
+    },
+    {
+     "id": "credits_balance",
+     "name": "AI 智点余额",
+     "method": "GET",
+     "path": "/api/public/v1/credits/balance",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "ok_keys": [
+      "balance",
+      "bonus_credits",
+      "enabled"
+     ],
+     "note": "含赠送/消耗/过期时间（2026-10-04 实测 bonus_credits 800）"
+    },
+    {
+     "id": "tasks",
+     "name": "任务与签到",
+     "method": "GET",
+     "path": "/api/public/v1/tasks",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "ok_keys": [
+      "tasks",
+      "consecutive_days",
+      "today_day"
+     ]
+    },
+    {
+     "id": "checkin_claim",
+     "name": "每日签到领智点",
+     "method": "POST",
+     "path": "/api/public/v1/tasks/daily_check_in/complete",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "note": "已签到时返 400 v7code 400000007（幂等，非失败）"
+    },
+    {
+     "id": "extra_grant_claim",
+     "name": "额外额度领取",
+     "method": "POST",
+     "path": "/api/public/v1/credits/extra_grant/claim",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "note": "实测 200 {granted:false}（无可领）"
+    },
+    {
+     "id": "sessions",
+     "name": "会话",
+     "method": "GET",
+     "path": "/api/public/v1/sessions",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true
+    },
+    {
+     "id": "cowork_profile",
+     "name": "Cowork 资料",
+     "method": "GET",
+     "path": "/api/aioffice/v1/cowork/profile",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true
+    },
+    {
+     "id": "unread_count",
+     "name": "未读数",
+     "method": "GET",
+     "path": "/api/aioffice/v1/message_center/unread_count",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true
+    },
+    {
+     "id": "subscriptions",
+     "name": "订阅",
+     "method": "GET",
+     "path": "/api/public/v1/order/subscriptions",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "ok_keys": [
+      "total",
+      "list"
+     ]
+    },
+    {
+     "id": "settings",
+     "name": "AI 设置",
+     "method": "GET",
+     "path": "/api/public/v1/settings",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true
+    },
+    {
+     "id": "ai_models",
+     "name": "AI 模型清单",
+     "method": "GET",
+     "path": "/api/aioffice/v1/sessions/models",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "ok_keys": [
+      "models"
+     ],
+     "note": "实测含 deepseek-v4-flash-0731 / auto 等"
+    },
+    {
+     "id": "ai_plans",
+     "name": "AI 套餐（Pro/Max）",
+     "method": "GET",
+     "path": "/api/aioffice/v1/sessions/plans",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "ok_keys": [
+      "plans",
+      "multiplier"
+     ]
+    },
+    {
+     "id": "ai_identity",
+     "name": "AI 助手身份",
+     "method": "GET",
+     "path": "/solution/api/aigc/v3/assistant/identity",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "ok_keys": [
+      "corp"
+     ]
+    },
+    {
+     "id": "ai_groups",
+     "name": "用户组",
+     "method": "POST",
+     "path": "/api/aioffice/v1/user/groups",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "need": [
+      "user_id"
+     ]
+    },
+    {
+     "id": "merchandise",
+     "name": "商品列表",
+     "method": "GET",
+     "path": "/query/api/v1/list_merchandise",
+     "base": "https://vas.wps.cn",
+     "verified": true
+    },
+    {
+     "id": "market_activity",
+     "name": "活动",
+     "method": "POST",
+     "path": "/dce/exec/api/market/activity",
+     "base": "https://tiance.wps.cn",
+     "verified": true,
+     "note": "需 channel_code，如 AIGW5001"
+    },
+    {
+     "id": "models",
+     "name": "AI 模型清单",
+     "method": "GET",
+     "path": "/api/aioffice/v1/sessions/models",
+     "base": "https://lingxi.kdocs.cn",
+     "verified": true,
+     "ok_keys": [
+      "models"
+     ],
+     "note": "实测含 deepseek-v4-flash-0731 / auto 等"
+    }
+   ],
+   "web-lobster": [
+    {
+     "id": "models",
+     "name": "动态模型清单",
+     "method": "GET",
+     "path": "/api/models/available",
+     "base": "@lobster",
+     "note": "Bearer accessToken；动态清单，随官方上下线变化"
+    },
+    {
+     "id": "profile",
+     "name": "账号概要/积分",
+     "method": "GET",
+     "path": "/api/user/profile-summary",
+     "base": "@lobster",
+     "note": "Bearer accessToken；credits 在这里"
+    }
+   ],
+   "wb-gateway": [
+    {
+     "id": "models",
+     "name": "模型目录",
+     "method": "GET",
+     "path": "/console/enterprises/personal/models",
+     "base": "https://copilot.tencent.com",
+     "verified": true
+    },
+    {
+     "id": "checkin",
+     "name": "每日签到",
+     "method": "POST",
+     "path": "/v2/billing/meter/daily-checkin",
+     "base": "https://copilot.tencent.com",
+     "verified": true
+    },
+    {
+     "id": "points_balance",
+     "name": "积分余额",
+     "method": "POST",
+     "path": "/v2/billing/meter/get-user-resource",
+     "base": "https://copilot.tencent.com",
+     "verified": true
+    },
+    {
+     "id": "usage_summary",
+     "name": "用量摘要",
+     "method": "GET",
+     "path": "/billing/meter/get-user-resource-summary",
+     "base": "https://copilot.tencent.com"
+    },
+    {
+     "id": "auth_refresh",
+     "name": "刷新 token",
+     "method": "POST",
+     "path": "/v2/plugin/auth/token/refresh",
+     "base": "https://copilot.tencent.com",
+     "verified": true,
+     "header_token": "X-Refresh-Token",
+     "need": [
+      "refreshToken"
+     ]
+    },
+    {
+     "id": "growth_tasks",
+     "name": "成长任务列表",
+     "method": "GET",
+     "path": "/activity/growth/tasks",
+     "base": "https://copilot.tencent.com",
+     "verified": true,
+     "note": "拉取所有成长任务及完成进度"
+    },
+    {
+     "id": "growth_task_accept",
+     "name": "接受任务",
+     "method": "POST",
+     "path": "/activity/growth/tasks/accept",
+     "base": "https://copilot.tencent.com",
+     "need": [
+      "task_codes"
+     ],
+     "note": "批量接受任务（task_codes 是数组）"
+    },
+    {
+     "id": "growth_task_claim",
+     "name": "领取任务奖励",
+     "method": "POST",
+     "path": "/activity/growth/tasks/{task_code}/claim",
+     "base": "https://www.workbuddy.cn",
+     "note": "领奖走 Web 域 www.workbuddy.cn，不是 CLI 域"
+    },
+    {
+     "id": "active_report",
+     "name": "对话活跃上报",
+     "method": "POST",
+     "path": "/report",
+     "base": "https://copilot.tencent.com",
+     "note": "chat_request_send 事件上报，点亮连登 + 解锁 first_buddy"
+    },
+    {
+     "id": "buddy_info",
+     "name": "猫猫档案",
+     "method": "GET",
+     "path": "/activity/growth/buddy/info",
+     "base": "https://copilot.tencent.com"
+    },
+    {
+     "id": "buddy_agreement",
+     "name": "同意领养协议",
+     "method": "POST",
+     "path": "/activity/growth/buddy/agreement",
+     "base": "https://copilot.tencent.com"
+    },
+    {
+     "id": "buddy_adopt",
+     "name": "领养第一只 Buddy",
+     "method": "POST",
+     "path": "/activity/growth/buddy/first",
+     "base": "https://copilot.tencent.com"
+    },
+    {
+     "id": "travel_status",
+     "name": "旅行状态",
+     "method": "GET",
+     "path": "/activity/growth/buddy/travel/status",
+     "base": "https://copilot.tencent.com"
+    },
+    {
+     "id": "travel_depart",
+     "name": "派出旅行",
+     "method": "POST",
+     "path": "/activity/growth/buddy/travel/depart",
+     "base": "https://copilot.tencent.com"
+    },
+    {
+     "id": "travel_claim",
+     "name": "领取旅行奖励",
+     "method": "POST",
+     "path": "/activity/growth/buddy/travel/claim",
+     "base": "https://copilot.tencent.com"
+    },
+    {
+     "id": "streak_status",
+     "name": "连登状态",
+     "method": "GET",
+     "path": "/activity/growth/streak",
+     "base": "https://copilot.tencent.com",
+     "note": "连续登录天数 + 各档位解锁状态"
+    },
+    {
+     "id": "streak_redeem",
+     "name": "兑换连登档位",
+     "method": "POST",
+     "path": "/activity/growth/redeem",
+     "base": "https://copilot.tencent.com",
+     "need": [
+      "tier"
+     ],
+     "note": "兑换已解锁的连登档位奖励"
+    },
+    {
+     "id": "lottery_summary",
+     "name": "抽奖次数",
+     "method": "GET",
+     "path": "/activity/growth/lottery/summary",
+     "base": "https://copilot.tencent.com"
+    },
+    {
+     "id": "lottery_draw",
+     "name": "抽奖一次",
+     "method": "POST",
+     "path": "/activity/growth/lottery/draw",
+     "base": "https://copilot.tencent.com"
+    }
+   ],
+   "wb-gateway-intl": [
+    {
+     "id": "models",
+     "name": "模型目录",
+     "method": "GET",
+     "path": "/console/enterprises/personal/models",
+     "base": "https://www.codebuddy.ai",
+     "verified": true
+    },
+    {
+     "id": "checkin",
+     "name": "每日签到",
+     "method": "POST",
+     "path": "/v2/billing/meter/daily-checkin",
+     "base": "https://www.codebuddy.ai",
+     "verified": true
+    },
+    {
+     "id": "points_balance",
+     "name": "积分余额",
+     "method": "POST",
+     "path": "/v2/billing/meter/get-user-resource",
+     "base": "https://www.codebuddy.ai",
+     "verified": true
+    },
+    {
+     "id": "usage_summary",
+     "name": "用量摘要",
+     "method": "GET",
+     "path": "/billing/meter/get-user-resource-summary",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "auth_refresh",
+     "name": "刷新 token",
+     "method": "POST",
+     "path": "/v2/plugin/auth/token/refresh",
+     "base": "https://www.codebuddy.ai",
+     "verified": true,
+     "header_token": "X-Refresh-Token",
+     "need": [
+      "refreshToken"
+     ]
+    },
+    {
+     "id": "growth_tasks",
+     "name": "成长任务列表",
+     "method": "GET",
+     "path": "/activity/growth/tasks",
+     "base": "https://www.codebuddy.ai",
+     "note": "拉取所有成长任务及完成进度"
+    },
+    {
+     "id": "growth_task_accept",
+     "name": "接受任务",
+     "method": "POST",
+     "path": "/activity/growth/tasks/accept",
+     "base": "https://www.codebuddy.ai",
+     "need": [
+      "task_codes"
+     ]
+    },
+    {
+     "id": "growth_task_claim",
+     "name": "领取任务奖励",
+     "method": "POST",
+     "path": "/activity/growth/tasks/{task_code}/claim",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "active_report",
+     "name": "对话活跃上报",
+     "method": "POST",
+     "path": "/report",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "buddy_info",
+     "name": "猫猫档案",
+     "method": "GET",
+     "path": "/activity/growth/buddy/info",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "buddy_agreement",
+     "name": "同意领养协议",
+     "method": "POST",
+     "path": "/activity/growth/buddy/agreement",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "buddy_adopt",
+     "name": "领养第一只 Buddy",
+     "method": "POST",
+     "path": "/activity/growth/buddy/first",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "travel_status",
+     "name": "旅行状态",
+     "method": "GET",
+     "path": "/activity/growth/buddy/travel/status",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "travel_depart",
+     "name": "派出旅行",
+     "method": "POST",
+     "path": "/activity/growth/buddy/travel/depart",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "travel_claim",
+     "name": "领取旅行奖励",
+     "method": "POST",
+     "path": "/activity/growth/buddy/travel/claim",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "streak_status",
+     "name": "连登状态",
+     "method": "GET",
+     "path": "/activity/growth/streak",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "streak_redeem",
+     "name": "兑换连登档位",
+     "method": "POST",
+     "path": "/activity/growth/redeem",
+     "base": "https://www.codebuddy.ai",
+     "need": [
+      "tier"
+     ]
+    },
+    {
+     "id": "lottery_summary",
+     "name": "抽奖次数",
+     "method": "GET",
+     "path": "/activity/growth/lottery/summary",
+     "base": "https://www.codebuddy.ai"
+    },
+    {
+     "id": "lottery_draw",
+     "name": "抽奖一次",
+     "method": "POST",
+     "path": "/activity/growth/lottery/draw",
+     "base": "https://www.codebuddy.ai"
+    }
+   ],
+   "web-glm": [
+    {
+     "id": "score_balance",
+     "name": "积分余额",
+     "method": "GET",
+     "path": "/chatglm/backend-api/v1/score",
+     "note": "查询当前积分余额"
+    },
+    {
+     "id": "daily_login_score",
+     "name": "每日登录领积分",
+     "method": "POST",
+     "path": "/chatglm/member-api/member/daily_login_score",
+     "note": "每日登录赠送积分（需 Cookie 认证，可能返回需登录页面）"
+    },
+    {
+     "id": "score_activity_status",
+     "name": "积分活动状态",
+     "method": "GET",
+     "path": "/chatglm/member-api/member/score_activity_status",
+     "note": "当前积分活动进度（可领多少、剩几天）"
+    },
+    {
+     "id": "score_activity_draw",
+     "name": "领取积分活动奖励",
+     "method": "POST",
+     "path": "/chatglm/member-api/member/score_activity_draw",
+     "note": "积分达标后领取奖励（折扣券等）"
+    },
+    {
+     "id": "score_record",
+     "name": "积分流水",
+     "method": "GET",
+     "path": "/chatglm/member-api/member/score_record",
+     "note": "积分获取/消耗明细"
+    },
+    {
+     "id": "cdkey_exchange",
+     "name": "兑换码兑换",
+     "method": "POST",
+     "path": "/chatglm/payment-api/cdkey/exchange",
+     "need": [
+      "code"
+     ],
+     "note": "输入 CDKey 兑换积分/会员"
+    }
+   ],
+   "api-deepseek": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-moonshot": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-zhipu": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-dashscope": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-bailian": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-volcengine": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-minimax": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-stepfun": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-baichuan": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-siliconflow": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-groq": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-openrouter": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-modelscope": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-xfyun": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ],
+   "api-qianfan": [
+    {
+     "id": "models",
+     "name": "模型清单（官方 /models）",
+     "method": "GET",
+     "path": "/models",
+     "verified": true,
+     "note": "OpenAI 兼容官方 API；账号池配 API Key 后 Bearer 拉全量，未配置时面板回退官方常见模型提示"
+    }
+   ]
+  },
+  "base": {
+   "apk-trae": "https://api.trae.cn",
+   "apk-codebuddy": "https://www.codebuddy.ai",
+   "apk-codebuddy-cn": "https://www.codebuddy.cn",
+   "apk-doubao": "https://www.doubao.com",
+   "apk-yuanbao": "https://yuanbao.tencent.com",
+   "apk-raccoon": "https://xiaohuanxiong.com",
+   "apk-go": "https://copilot.tencent.com",
+   "apk-loomy": "https://loomyad.xunfei.cn",
+   "apk-antigravity": "https://cloudcode-pa.googleapis.com",
+   "apk-coze": "https://api.coze.cn",
+   "apk-qwenwork": "https://qwenwork.cn",
+   "apk-kuku": "https://kuku.baidu.com",
+   "apk-wps": "https://www.wps.cn",
+   "apk-nano": "https://www.n.cn",
+   "apk-metaso": "https://metaso.cn",
+   "apk-qoder": "https://www.qoder.com",
+   "apk-chatglm": "https://chatglm.cn",
+   "apk-qwen": "https://chat.qwen.ai",
+   "apk-kimi": "https://www.kimi.com",
+   "apk-ernie": "https://yiyan.baidu.com",
+   "apk-nanobot": "https://www.n.cn",
+   "api-deepseek": "https://api.deepseek.com/v1",
+   "api-moonshot": "https://api.moonshot.cn/v1",
+   "api-zhipu": "https://open.bigmodel.cn/api/paas/v4",
+   "api-dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+   "api-bailian": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+   "api-volcengine": "https://ark.cn-beijing.volces.com/api/v3",
+   "api-minimax": "https://api.minimax.chat/v1",
+   "api-stepfun": "https://api.stepfun.com/v1",
+   "api-baichuan": "https://api.baichuan-ai.com/v1",
+   "api-siliconflow": "https://api.siliconflow.cn/v1",
+   "api-groq": "https://api.groq.com/openai/v1",
+   "api-openrouter": "https://openrouter.ai/api/v1",
+   "api-modelscope": "https://api-inference.modelscope.cn/v1",
+   "api-xfyun": "https://spark-api-open.xf-yun.com/v1",
+   "api-qianfan": "https://qianfan.baidubce.com/v2"
+  },
+  "vendor_headers": {
+   "apk-loomy": {
+    "User-Agent": "Loomy|Desktop|Electron|macOS",
+    "loomy-version": "1.0.0"
+   },
+   "apk-antigravity": {
+    "User-Agent": "antigravity/1.15.8 windows/amd64",
+    "X-IDE-Type": "ANTIGRAVITY",
+    "X-Plugin-Type": "GEMINI"
+   }
+  }
  }
 }

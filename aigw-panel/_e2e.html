@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<base href="/">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 资源整合网关面板</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <aside class="side">
+    <div class="brand"><span class="logo">◈</span>AI 资源网关</div>
+
+    <div class="navgrp">主流程</div>
+    <button class="navbtn on" data-v="sources"><span class="ic">◈</span>接入源</button>
+    <button class="navbtn" data-v="route"><span class="ic">⇄</span>路由与模型</button>
+
+    <div class="navgrp navgrp-toggle" id="advToggle" onclick="toggleAdv()" title="展开 / 收起高级功能">
+      <span>高级</span><span class="caret">▸</span>
+    </div>
+    <div class="navsub" id="advSub">
+      <button class="navbtn" data-v="tools"><span class="ic">⚒</span>工具与集成</button>
+      <button class="navbtn" data-v="settings"><span class="ic">⚙</span>设置与日志</button>
+      <button class="navbtn" data-v="growth"><span class="ic">✦</span>任务中心</button>
+      <button class="navbtn" data-v="tasks"><span class="ic">☰</span>任务管理</button>
+    </div>
+
+    <div style="flex:1"></div>
+    <div class="faint" style="padding:8px 10px;font-size:11px;line-height:1.6">
+      统一网关<br>
+      <span id="sideFoot">v1.0.0</span>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="hd">
+      <div>
+        <h1 id="ttl">接入源</h1>
+        <div class="sub" id="stl">正在加载…</div>
+      </div>
+      <div class="flex">
+        <button class="btn" id="themeBtn" onclick="toggleTheme()" title="亮色 / 暗色切换">◐ 主题</button>
+        <button class="btn" onclick="showGatewayInfo()">📡 接入配置</button>
+        <button class="btn pri" id="hdOneClick" onclick="oneClick()"
+          title="所有已接入的源跑一轮签到与任务">⚡ 一键执行</button>
+        <button class="btn" onclick="globalRefresh()"
+          title="刷新当前页面数据">🔄 刷新</button>
+      </div>
+    </div>
+    <div id="oneClickBox"></div>
+    <div id="view">
+      <div style="padding:40px;text-align:center;color:#6b7280">
+        <div style="font-size:18px;margin-bottom:8px">⏳ 正在加载面板...</div>
+        <div style="font-size:13px">请稍候，首次加载可能需要 1-2 秒</div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="vendor/qrcode.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

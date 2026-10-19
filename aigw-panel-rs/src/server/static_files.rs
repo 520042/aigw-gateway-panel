@@ -31,6 +31,19 @@ pub fn content_type(path: &Path) -> &'static str {
     }
 }
 
+/// ★ 2026-10-15（用户实拍「CSS 改了没生效」）：静态资源原先**不带任何缓存头**，
+/// 浏览器按启发式长时间缓存 style.css/app.js —— 面板改了前端，用户看到的还是旧样式，
+/// 误以为"改不对"。这里统一加 no-store 系列头，保证每次刷新都拿到最新文件。
+fn apply_no_cache(resp: &mut Response) {
+    let h = resp.headers_mut();
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-store, must-revalidate, max-age=0"),
+    );
+    h.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    h.insert(header::EXPIRES, HeaderValue::from_static("0"));
+}
+
 async fn serve_file(state: &AppState, rel: &str) -> Response {
     let base = PathBuf::from(&state.inner.settings.read().await.static_dir);
     let clean = rel.trim_start_matches('/').replace("\\", "/");
@@ -39,7 +52,7 @@ async fn serve_file(state: &AppState, rel: &str) -> Response {
     }
     let target = base.join(clean);
     if let Ok(bytes) = tokio::fs::read(&target).await {
-        return (
+        let mut resp = (
             StatusCode::OK,
             [(
                 header::CONTENT_TYPE,
@@ -48,10 +61,12 @@ async fn serve_file(state: &AppState, rel: &str) -> Response {
             Body::from(bytes),
         )
             .into_response();
+        apply_no_cache(&mut resp);
+        return resp;
     }
     if !rel.starts_with("api/") && !rel.starts_with("v1/") {
         if let Ok(idx) = tokio::fs::read(base.join("index.html")).await {
-            return (
+            let mut resp = (
                 StatusCode::OK,
                 [(
                     header::CONTENT_TYPE,
@@ -60,6 +75,8 @@ async fn serve_file(state: &AppState, rel: &str) -> Response {
                 Body::from(idx),
             )
                 .into_response();
+            apply_no_cache(&mut resp);
+            return resp;
         }
     }
     (StatusCode::NOT_FOUND, "not found").into_response()

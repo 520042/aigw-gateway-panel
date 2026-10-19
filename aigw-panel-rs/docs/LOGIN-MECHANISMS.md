@@ -89,8 +89,16 @@
 | 会话 start/poll/submit/cancel + 抽屉局部刷新（不闪） | ✅ 实测 |
 | auth-v2 回调自动授权 | ✅ 实现，redirect_uri 白名单 `待测` |
 | 手动粘贴 Bearer/Cookie + verify_all 逐账号验活 | ✅ 实测 |
-| 豆包 samantha 原生中继（含流式/thinking） | ✅ 实测（假凭据被上游拒绝=协议正确） |
-| wb-gateway 族 Bearer 直打 /v2/chat/completions | ✅ 实现（真 token 即通） |
-| 元宝/Trae/小浣熊原生中继 | ⬜ 下一批（模式照豆包复制） |
-| wb 模型目录在线拉取 + 签到/积分执行 | ⬜ 下一批（端点已 verified） |
-| web 反代族（glm/trae/deepseek POW） | ⬜ 最重，最后批 |
+| 豆包 samantha 原生中继（含流式/thinking） | ✅ 实测（真对话返回） |
+| wb-gateway 族 Bearer 直打 /v2/chat/completions（force-stream→聚合） | ✅ 实测（hy3@wb-gateway 真回复） |
+| 元宝 / Trae / 小浣熊 原生中继 | ✅ 已移植（元宝多步私有协议 / Trae Cloud-IDE-JWT / 小浣熊 cookie；无凭据返回 need_login，有凭据走真协议） |
+| wb 模型目录在线拉取 + 签到/积分/成长任务执行 | ✅ 实测（目录 32 模型带 credits；签到 HTTP 200） |
+| web 反代族（glm 签名 / trae 直连 / deepseek POW） | ✅ 已移植（web.rs + webpow 随包分发；无凭据返回 need_login，有凭据走真协议） |
+| `/api/tencent` 腾讯直连 7 action（status/quota/catalog/checkin/login/poll/trae_local） | ✅ 实测（status logged=true verify 200；quota 500 credits；catalog 32 模型；login→poll 服务端 state 11217） |
+| 定时调度器（APP 平台自动签到，幂等+重试） | ✅ 已接线（autocheckin.rs + tokio 后台任务，60s 轮询） |
+| 逐模型连接测试（test_model） | ✅ 实测（wb/doubao 真回复 + 延迟） |
+| gwextra 动作执行 + 平台能力表 | ✅ 实测（数据驱动自 catalog.gwextra） |
+| credentials/catalog/localproxy 小端点 | ✅ 实测（catalog 六大清单；localproxy 无二进制时如实 installed=false） |
+| Loomy 对话中继（模型网关，OpenAI 兼容 + traceparent） | ✅ 已移植（relay/loomy.rs；无 session 返回 need_login，`platform_models` 有 session 时在线拉模型） |
+| 系统托盘（打开面板 / 开机自启动 / 退出） | ✅ 实测（tray/mod.rs，windows-sys；注册表自启写入 `"<exe>" --tray` 并回读校验） |
+| `settings?action=shutdown` / `autostart` | ✅ 实测（shutdown 真退进程；autostart 写/删 HKCU Run） |

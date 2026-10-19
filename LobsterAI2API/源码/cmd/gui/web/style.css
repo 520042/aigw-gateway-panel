@@ -1,0 +1,115 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0f1115;
+  --card: #181b22;
+  --card2: #20242d;
+  --line: #2a2f3a;
+  --text: #e6e9ef;
+  --muted: #8892a4;
+  --accent: #ff6b4a;
+  --accent2: #ff8f73;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --err: #f87171;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.app { max-width: 720px; margin: 0 auto; padding: 28px 18px 60px; }
+header { margin-bottom: 22px; }
+header h1 { font-size: 22px; font-weight: 700; }
+header .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 18px;
+  margin-bottom: 16px;
+}
+.card h2 { font-size: 15px; font-weight: 600; }
+.row { display: flex; align-items: center; gap: 10px; }
+.between { justify-content: space-between; }
+
+.badge {
+  font-size: 12px; padding: 3px 10px; border-radius: 20px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.badge.on { color: var(--ok); border-color: rgba(52,211,153,.4); background: rgba(52,211,153,.1); }
+.badge.off { color: var(--muted); }
+
+.kv { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 13px; }
+.kv > span:first-child { color: var(--muted); flex: none; }
+.kv code, .kv a {
+  color: var(--text); background: var(--card2); padding: 2px 8px;
+  border-radius: 6px; word-break: break-all; text-align: right;
+}
+.kv a { color: var(--accent2); text-decoration: none; }
+
+.actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+button {
+  font-family: inherit; font-size: 13px; cursor: pointer;
+  border-radius: 9px; padding: 9px 16px; border: 1px solid transparent;
+  transition: .15s;
+}
+button.primary { background: var(--accent); color: #fff; }
+button.primary:hover { background: var(--accent2); }
+button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
+button.ghost:hover { background: var(--card2); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+
+.tabs { display: flex; gap: 6px; margin: 14px 0; }
+.tab {
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--line); padding: 7px 14px;
+}
+.tab.active { color: var(--text); border-color: var(--accent); background: rgba(255,107,74,.1); }
+
+.hint { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+.hidden { display: none; }
+
+textarea, input[type=text] {
+  width: 100%; background: var(--card2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 9px;
+  padding: 10px 12px; font-family: inherit; font-size: 13px; resize: vertical;
+}
+textarea:focus, input:focus { outline: none; border-color: var(--accent); }
+.field { margin-bottom: 12px; }
+.field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
+
+.accounts { margin-top: 14px; }
+.acct {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 12px; padding: 12px; background: var(--card2);
+  border-radius: 10px; margin-bottom: 8px;
+}
+.acct .info { min-width: 0; }
+.acct .nick { font-weight: 600; }
+.acct .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.acct .credit { font-variant-numeric: tabular-nums; }
+.acct .credit.empty { color: var(--err); }
+.acct .credit.good { color: var(--ok); }
+.acct .del { background: transparent; color: var(--err); border: 1px solid var(--line); padding: 6px 10px; }
+.acct .state { font-size: 12px; padding: 2px 8px; border-radius: 20px; }
+.state.ok { color: var(--ok); background: rgba(52,211,153,.1); }
+.state.cool { color: var(--warn); background: rgba(251,191,36,.1); }
+.state.dis { color: var(--err); background: rgba(248,113,113,.1); }
+
+.msg { margin-top: 10px; font-size: 13px; min-height: 18px; }
+.msg.ok { color: var(--ok); }
+.msg.err { color: var(--err); }
+
+.results { margin-top: 10px; }
+.res { font-size: 12px; padding: 5px 10px; border-radius: 7px; margin-bottom: 5px; background: var(--card2); }
+.res.ok { color: var(--ok); }
+.res.err { color: var(--err); }
+
+.collapsible #cfg-toggle { cursor: pointer; }
+.chev { color: var(--muted); transition: .2s; }
+.chev.open { transform: rotate(90deg); }
+
+footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px; }

@@ -61,6 +61,52 @@ impl Router {
         self.targets.read().unwrap().keys().cloned().collect()
     }
 
+    /// 路由表完整描述（`/api/route` 给前端画表用）。
+    /// ★ 2026-10-16 修：原来直接把 `list_models()`（Vec<String>）塞进 JSON 的
+    ///   "models"，前端 `Object.keys()` 拿到的是下标 "0"/"1"，表格整列
+    ///   undefined —— 契约对不上。现在按前端期望返回
+    ///   { 模型: { healthy, total, targets: [{name,endpoint,free,state,ewma_ms,...}] } }。
+    pub fn describe_models(&self) -> serde_json::Value {
+        use serde_json::json;
+        let t = self.targets.read().unwrap();
+        let rt = self.runtime.read().unwrap();
+        let now = now_secs();
+        let mut out = serde_json::Map::new();
+        for (name, list) in t.iter() {
+            let mut tg = Vec::new();
+            let mut healthy = 0i64;
+            for x in list {
+                let key = rt_key(&x.upstream_id, &x.endpoint);
+                let r = rt.get(&key);
+                let st = r.map(|v| v.state.as_str()).unwrap_or("closed");
+                let open_stuck = st == "open"
+                    && now < r.map(|v| v.open_until).unwrap_or(0.0);
+                if !open_stuck {
+                    healthy += 1;
+                }
+                let ewma = r.and_then(|v| v.ewma);
+                tg.push(json!({
+                    "name": x.name,
+                    "endpoint": x.endpoint,
+                    "model": x.model,
+                    "free": x.free,
+                    "weight": x.weight,
+                    "priority": x.priority,
+                    "state": if open_stuck { "open" } else { st },
+                    "ewma_ms": ewma.map(|e| e.round() as i64),
+                    "consec_fail": r.map(|v| v.consec_fail).unwrap_or(0),
+                    "success_rate": serde_json::Value::Null,
+                    "last_error": "",
+                }));
+            }
+            out.insert(
+                name.clone(),
+                json!({"healthy": healthy, "total": list.len(), "targets": tg}),
+            );
+        }
+        serde_json::Value::Object(out)
+    }
+
     /// auto / free 都指向 Pollinations 免费车道（gpt-oss-20b），free 标记优先。
     pub fn register_auto_free(&self, pollinations_endpoint: &str) {
         let mk = |mid: &str, free: bool| Target {

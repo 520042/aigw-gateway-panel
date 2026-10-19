@@ -103,6 +103,34 @@ if "pollinations" not in free_lanes:
         ],
     }
 
+# 5) 目录快照页（app/catalog.py 的六大清单，前端「目录」页数据源）
+catalog_page = {}
+try:
+    from app import catalog as _CAT
+    catalog_page = {
+        "verified_at": getattr(_CAT, "VERIFIED_AT", ""),
+        "local_gateways": getattr(_CAT, "LOCAL_GATEWAYS", []),
+        "relay_sites": getattr(_CAT, "RELAY_SITES", []),
+        "official": getattr(_CAT, "OFFICIAL_PLATFORMS", []),
+        "open_source": getattr(_CAT, "OPEN_SOURCE", []),
+        "apk_analysis": getattr(_CAT, "APK_ANALYSIS", {}),
+    }
+except Exception as e:
+    print("catalog page import failed:", e)
+
+# 6) GWExtra 平台动作注册表（app/gwextra.py 的 ACTIONS/BASE/VENDOR_HEADERS）
+#    → /api/gwextra?action=list|exec 数据驱动执行，Rust 侧不再手抄端点表
+gwextra = {"actions": {}, "base": {}, "vendor_headers": {}}
+try:
+    from app import gwextra as _GX
+    gwextra = {
+        "actions": _GX.ACTIONS,
+        "base": _GX.BASE,
+        "vendor_headers": _GX.VENDOR_HEADERS,
+    }
+except Exception as e:
+    print("gwextra import failed:", e)
+
 catalog = {
     "platforms": platforms,
     "sources_meta": sources_meta,
@@ -110,6 +138,8 @@ catalog = {
     "bundled": bundled,
     "relay_specs": relay_specs,
     "free_lanes": free_lanes,
+    "catalog_page": catalog_page,
+    "gwextra": gwextra,
 }
 
 dump("catalog_bundled.json", catalog)
@@ -119,3 +149,5 @@ print("catalog_sites:", len(catalog_sites))
 print("bundled keys:", list(bundled.keys()))
 print("relay_specs:", len(relay_specs))
 print("free_lanes:", list(free_lanes.keys()))
+print("catalog_page keys:", list(catalog_page.keys()))
+print("gwextra actions:", len(gwextra.get("actions", {})))

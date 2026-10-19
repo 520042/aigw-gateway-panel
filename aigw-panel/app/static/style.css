@@ -351,3 +351,315 @@ textarea:focus-visible,.navbtn:focus-visible{outline:2px solid var(--accent);
   outline-offset:1px}
 
 ::selection{background:var(--accent-soft);color:var(--accent)}
+
+/* ================= 接入源：两栏 + 紧凑卡网格 + 右侧抽屉 =================
+   2026-10-15 修复：新 style.css 丢失了这一整块，导致 app.js 用到的
+   .src-body .src-cats-v .cat-list .src-list .sr-row .sc-stat .sc-sub .sc-row
+   .sc-mask .sc-drawer .dr-h .sc-sect .ls-compact 全部无样式。
+   以下规则自线上可用版本原样回补。
+   注意：注释里千万不要出现“星号紧跟斜杠”，否则会提前闭合注释吞掉后续规则。 */
+/* 接入源卡片网格：按**浏览器宽度**自适应列数（2026-10-15 重做）
+   —— 窄屏 1 列，随窗口变宽依次 2/3/4/5 列；卡片等宽拉伸，不出现半空列。 */
+.src-list{display:grid;gap:10px;align-items:stretch;
+  grid-template-columns:minmax(0,1fr)}
+@media (min-width:820px){ .src-list{grid-template-columns:repeat(2,minmax(0,1fr))} }
+@media (min-width:1180px){ .src-list{grid-template-columns:repeat(3,minmax(0,1fr))} }
+@media (min-width:1560px){ .src-list{grid-template-columns:repeat(4,minmax(0,1fr))} }
+@media (min-width:1960px){ .src-list{grid-template-columns:repeat(5,minmax(0,1fr))} }
+.sr-row{display:flex;flex-direction:column;gap:7px;padding:11px 13px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  cursor:pointer;min-width:0;transition:border-color .12s,box-shadow .12s}
+.sr-row:hover{border-color:var(--accent);box-shadow:var(--shadow)}
+.sr-row.on{border-color:var(--ok-line)}
+.sr-row.open{border-color:var(--accent)}
+.sr-top{display:flex;align-items:center;gap:8px;min-width:0}
+.sr-name{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;line-height:1.3}
+.sr-name b{font-size:13px;font-weight:650;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.sr-name .faint{font-size:10.5px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.sr-cat{flex:0 0 auto;max-width:9em;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.sr-row .sc-f{margin-top:0;padding-top:8px;border-top:1px dashed var(--line2)}
+.sr-row .btn{flex:0 0 auto}
+.sc-mask{position:fixed;inset:0;background:rgba(9,12,18,.42);z-index:79;
+  animation:scMaskIn .15s ease}
+@keyframes scMaskIn{from{opacity:0}to{opacity:1}}
+.sc-drawer{position:fixed;top:0;right:0;bottom:0;width:min(520px,94vw);
+  background:var(--panel);border-left:1px solid var(--line);
+  box-shadow:-16px 0 40px rgba(0,0,0,.22);z-index:80;overflow-y:auto;
+  padding:16px 18px 28px;animation:scDrIn .18s ease}
+@keyframes scDrIn{from{transform:translateX(26px);opacity:0}to{transform:none;opacity:1}}
+.sc-drawer.no-anim{animation:none}
+.dr-h{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.dr-h b{font-size:14.5px;font-weight:680;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.sc-sect{display:flex;align-items:center;gap:8px;font-size:12px;
+  font-weight:650;margin:10px 0 2px;padding-top:8px;
+  border-top:1px dashed var(--line2)}
+.sc-sect:first-child{border-top:none;padding-top:0;margin-top:0}
+.sc-sect i{color:var(--faint);font-style:normal;font-weight:600}
+.ls-compact{border:1px solid var(--line2);border-radius:10px;
+  padding:10px 12px;margin-top:10px;background:var(--panel-2)}
+.src-body{display:flex;gap:14px;align-items:flex-start}
+.src-cats-v{flex:0 0 11em;display:flex;flex-direction:column;gap:4px;
+  position:sticky;top:64px}
+.src-main{flex:1 1 auto;min-width:0}
+.src-cats-v button{display:flex;justify-content:space-between;align-items:center;
+  gap:6px;width:100%;border:1px solid transparent;background:transparent;
+  color:var(--fg);border-radius:var(--r-sm);padding:.45em .7em;
+  font-size:12.5px;cursor:pointer;text-align:left}
+.src-cats-v button:hover{background:var(--panel-3)}
+.src-cats-v button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.src-cats-v button .faint{opacity:.85;font-size:11px}
+.src-cats-v button.on .faint{color:#e8f0ff}
+.src-cats-v .cn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.src-cats-v .cat-list{display:flex;flex-direction:column;gap:2px;
+  max-height:calc(3 * 2.5em);overflow:hidden;
+  transition:max-height .15s ease}
+.src-cats-v .cat-list.open{max-height:16em;overflow-y:auto}
+.src-cats-v .cat-toggle{color:var(--muted);font-size:11.5px;justify-content:center}
+@media (max-width:860px){
+.src-body{flex-direction:column}
+}
+@media (max-width:860px){
+.src-cats-v{flex:0 0 auto;width:100%;position:static}
+}
+@media (max-width:860px){
+.src-cats-v .cat-list{flex-direction:row;flex-wrap:wrap;max-height:none}
+}
+.sc-stat{font-size:12px;color:var(--muted);display:inline-flex;gap:4px;
+  align-items:baseline;flex:0 0 auto;white-space:nowrap}
+.sc-stat b{color:var(--fg);font-size:12.5px}
+.sc-sub{
+  margin-top:8px;border-top:1px dashed var(--line2);padding-top:6px;
+  max-height:210px;overflow:auto;
+}
+.sc-row{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px}
+.sc-row .mono{
+  flex:0 1 auto;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.sc-row .faint{
+  flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.sc-row .btn{margin-left:auto;flex:0 0 auto}
+
+
+/* ================= 2026-10-15 补齐：新 style.css 丢失的通用规则（.cb/.form-group/.tk-* 等） ================= */
+.okc{color:var(--ok)}
+.warnc{color:var(--warn)}
+.tk-meta{
+  display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11.5px;
+  color:var(--muted);margin:6px 0 2px;
+}
+.tk-meta b{color:var(--fg)}
+.tk-last{
+  font-size:11.5px;color:var(--muted);min-height:16px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.tk-last.err{color:var(--err)}
+.tk-acts{
+  display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;
+  border-top:1px dashed var(--line2);padding-top:8px;
+}
+
+/* ================================================================
+ * 2026-10-16 UI 重构：侧栏 9 项平铺 + 统一面板节奏 + 移动抽屉
+ * 对齐参考框架 xiaofan6ya/workbuddy2api 的视觉规范：
+ *   · 侧栏固定 222px，内容区独立滚动
+ *   · 纵向节奏统一：区块之间 20px，区块内元素 12px
+ *   · 数字统一 tabular-nums（对齐、不跳动）
+ *   · 窄屏侧栏变悬浮抽屉（不推正文）
+ * ================================================================ */
+
+/* ---- 侧栏 ---- */
+.side{display:flex;flex-direction:column}
+.brand .brand-txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-close{display:none;border:0;background:transparent;color:var(--muted);
+  font-size:16px;cursor:pointer;padding:2px 6px;border-radius:var(--r-xs);line-height:1}
+.nav-close:hover{background:var(--panel-3);color:var(--fg)}
+.nav{display:flex;flex-direction:column;gap:1px}
+.navbtn .tx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.navbtn .badge{
+  flex:0 0 auto;min-width:18px;height:18px;padding:0 5px;border-radius:9px;
+  background:var(--warn);color:#fff;font-size:11px;font-weight:700;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-variant-numeric:tabular-nums;
+}
+.side-foot{margin-top:auto;padding:10px 10px 2px;font-size:11px;line-height:1.6;
+  color:var(--faint);border-top:1px solid var(--line)}
+.nav-toggle{display:none;border:1px solid var(--line2);background:var(--panel);
+  color:var(--fg);border-radius:var(--r-sm);width:34px;height:32px;
+  font-size:15px;cursor:pointer;flex:0 0 auto;line-height:1}
+.nav-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.side-mask{display:none}
+
+/* ---- 面板统一节奏：每个 section 是一个语义块 ---- */
+#view>section{margin-bottom:20px}
+#view>section:last-child{margin-bottom:0}
+.card h2{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.hd-ttl{min-width:0;flex:1}
+.hd-act{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+/* ---- 数字统一等宽（金额/积分/天数对齐不跳动） ---- */
+.kpi .vl,.kpi .ex,td.right,.cr-d b{font-variant-numeric:tabular-nums}
+
+/* ---- 状态色（语义类，供 JS 直接引用） ---- */
+.c-ok{color:var(--ok)}
+.c-warn{color:var(--warn)}
+.c-bad{color:var(--err)}
+.c-faint{color:var(--faint)}
+
+/* ---- 卡片头（标题 + 右侧操作） ---- */
+.card-hd{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  margin-bottom:12px;flex-wrap:wrap}
+.card-hd h2{margin:0}
+
+/* ---- 总览：待处理 ---- */
+.todo{display:flex;flex-direction:column;gap:8px}
+.todo-i{display:flex;align-items:center;gap:10px;padding:9px 12px;
+  border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel-2);
+  cursor:pointer;transition:border-color .12s,background .12s}
+.todo-i:hover{border-color:var(--accent);background:var(--accent-soft)}
+.todo-t{flex:1;min-width:0;font-size:13px}
+.todo-go{color:var(--faint);font-size:16px;flex:0 0 auto}
+
+/* ---- 总览：接入源 mini 卡 ---- */
+.mini-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(148px,1fr))}
+.mini{display:flex;flex-direction:column;gap:3px;padding:10px 12px;
+  border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel-2);
+  cursor:pointer;transition:border-color .12s,transform .12s,box-shadow .12s}
+.mini:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:var(--shadow)}
+.mini b{font-size:13px;font-weight:620;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mini span{font-size:11.5px}
+
+/* ---- 工具栏（面板内操作条） ---- */
+.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}
+
+/* ---- 积分到期：风险分布 ---- */
+.cr-dist{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(132px,1fr))}
+.cr-d{border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;background:var(--panel-2)}
+.cr-d-hd{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:7px}
+.cr-d-hd span{font-size:12px;color:var(--muted)}
+.cr-d-hd b{font-size:15px;font-weight:680}
+.cr-d-ex{margin-top:5px;font-size:11px}
+
+/* ---- 窄屏（≤900px）：侧栏变悬浮抽屉，正文不被推走 ---- */
+@media (max-width:900px){
+  .side{
+    position:fixed;left:0;top:0;bottom:0;z-index:120;height:100vh;width:250px;flex-basis:250px;
+    transform:translateX(-100%);transition:transform .18s ease;
+    box-shadow:var(--shadow-lg);
+  }
+  .side.open{transform:translateX(0)}
+  .nav-toggle{display:inline-flex;align-items:center;justify-content:center}
+  .nav-close{display:inline-block}
+  .side-mask{display:block;position:fixed;inset:0;z-index:110;background:rgba(16,24,40,.42);
+    opacity:0;pointer-events:none;transition:opacity .18s ease}
+  .side-mask.on{opacity:1;pointer-events:auto}
+  .main{padding:16px 14px 48px}
+  .hd{gap:10px}
+  .grid.g4{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+}
+
+/* ================================================================
+   2026-10-16 UI 试点（总览 + 关于）：玻璃拟态设计系统
+   对齐 dsh-our-free-model 的视觉语言：毛玻璃卡片 + 品牌渐变 + 轻动效。
+   仅作用于总览 / 关于两页，并作为后续全量铺开的基座。
+   注意：注释内不得出现 “星号 斜杠” 组合，否则会提前闭合吞掉后续规则。
+   ================================================================ */
+
+/* ---- 玻璃令牌（亮 / 暗各自覆盖） ---- */
+:root{
+  --glass-bg:rgba(255,255,255,.62);
+  --glass-bd:rgba(255,255,255,.70);
+  --glass-shadow:0 8px 30px rgba(20,30,60,.10);
+  --blob1:rgba(91,141,239,.18);
+  --blob2:rgba(124,91,239,.16);
+}
+[data-theme="dark"]{
+  --glass-bg:rgba(28,34,44,.55);
+  --glass-bd:rgba(255,255,255,.09);
+  --glass-shadow:0 10px 38px rgba(0,0,0,.40);
+  --blob1:rgba(91,141,239,.22);
+  --blob2:rgba(124,91,239,.20);
+}
+
+/* ---- 动态渐变背景（低调，固定不随滚动） ---- */
+body{
+  background:
+    radial-gradient(1100px 620px at 8% -12%, var(--blob1), transparent 60%),
+    radial-gradient(900px 700px at 102% 0%, var(--blob2), transparent 55%),
+    var(--bg);
+  background-attachment:fixed;
+}
+
+/* ---- 玻璃工具类 ---- */
+.glass{
+  background:var(--glass-bg);
+  -webkit-backdrop-filter:blur(14px) saturate(150%);
+  backdrop-filter:blur(14px) saturate(150%);
+  border:1px solid var(--glass-bd);
+  box-shadow:var(--glass-shadow);
+}
+
+/* ---- 总览 KPI 玻璃卡 ---- */
+.stat{position:relative;overflow:hidden;padding:15px 16px 13px;
+  display:flex;flex-direction:column;gap:5px;border-radius:var(--r)}
+.stat .st-ic{position:absolute;right:12px;top:12px;width:34px;height:34px;border-radius:10px;
+  display:grid;place-items:center;font-size:17px;color:#fff;
+  background:linear-gradient(135deg,var(--accent),#7c5bef);
+  box-shadow:0 4px 12px rgba(91,141,239,.35);opacity:.92}
+.stat .lb{color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.2px}
+.stat .vl{font-size:25px;font-weight:720;letter-spacing:-.5px;line-height:1.15;
+  background:linear-gradient(135deg,var(--fg),var(--accent));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.stat .ex{color:var(--muted);font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}
+
+/* ---- 状态药丸 ---- */
+.pill{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;
+  font-size:11.5px;font-weight:600;background:var(--accent-soft);color:var(--accent);
+  border:1px solid var(--accent-line);white-space:nowrap}
+.pill.ok{background:var(--ok-soft);color:var(--ok);border-color:var(--ok-line)}
+.pill.warn{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-line)}
+.pill.err{background:var(--err-soft);color:var(--err);border-color:var(--err-line)}
+.pill.mut{background:var(--panel-3);color:var(--muted);border-color:var(--line)}
+
+/* ---- 关于页 hero（品牌渐变玻璃） ---- */
+.about-hero{position:relative;overflow:hidden;padding:22px;margin-bottom:20px;
+  border-radius:var(--r);
+  background:linear-gradient(120deg, rgba(91,141,239,.22), rgba(124,91,239,.18)), var(--glass-bg);
+  border:1px solid var(--glass-bd);
+  -webkit-backdrop-filter:blur(14px) saturate(150%);backdrop-filter:blur(14px) saturate(150%);
+  box-shadow:var(--glass-shadow)}
+.about-hero .ah-logo{width:46px;height:46px;border-radius:13px;display:grid;place-items:center;
+  font-size:22px;color:#fff;background:linear-gradient(135deg,var(--accent),#7c5bef);
+  box-shadow:0 4px 14px rgba(91,141,239,.45)}
+.about-hero h1{margin:0;font-size:22px;font-weight:740;letter-spacing:-.4px}
+.about-hero .ah-sub{color:var(--muted);font-size:12.5px;margin-top:3px}
+.version-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 11px;border-radius:20px;
+  font-size:12px;font-weight:600;background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent-line)}
+
+/* ---- 关于页：时间线 ---- */
+.timeline{list-style:none;margin:6px 0 0;padding:0 0 0 18px;border-left:2px solid var(--line2);position:relative}
+.timeline li{position:relative;padding:0 0 14px 6px}
+.timeline li:before{content:"";position:absolute;left:-25px;top:4px;width:10px;height:10px;border-radius:50%;
+  background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.timeline li b{display:block;font-size:13px;font-weight:680;margin-bottom:3px;color:var(--fg)}
+.timeline li span{color:var(--muted);font-size:12.5px;line-height:1.6}
+
+/* ---- 关于页：独立表格 ---- */
+.tbl{width:100%;border-collapse:collapse;font-size:13px;border:1px solid var(--line);
+  border-radius:var(--r);overflow:hidden}
+.tbl td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.tbl tr:last-child td{border-bottom:0}
+.tbl td:first-child{color:var(--muted);font-weight:600;white-space:nowrap;width:1%;background:var(--panel-2)}
+
+/* ---- 试点页入场动效（尊重 reduced-motion） ---- */
+@keyframes viewIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.ov-anim>section,.about>section{animation:viewIn .24s ease both}
+.ov-anim>section{margin-bottom:20px}
+.ov-anim>section:last-child{margin-bottom:0}
+@media (prefers-reduced-motion: reduce){
+  .ov-anim>section,.about>section{animation:none}
+}

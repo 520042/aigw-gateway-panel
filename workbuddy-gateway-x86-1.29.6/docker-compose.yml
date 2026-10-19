@@ -1,0 +1,25 @@
+services:
+  workbuddy-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Docker Hub 不通时换这一行（任何可达的 alpine:3.20 镜像地址都行）
+        # 例：RUNTIME_IMAGE: alpine:3.20            # 已配 registry-mirrors 时用这个
+        # 例：RUNTIME_IMAGE: <自建registry>/library/alpine:3.20
+        RUNTIME_IMAGE: docker.m.daocloud.io/library/alpine:3.20
+    # tag 带版本号 + 架构：一眼看出线上跑的是哪个产物，回滚时也好切
+    image: workbuddy-gateway:1.29.6-amd64
+    container_name: workbuddy-gateway
+    restart: unless-stopped
+    ports:
+      # 左侧是宿主端口，冲突就改它（右侧固定 8317，与 -port 对应）
+      - "8317:8317"
+    volumes:
+      # 凭据 / 状态快照 / 设置 / 用量统计 / logs 全在 /data，一个目录就是全部状态
+      - ./data:/data
+    environment:
+      TZ: Asia/Shanghai
+      # 上游需要走出口代理时取消注释（容器内访问宿主机用网关 IP，不是 127.0.0.1）
+      # HTTP_PROXY: http://172.17.0.1:7890
+      # HTTPS_PROXY: http://172.17.0.1:7890

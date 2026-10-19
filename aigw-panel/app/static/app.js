@@ -193,56 +193,55 @@ function dtBindOnce(){
   });
 }
 
-// ---------------------------------------------------------------- 路由
-// ★ 2026-10-13（用户要求）：删掉「工具与集成」整栏；「任务中心」并入原任务
-//   管理的手动任务，侧边栏只剩 设置与日志 / 任务中心 两个高级项。
-const TITLES={sources:'接入源',route:'路由与模型',settings:'设置与日志',
-  growth:'任务中心'};
-/* 高级（二级）菜单里的视图：默认折叠，进入其中任一项时自动展开分组 */
-const ADV=['settings','growth'];
-function toggleAdv(){
-  const sub=$('#advSub'), t=$('#advToggle');
-  const open=sub.classList.toggle('open');
-  t.classList.toggle('open',open);
-  // 记住用户的手动选择（autoFitNav 之后不再覆盖它）
-  NAV_MANUAL.adv = !open;
-  if(open) autoFitNav();
-}
-function openAdv(){
-  $('#advSub').classList.add('open');
-  $('#advToggle').classList.add('open');
-  NAV_MANUAL.adv = false;
-  autoFitNav();
-}
-/* ★ 2026-10-12（用户要求「分析还有没有空间，有就不折叠」）：
-   侧边栏分组按**实际可用空间**动态决策 —— 默认全展开；只有侧边栏
-   真的会溢出时才从后往前逐组收起（留 24px 余量）。用户手动折叠过
-   的分组（NAV_MANUAL）保持尊重，不自动展开。 */
-let NAV_MANUAL = {adv:false};
-function autoFitNav(){
-  const side=document.querySelector('.side');
-  if(!side) return;
-  const sub=$('#advSub'), t=$('#advToggle');
-  if(!sub||!t) return;
-  if(!NAV_MANUAL.adv){
-    sub.classList.add('open');
-    t.classList.add('open');
-  }
-  let guard=0;
-  while(side.scrollHeight > side.clientHeight+24 && guard++<8){
-    if(!sub.classList.contains('open')) break;
-    sub.classList.remove('open');
-    t.classList.remove('open');
-  }
-}
+/* ================================================================
+ * 导航 —— 2026-10-16 重构
+ *
+ * 旧病（用户原话「UI 过于杂乱」）有三个根因：
+ *   ① 一级只有 4 项（2 个主流程 + 一个「高级」折叠组），什么都往里塞，
+ *      于是层级被压到最深 5 层（侧栏 → 视图 → tab → 卡片 → 抽屉）；
+ *   ② 4 套 tab 机制（ROUTE_TAB / SRC_TAB / SET_TAB / ACC_TAB）各自为政，
+ *      每套都是"切一下就整页 render()"，改一处要动四处；
+ *   ③ 折叠组靠 JS 猜侧栏剩余高度（autoFitNav），窗口一变就抖，且藏住了入口。
+ *
+ * 现在：
+ *   ① 一级 10 项平铺，层级固定 3 层（侧栏 → 面板 → 面板内分段）；
+ *   ② 面板切换统一 switchView()，分段切换统一 setTab()（状态收在 S.tab）；
+ *   ③ 侧栏是静态 HTML，不再有任何 JS 折叠逻辑。
+ * ================================================================ */
+const PANELS = [
+  {k:'overview', t:'总览',       ic:'◎'},
+  {k:'sources',  t:'接入源',     ic:'◈'},
+  {k:'accounts', t:'账号',       ic:'☰'},
+  {k:'credits',  t:'积分到期',   ic:'⏳'},
+  {k:'models',   t:'模型',       ic:'⌗'},
+  {k:'route',    t:'路由',       ic:'⇄'},
+  {k:'usage',    t:'用量',       ic:'◔'},
+  {k:'growth',   t:'任务中心',   ic:'✦'},
+  {k:'settings', t:'设置与日志', ic:'⚙'},
+  {k:'about',   t:'关于',       ic:'ℹ'},
+];
+const TITLES = {};
+for(const p of PANELS) TITLES[p.k] = p.t;
+/** 面板内分段的默认值（取代原来的 4 个全局变量） */
+const TAB_DEF = {settings:'main', accounts:'login', sources:'LOCAL'};
+function tabOf(p){ return (S.tab && S.tab[p]) || TAB_DEF[p] || 'main'; }
+function setTab(p,k){ S.tab = S.tab || {}; S.tab[p] = k; render(); }
 
 document.addEventListener('click',e=>{
   const b=e.target.closest('.navbtn');
   if(!b)return;
-  $$('.navbtn').forEach(x=>x.classList.remove('on'));
-  b.classList.add('on');
   switchView(b.dataset.v);
 });
+
+/* ── 移动端抽屉：窄屏侧栏变成悬浮抽屉（不推正文）────────────── */
+function openDrawer(){
+  const s=document.getElementById('side'); if(s)s.classList.add('open');
+  const m=document.getElementById('sideMask'); if(m)m.classList.add('on');
+}
+function closeDrawer(){
+  const s=document.getElementById('side'); if(s)s.classList.remove('open');
+  const m=document.getElementById('sideMask'); if(m)m.classList.remove('on');
+}
 
 async function refresh(){
   if(S.busy)return;
@@ -251,6 +250,8 @@ async function refresh(){
     const o=await api('api/overview');
     S.data.overview=o;
     $('#stl').textContent='面板原生模式 · 面板已运行 '+dur(o.uptime)+' · 调度 '+((o.scheduler&&o.scheduler.ticks)||0)+' 次';
+    // ★ 2026-10-15：侧栏版本号原来硬编码 v1.0.0（Python 版号），Rust 版实际是 0.3.0 —— 用真实版本覆盖
+    if(o&&o.version){ const sf=document.getElementById('sideFoot'); if(sf) sf.textContent='v'+o.version; }
     render();
   }catch(e){toast('加载失败：'+e.message,'err');}
   S.busy=false;
@@ -288,8 +289,6 @@ function render(){
   // 一键执行按钮只在任务中心显示
   const oneClickBtn=$('#hdOneClick');
   if(oneClickBtn) oneClickBtn.style.display = (S.v==='growth') ? '' : 'none';
-  // ★ 侧边栏分组按实际空间决定展开/收起（有空间就不折叠）
-  autoFitNav();
 }
 async function switchView(v,force){
   // 切走视图 = 离开当前登录界面 → 停掉没成功的登录会话，浏览器立即释放
@@ -301,7 +300,8 @@ async function switchView(v,force){
   $$('.navbtn').forEach(x=>x.classList.remove('on'));
   const b=$(`.navbtn[data-v="${v}"]`);
   if(b)b.classList.add('on');
-  if(ADV.indexOf(v)>=0)openAdv();
+  closeDrawer();
+  render();
   render();
   const loader=LOADERS[v];
   if(!loader)return;
@@ -580,39 +580,21 @@ function sourceList(){
   return out;
 }
 
-/* ★ 2026-10-13（用户要求：「工具集成一栏好像也没啥用了，可以不要了」）：
-   原「工具与集成」页（工具调用 / 本地反代 / 签到计划 / 账号与凭据四个 tab）
-   整栏删除。viewLocalproxy 仍被接入源抽屉引用，予以保留。 */
+/* ★ 2026-10-13（用户要求「工具集成一栏没啥用了」）：
+   原「工具与集成」页整栏删除。viewLocalproxy 仍被接入源抽屉引用，予以保留。 */
 
-/** 路由与模型：合并了原来的「智能路由」「模型与倍率」「上游档案」「用量看板」 */
-let ROUTE_TAB = 'models';
-
+/* 路由面板：只管「请求怎么分发」。
+ * 旧页面把模型总表、自动路由、用量看板三件事塞进 3 个 tab（叫「路由与模型」），
+ * 2026-10-16 拆成三个一级入口（模型 / 路由 / 用量），这里不再有 tab。 */
 async function loadRoute(){
-  // ★ grouped 先行并行拉（模型总表是本页主体），不被任何慢请求串行拖住
-  api('api/models?action=grouped').then(g=>{S.data.grouped=g;render();}).catch(()=>{});
-  loadFreeModels();   // 每日免费模型榜（非阻塞，失败不影响本页）
-  const [rt,us]=await Promise.all([
-    api('api/route').catch(()=>({})),
-    api('api/usage?range=all').catch(()=>({})),
-  ]);
-  S.data.route=rt; S.data.usage=us;
+  const rt = await api('api/route').catch(()=>({}));
+  S.data.route=rt;
   render();
 }
 
-function viewRoute(){
-  let h='<div class="tabs">'
-    +[['models','⌗ 模型与倍率'],['auto','⇄ 自动路由'],
-       ['usage','◔ 用量']]
-      .map(x=>'<button class="'+(ROUTE_TAB===x[0]?'on':'')+'" '
-        +'onclick="setRouteTab(\''+x[0]+'\')">'+x[1]+'</button>').join('')
-    +'</div>';
-  if(ROUTE_TAB==='models') h+=viewModels();
-  else if(ROUTE_TAB==='auto') h+=viewRouteAuto();
-  else h+=viewUsage();
-  return h;
-}
-function setRouteTab(k){ ROUTE_TAB=k; render(); }
+function viewRoute(){ return viewRoute0(); }
 function viewRouteAuto(){ return viewRoute0(); }
+
 
 /** 把源清单按 LOCAL / API / WEB 分组 */
 let SRC_TAB = 'LOCAL';
@@ -670,12 +652,21 @@ function srcToggleMod(k){
 
 /** 懒拉某个源的模型清单（只有平台动作/内置表能给的才有），结果缓存在内存 */
 async function refreshSrcModels(pid){
-  toast('正在拉取 '+pid+' 的模型清单…');
+  // ★ 2026-10-15：合并卡（copilot/kimi）没有独立 models 接口，要转成 variants 里的真实 pid
+  let realPid = pid;
+  const s = sourceList().find(x=>x.key===pid);
+  if(s && s.variants && s.variants.length){
+    const loggedVar = s.variants.find(v=>v.logged) || s.variants[0];
+    realPid = loggedVar.pid;
+  }
+  toast('正在拉取 '+realPid+' 的模型清单…');
   try{
-    const r = await post('api/models?action=platform_models', {platform: pid});
+    const r = await post('api/models?action=platform_models', {platform: realPid});
     if(r.ok === false){ toast('拉取失败：'+(r.message||''), 'err'); return; }
     S.data.srcModels = S.data.srcModels || {};
-    S.data.srcModels[pid] = r.models || [];
+    S.data.srcModels[realPid] = r.models || [];
+    // 合并卡也挂一份到 s.key，避免 srcModBoxHtml 读到空
+    if(realPid !== pid) S.data.srcModels[pid] = r.models || [];
     SRC_MOD_OPEN[pid] = true;
     toast('已获取 '+((r.models||[]).length)+' 个模型'+(r.live?'（实时清单）':'（内置清单）'), 'ok');
     // ★ 2026-10-13（用户三次反馈「点抽屉刷新模型界面就闪一下」）：
@@ -787,7 +778,11 @@ function srcAcctBoxHtml(s){
   const accts=(S.data.accounts||[]).filter(a=>
     vpids.length ? (vpids.indexOf(a.platform)>=0) : (a.platform===s.key));
   return '<div class="sc-sect"><i>账号（'+accts.length+'）</i>'
-    +'<button class="btn sm gh" onclick="refreshSrcAccounts(\''+esc(s.key)+'\')">⟳ 刷新状态与积分</button></div>'
+    +'<button class="btn sm gh" onclick="refreshSrcAccounts(\''+esc(s.key)+'\')">⟳ 刷新状态与积分</button>'
+    // ★ 2026-10-15（用户要求）：「解绑」放「账号」区**右侧**（原「解除接入」在上方按钮行）
+    +'<button class="btn sm dgr" style="margin-left:auto" '
+    +'title="清除该源在本面板保存的凭据与账号" '
+    +'onclick="delAccountFor(\''+esc(s.key)+'\')">解绑</button></div>'
     +'<div class="sc-sub">'+(accts.length?accts.map(a=>
       '<div class="sc-row">'
       +'<span class="mono" title="'+esc(a.name||'')+'">'+esc(a.name||a.platform)+'</span>'
@@ -1513,13 +1508,15 @@ function srcLoginPanel(s, compact){
     // ★ 2026-10-12：展开面板里的「已接入」精简版 ——
     //   大模型表（dataTable）从面板里移除（用户反馈冗余），模型用卡片上的
     //   「查看清单」紧凑列表；这里只留状态 + 核心动作。
+    // ★ 2026-10-15（用户要求）：① 去掉「探测端点」（没用）；② 「解除接入」改名「解绑」
+    //   并移到下方「账号」区右侧（见 srcAcctBoxHtml）；③ 这里补回「登录 / 重新登录」。
     h+='<div class="note ok" style="color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)">'
       +'已接入 · 凭据 <code>'+esc(acc?String(acc.secret||''):'')+'</code>'
       +'（'+esc(acc&&acc.source||'')+'，'+esc(acc&&acc.obtained_at||'')+'）</div>';
     h+='<div class="btnrow">'
       +(s.checkin?'<button class="btn pri" onclick="acRunOne(\''+esc(s.key)+'\')">立即签到</button>':'')
-      +'<button class="btn" onclick="platformProbe(\''+esc(s.key)+'\')">探测端点</button>'
-      +'<button class="btn dgr" onclick="delAccountFor(\''+esc(s.key)+'\')">解除接入</button>'
+      +'<button class="btn" onclick="srcLogin(\''+esc(s.key)+'\')" '
+      +'title="重新打开该平台的登录页并获取新凭据">登录 / 重新登录</button>'
       +'</div>';
   }else{
     // ★ Loomy：签名 API 登录（短信/密码/session 三方式，无需浏览器）
@@ -1593,8 +1590,8 @@ function srcLoginPanel(s, compact){
           +'title="读取本机已登录 Trae 桌面端的 x-ide-token，一键入库'
           +'（需面板与 Trae 在同一台电脑运行）">⌂ 读取本机 Trae 登录态</button>';
       }
-      h+='<button class="btn" onclick="event.stopPropagation();platformProbe(\''+esc(s.key)+'\')">先探测端点</button>'
-        +'</div>';
+      // ★ 2026-10-15（用户要求）：去掉「先探测端点」（没用）
+      h+='</div>';
       h+='<details style="margin-top:8px">'
         +'<summary class="faint" style="font-size:11.5px;cursor:pointer">'
         +'登录页打不开？手动粘贴'+esc(pasteKind)+'</summary>'
@@ -2582,9 +2579,10 @@ function chart(pts){
 async function loadModels(){
   const g=await api('api/models?action=grouped').catch(()=>null);
   if(g) S.data.grouped=g;
-  // ★ 2026-10-13：只有当前在路由页才需要立即重绘；在接入源页时整页 render
-  //   就是「刷新模型闪一下」的根因之一（grouped 已进 S.data，切页自更新）。
-  if(S.v==='route') render();
+  // ★ 2026-10-13：只有当前正在消费这份数据的页面才立即重绘；在接入源页时
+  //   整页 render 就是「刷新模型闪一下」的根因之一（grouped 已进 S.data，切页自更新）。
+  //   ★ 2026-10-16：「模型」从路由页拆成独立面板后，它也消费 grouped，一并加入。
+  if(S.v==='route'||S.v==='models') render();
 }
 function panelBaseUrl(){
   const u=location.origin||'';
@@ -3144,6 +3142,46 @@ function viewCatalog(){
   </div>`;
 }
 
+/* 号池治理卡（2026-10-16 S3）：把 server/pool.rs 的内存状态画出来。
+ * 这些是「请求路径真实生效」的治理数据，不是配置展示：
+ *   · 在途 = 同一账号当前有几个请求在打（超过并发上限就换号）
+ *   · 冷却 = 该 (账号,模型) 失败后被冻，指数退避 + 抖动
+ *   · WAF  = 401/403 凭据失效，整号冻结（换模型也不好使）
+ */
+function poolCard(p){
+  p=p||{};
+  const inf=p.inflight||[], cool=p.cooling||[], waf=p.waf||[];
+  const h=`
+  <div class="cr-dist">
+    <div class="cr-d"><div class="cr-d-hd"><span>在途请求</span><b>${inf.length}</b></div>
+      <div class="faint" style="font-size:11px">同一账号并发上限 ${p.max_inflight||2}</div></div>
+    <div class="cr-d"><div class="cr-d-hd"><span>模型级冷却</span><b class="${cool.length?'c-warn':''}">${cool.length}</b></div>
+      <div class="faint" style="font-size:11px">失败只冻 (账号,模型) 这一对</div></div>
+    <div class="cr-d"><div class="cr-d-hd"><span>WAF 拉黑</span><b class="${waf.length?'c-bad':''}">${waf.length}</b></div>
+      <div class="faint" style="font-size:11px">401/403 → 整号冻结 ${Math.round((p.waf_ttl_s||1800)/60)} 分钟</div></div>
+    <div class="cr-d"><div class="cr-d-hd"><span>退避策略</span><b>${p.cooldown_base_s||30}s→${p.cooldown_max_s||900}s</b></div>
+      <div class="faint" style="font-size:11px">连续失败指数退避 + 抖动</div></div>
+  </div>`;
+  if(!inf.length && !cool.length && !waf.length){
+    return h+'<div class="empty">当前没有账号被治理状态挡住 —— 全部正常放行。</div>';
+  }
+  let t='<table><thead><tr><th>类型</th><th>平台</th><th>账号</th><th>模型</th><th class="right">在途/剩余</th><th class="right">连续失败</th></tr></thead><tbody>';
+  for(const x of inf) t+='<tr><td>'+tag('在途','info')+'</td><td>'+esc(x.platform)+'</td>'
+    +'<td class="mono" style="font-size:11.5px">'+esc(x.account)+'</td>'
+    +'<td class="mono" style="font-size:11.5px">'+esc(x.model)+'</td>'
+    +'<td class="right">'+x.n+'</td><td class="right faint">—</td></tr>';
+  for(const x of cool) t+='<tr><td>'+tag('冷却','warn')+'</td><td class="faint">—</td>'
+    +'<td class="mono" style="font-size:11.5px">'+esc(x.account)+'</td>'
+    +'<td class="mono" style="font-size:11.5px">'+esc(x.model)+'</td>'
+    +'<td class="right">'+x.left_s+'s</td><td class="right">'+x.fails+'</td></tr>';
+  for(const x of waf) t+='<tr><td>'+tag('WAF 拉黑','err')+'</td><td>'+esc(x.platform)+'</td>'
+    +'<td class="mono" style="font-size:11.5px">'+esc(x.account)+'</td>'
+    +'<td class="faint">全部模型</td>'
+    +'<td class="right">'+x.left_s+'s</td><td class="right faint">—</td></tr>';
+  t+='</tbody></table>';
+  return h+'<div class="scroll" style="max-height:320px">'+t+'</div>';
+}
+
 function viewRoute0(){
   const r=S.data.route||{};
   const models=r.models||{};
@@ -3218,6 +3256,14 @@ function viewRoute0(){
   </div>
 
   <div class="card">
+    <div class="card-hd">
+      <h2>号池治理<span class="faint" style="font-weight:400;font-size:12px"> · 账号粒度的并发 / 冷却 / 拉黑，请求路径实时生效</span></h2>
+      <span class="faint" style="font-size:12px">数据每 15s 随路由页刷新</span>
+    </div>
+    ${poolCard(r.pool)}
+  </div>
+
+  <div class="card">
     <h2>策略说明</h2>
     <table><tbody>
       <tr><td><b>auto</b></td><td>优先实测延迟（EWMA 平滑）最低的上游。同一会话会尽量粘在同一上游，避免上下文抖动。</td></tr>
@@ -3225,6 +3271,7 @@ function viewRoute0(){
       <tr><td>能力过滤</td><td>请求带 <code>tools</code> 时自动排除不支持工具调用的上游；带图片时排除不支持视觉的。</td></tr>
       <tr><td>熔断</td><td>连续失败 ${r.breaker_fail||3} 次进 OPEN，冷却 ${r.breaker_cooldown||60} 秒后半开试探，成功即恢复。</td></tr>
       <tr><td>降级</td><td>429 / 5xx / 超时自动切下一个上游，最多试 4 个。4xx（除 429）不降级，直接报错。</td></tr>
+      <tr><td>号池治理</td><td>同一账号最多 2 个并发请求；失败只冻 (账号,模型) 这一个组合，连续失败按 30s→900s 指数退避（带抖动，避免同时撞墙）；401/403 判定凭据失效，整号冻结 30 分钟；全部被挡住时半开放行最紧迫的一个，不会永久锁死。</td></tr>
     </tbody></table>
   </div>
 
@@ -3484,7 +3531,6 @@ function viewLogs(){
 }
 
 // ---------------------------------------------------------------- 设置
-let SET_TAB = "main";
 
 async function loadSettings(){
   // 设置页现在是 Tab 容器，数据一次性拉齐
@@ -3506,16 +3552,82 @@ async function loadSettings(){
 }
 
 function viewSettings(){
-  const tabs=[['main','🌐 代理设置'],['logs','≡ 日志']];
+  const tabs=[['main','🌐 代理设置'],['data','💾 数据备份'],['logs','≡ 日志']];
   let h='<div class="tabs">'
-    +tabs.map(x=>'<button class="'+(SET_TAB===x[0]?'on':'')+'" '
+    +tabs.map(x=>'<button class="'+(tabOf('settings')===x[0]?'on':'')+'" '
       +'onclick="setSetTab(\''+x[0]+'\')">'+x[1]+'</button>').join('')
     +'</div>';
-  if(SET_TAB==='main') h+=viewSettingsMain();
-  else if(SET_TAB==='logs') h+=viewLogs();
+  if(tabOf('settings')==='main') h+=viewSettingsMain();
+  else if(tabOf('settings')==='data') h+=viewDataManage();
+  else if(tabOf('settings')==='logs') h+=viewLogs();
   return h;
 }
-function setSetTab(k){ SET_TAB=k; render(); }
+
+function viewDataManage(){
+  const dataDir = S.data.dataDir || 'data/';
+  return `
+  <div class="card">
+    <h2>数据备份与恢复</h2>
+    <p class="muted" style="font-size:12.5px">
+      备份范围：<code>settings.json / accounts.json / panel.db / disabled_models.json / sites.json / checkins.json / tasks.json / notify.json</code><br>
+      数据目录：<code>${esc(dataDir)}</code>（重装/迁移都不会丢；备份存放在 <code>${esc(dataDir)}backups/</code>）
+    </p>
+    <div class="flex mt" style="gap:10px;flex-wrap:wrap">
+      <button class="btn pri" onclick="doBackup()">立即备份</button>
+      <button class="btn" onclick="loadDataBackups()">刷新备份列表</button>
+    </div>
+    <div id="bkList" class="mt"></div>
+    <div class="note mt">
+      <b>恢复后需重启面板</b>：恢复会把文件写回数据目录，但面板内存态（已登录会话、账号池）不会自动刷新，
+      所以点「恢复」后会提示重启；恢复完成后面板会自动退出，请重新打开。
+    </div>
+  </div>`;
+}
+
+async function loadDataBackups(){
+  const box=document.getElementById('bkList');
+  if(!box){return;}
+  box.innerHTML='<div class="sk line" style="height:28px"></div>';
+  const r=await api('api/data/backups').catch(()=>({ok:false,list:[]}));
+  if(!r.ok){box.innerHTML='<div class="note warn">'+esc(r.message||'读取失败')+'</div>';return;}
+  const list=r.list||[];
+  if(!list.length){box.innerHTML=empty('还没有备份，点「立即备份」创建第一个');return;}
+  box.innerHTML='<table class="tbl"><thead><tr><th>备份时间</th><th>文件数</th><th>操作</th></tr></thead><tbody>'
+    +list.map(b=>{
+      const files=(b.files||[]).length;
+      const when=esc(b.created_at||b.id||'');
+      const id=esc(b.id||'');
+      return '<tr><td class="mono">'+when+'</td><td>'+files+'</td>'
+        +'<td><button class="btn sm" onclick="doRestore(\''+id+'\')">恢复</button></td></tr>';
+    }).join('')
+    +'</tbody></table>';
+}
+
+async function doBackup(){
+  const box=document.getElementById('bkList');
+  if(box)box.innerHTML='<div class="sk line" style="height:28px"></div>';
+  const r=await post('api/data/backup',{});
+  if(!r.ok){toast('备份失败：'+(r.message||''),'err');if(box)box.innerHTML='<div class="note warn">'+esc(r.message||'备份失败')+'</div>';return;}
+  toast(r.message||'已备份','ok');
+  loadDataBackups();
+}
+
+async function doRestore(id){
+  if(!confirm('恢复到该备份？\n\n· 当前数据将被覆盖\n· 恢复完成后面板会自动退出，请重新打开'))return;
+  const r=await post('api/data/restore?ts='+encodeURIComponent(id),{});
+  if(!r.ok){toast('恢复失败：'+(r.message||''),'err');return;}
+  toast(r.message||'已恢复','ok');
+  if(r.need_restart){
+    setTimeout(()=>{
+      document.body.innerHTML='<div style="padding:60px;text-align:center;font:14px/1.6 -apple-system,sans-serif;color:#6b7280">'
+        +'<div style="font-size:34px;margin-bottom:12px">✓</div>'
+        +'<div style="font-size:16px;color:#1c1f26;font-weight:500;margin-bottom:6px">数据已恢复，面板即将退出</div>'
+        +'<div>请重新双击 aigw-panel.exe 启动，使恢复的数据生效</div></div>';
+    },400);
+    await post('api/settings?action=shutdown',{});
+  }
+}
+function setSetTab(k){ setTab('settings',k); if(k==='data') loadDataBackups(); }
 
 function viewSettingsMain(){
   const r=S.data.settings||{};
@@ -3698,7 +3810,13 @@ async function startLogin(pid,edition,headless,forceBrowser){
   // 抽屉开着 → 只换抽屉盒子（不闪整页）；否则才全量 render
   if(!(S.v==='sources' && SRC_EXPAND && srcDrawerPatch())){ render(); }
   const s=S.data.loginSession;
-  if(s&&s.auth_url&&loginWin&&!loginWin.closed){ loginWin.location.href=s.auth_url; }
+  // ★ 2026-10-15（用户实拍「无法跳转登录」，面板在内嵌预览里 window.open/target=_blank
+  //   全被拦）：后端已用服务端 open_browser 打开默认浏览器 → 这里只要收掉占位标签，
+  //   不再自己导航，避免开两个标签。浏览器正常时后端那一下依然在用户浏览器里开新标签。
+  if(s&&s.browser_opened){
+    if(loginWin&&!loginWin.closed)loginWin.close();
+  }
+  else if(s&&s.auth_url&&loginWin&&!loginWin.closed){ loginWin.location.href=s.auth_url; }
   else if(loginWin&&!loginWin.closed){ loginWin.close(); }
   else if(s&&s.auth_url){ toast('浏览器拦截了弹出窗口，请点「打开授权页」手动跳转','warn'); }
   const sess=S.data.loginSession;
@@ -4109,7 +4227,6 @@ async function lpShowLog(){
  *   原来：账号登录 / 签到中心 / 成长任务 / 任务中心 / 自动签到
  *   现在：一个页面，顶部 Tab 切换，登录态和签到计划放在一起
  * ================================================================ */
-let ACC_TAB = 'login';
 
 function loadAccount(){
   Promise.all([
@@ -4127,6 +4244,26 @@ function loadAccount(){
     S.data.loginBrowser=(bd&&bd.browser)||null;
     render();
   }).catch(e=>toast('加载账号信息失败：'+e.message,'err'));
+}
+
+/* 账号池「紧迫度」列（2026-10-16）。
+ * 后端 `/api/credits` 把 urgency_score 写回 accounts.json：
+ *   有到期日   -> days*1000        （最早清零的排最前）
+ *   无到期日但有余额 -> 10^7-余额   （大头先用，避免集中过期）
+ *   什么都没有 -> i64::MAX          （垫底）
+ * 这里翻译回人类语言：剩余几天 + 多少积分，并配色。 */
+function urgencyCell(x){
+  const u=x.urgency;
+  if(u==null) return '<span class="faint">—</span>';
+  if(u>=9223372036854775807) return '<span class="faint">无额度数据</span>';
+  const d=x.urgency_days;
+  const rem = x.urgency_remain==null ? '' : ' · '+nfmt(x.urgency_remain);
+  if(d!=null){
+    const cls = d<=3 ? 'c-bad' : (d<=7 ? 'c-warn' : '');
+    return '<span class="'+cls+'"><b>'+d+'</b> 天</span>'
+      +'<span class="faint" style="font-size:11px">'+rem+'</span>';
+  }
+  return '<span class="faint">无到期日</span><span style="font-size:11px">'+rem+'</span>';
 }
 
 function viewAccount(){
@@ -4161,11 +4298,11 @@ function viewAccount(){
   h+='<div class="tabs">'
     +[['login','① 登录与凭据'],['plan','② 签到计划'],
        ['sess','③ 当前登录'],['log','④ 账号池与能力']]
-      .map(x=>'<button class="'+(ACC_TAB===x[0]?'on':'')+'" '
+      .map(x=>'<button class="'+(tabOf('accounts')===x[0]?'on':'')+'" '
       +'onclick="setAccTab(\''+x[0]+'\')">'+x[1]+'</button>').join('')
     +'</div>';
 
-  if(ACC_TAB==='login'){
+  if(tabOf('accounts')==='login'){
     h+='<div class="card"><div class="ch"><b>可登录的平台（'+pls.length+'）</b>'
       +'<span class="faint">'+logged.size+' 个已登录</span></div><div class="cb">';
     h+=dataTable({
@@ -4190,7 +4327,7 @@ function viewAccount(){
     h+='</div></div>';
   }
 
-  if(ACC_TAB==='plan'){
+  if(tabOf('accounts')==='plan'){
     h+='<div class="card"><div class="ch"><b>定时签到计划</b>'
       +'<div class="flex n">'
       +'<label style="margin:0;display:flex;align-items:center;gap:6px">'
@@ -4236,11 +4373,11 @@ function viewAccount(){
     h+='</div></div>';
   }
 
-  if(ACC_TAB==='sess'){
+  if(tabOf('accounts')==='sess'){
     h+=viewLoginSession();
   }
 
-  if(ACC_TAB==='log'){
+  if(tabOf('accounts')==='log'){
     h+='<div class="card"><div class="ch"><b>账号池（'+accs.length+'）</b>'
       +'<span class="faint">凭据只存本机 data/ 目录，不外传</span></div><div class="cb">';
     if(!accs.length){
@@ -4256,6 +4393,9 @@ function viewAccount(){
           {k:'source',t:'来源',render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.source||'')+'</span>'},
           {k:'secret',t:'密钥',render:x=>'<span class="mono faint">'+esc(x.secret||'')+'</span>'},
           {k:'obtained_at',t:'获取时间',render:x=>'<span class="faint" style="font-size:11.5px">'+esc(x.obtained_at||'')+'</span>'},
+          // ★ 2026-10-16 urgency_rank：紧迫度 = 该账号"还有余额的包"里最早的到期日。
+          //   数字越小越该先用（请求路径的 secrets_ranked 就按它选号）。
+          {k:'urgency',t:'紧迫度',render:x=>urgencyCell(x)},
           {k:'enabled',t:'状态',render:x=>x.enabled===false?tag('已停用','warn'):tag('启用','ok')},
           {k:'_op',t:'',render:x=>'<button class="btn sm" onclick="toggleAccount(\''+esc(x.id)+'\','
             +(x.enabled===false?'true':'false')+')">'+(x.enabled===false?'启用':'停用')+'</button> '
@@ -4269,7 +4409,7 @@ function viewAccount(){
   return h;
 }
 
-function setAccTab(k){ ACC_TAB=k; render(); }
+function setAccTab(k){ setTab('accounts',k); }
 async function acSet(k,v){
   const au=S.data.autoCheckin||(S.data.autoCheckin={});
   au[k]=v;
@@ -4572,9 +4712,8 @@ function viewPlatformCaps(acts){
     for(const pid of pids){
       h+='<details style="margin-bottom:10px"><summary style="cursor:pointer;font-weight:600;padding:6px 0">'
         +esc(pid)+' <span class="faint">（'+acts[pid].length+' 项）</span></summary>'
-        +'<div class="btnrow" style="margin:8px 0 6px">'
-        +'<button class="btn sm" onclick="platformProbe(\''+esc(pid)+'\')">🔍 探测端点</button></div>'
-        +'<div class="btnrow">';
+        // ★ 2026-10-15（用户要求）：去掉「探测端点」
+        +'<div class="btnrow" style="margin:8px 0 6px">';
       for(const a of acts[pid]){
         const isLocal=!!a.local, isProxy=!!a.needs_proxy;
         const title=isLocal?('APP 本地网关路由，面板无法直接调用（'+esc(a.path)+'）')
@@ -4721,10 +4860,9 @@ function viewLogin(){
     h+=empty('暂无');
   }else{
     for(const pid of pids){
+      // ★ 2026-10-15（用户要求）：去掉「探测端点」
       h+='<div style="margin-bottom:14px"><div style="font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:8px">'
-        +esc(pid)
-        +'<button class="btn sm n" title="登录凭据后动态扫描该平台的真实端点（应对整站 401）" '
-        +'onclick="platformProbe(\''+esc(pid)+'\')">🔍 探测端点</button></div>';
+        +esc(pid)+'</div>';
       h+='<div class="row" style="gap:6px;align-items:flex-start">';
       for(const a of acts[pid]){
         // local = APP 本地网关路由（公网不可达）
@@ -4848,11 +4986,373 @@ function closeModal(){
   if(m)m.remove();
 }
 
-const VIEWS={sources:viewSources,route:viewRoute,settings:viewSettings,
-  growth:viewGrowth};
+/* ★ 视图注册表 = 侧栏 9 个一级入口的唯一映射表（2026-10-16）。
+ *   新增面板只改这里 + PANELS，不再散落各处。 */
 
-const LOADERS={sources:loadSources,route:loadRoute,settings:loadSettings,
-  growth:loadGrowth};
+/* ================================================================
+ * 总览（2026-10-16 新增）
+ *
+ * 参考框架把首页做成「概览」而不是功能仪表盘。这里只回答三个问题：
+ *   ① 接了几个源  ② 还能用多少（剩余积分 + 到期风险）  ③ 最近跑得怎么样
+ * 所有"操作"都不放首页，只在有问题时给一条跳转入口（待处理）。
+ * ================================================================ */
+async function loadOverview(){
+  const [lp,ac,au,src,md,ov,ca,gr,us] = await Promise.all([
+    api('api/login?action=platforms').catch(()=>({platforms:[]})),
+    api('api/accounts').catch(()=>({accounts:[],stats:{}})),
+    api('api/autocheckin?action=status').catch(()=>({platforms:[]})),
+    api('api/models?action=sources').catch(()=>({sources:[]})),
+    api('api/models').catch(()=>({models_enriched:[],rate_summary:{}})),
+    api('api/overview').catch(()=>({})),
+    api('api/custom_apis?action=list').catch(()=>({apis:[]})),
+    api('api/models?action=grouped').catch(()=>({groups:[]})),
+    api('api/usage?range=all').catch(()=>({})),
+  ]);
+  S.data.loginPlatforms=lp.platforms||[];
+  S.data.accounts=ac.accounts||[];
+  S.data.accountStats=ac.stats||{};
+  S.data.autoCheckin=au;
+  S.data.catalogSources=src.sources||[];
+  S.data.srcKinds=src.platform_kinds||{};
+  S.data.srcCats=src.categories||[];
+  S.data.srcSummary=src.summary||{};
+  S.data.models=md;
+  S.data.overview=ov;
+  S.data.customApis=ca.apis||[];
+  S.data.grouped=gr||{groups:[]};
+  S.data.usage=us;
+  render();
+  // 积分到期要逐个账号打上游余额接口（慢），放后面补，不阻塞首屏
+  api('api/credits').then(c=>{S.data.credits=c;render();}).catch(()=>{});
+}
+
+function ovBar(pct,cls){
+  pct=Math.max(0,Math.min(100,pct));
+  return '<div class="bar" style="height:6px;margin-top:5px"><i class="'+(cls||'')+'" style="width:'+pct.toFixed(1)+'%"></i></div>';
+}
+function ovStat(ic,lb,vl,ex,extra){
+  return '<div class="stat glass">'
+    +'<div class="st-ic">'+ic+'</div>'
+    +'<div class="lb">'+esc(lb)+'</div>'
+    +'<div class="vl">'+vl+'</div>'
+    +'<div class="ex">'+ex+'</div>'
+    +(extra||'')+'</div>';
+}
+
+function viewOverview(){
+  const items=sourceList();
+  const logged=items.filter(i=>i.logged);
+  const rows=(S.data.models||{}).models_enriched||[];
+  const u=((S.data.usage||{}).usage||{}).totals||{};
+  const cr=S.data.credits||{};
+  const risk=Number(cr.at_risk||0);
+  let h='<div class="ov-anim">';
+
+  // ① 四个 KPI（玻璃卡）
+  const totalRemain=Number(cr.total_remain||0);
+  const riskPct=totalRemain>0?(risk/totalRemain*100):0;
+  h+='<section><div class="grid g4">'
+    +ovStat('◈','已接入源', logged.length+' <span class="faint" style="font-size:15px">/ '+items.length+'</span>',
+        '账号凭据 '+((S.data.accountStats||{}).total||0)+' 条',
+        ovBar(items.length? logged.length/items.length*100:0,'ok'))
+    +ovStat('⌗','收录模型', nfmt(rows.length), '已知倍率 '+rows.filter(x=>x.credits).length+' 个', '')
+    +ovStat('◔','累计调用', nfmt(u.requests||0),
+        '成功 '+nfmt(u.success||0)+' · 失败 '+nfmt(u.failed||0), '')
+    +ovStat('⏳','剩余积分', nfmt(totalRemain),
+        risk>0 ? '<span class="c-warn">'+nfmt(risk)+' 将在 7 天内到期</span>'
+               : '<span class="muted">7 天内无到期</span>',
+        risk>0 ? ovBar(riskPct,'warn') : '')
+    +'</div></section>';
+
+  // ② 待处理（没有待办就不占位，只给一行安心提示）
+  const todo=[];
+  if(risk>0) todo.push(['积分', nfmt(risk)+' 积分将在 7 天内到期，先烧掉最划算', 'credits']);
+  const unlogged=items.filter(i=>!i.logged && i.key!=='custom-new');
+  if(unlogged.length) todo.push(['接入', unlogged.length+' 个源还没接入，接进来就多一份免费额度', 'sources']);
+  if(!todo.length){
+    h+='<section><div class="note ok">✅ 没有待处理事项 —— 已接入的源都在跑，7 天内也没有到期积分。</div></section>';
+  }else{
+    h+='<section><div class="card glass"><div class="card-hd"><h2>待处理</h2></div><div class="todo">'
+      +todo.map(t=>'<div class="todo-i glass" onclick="switchView(\''+t[2]+'\')">'
+        +'<span class="pill">'+esc(t[0])+'</span>'
+        +'<span class="todo-t">'+esc(t[1])+'</span>'
+        +'<span class="todo-go">›</span></div>').join('')
+      +'</div></div></section>';
+  }
+
+  // ③ 接入源状态（已接入的前 8 个 + 查看全部）
+  const shown=logged.slice(0,8);
+  h+='<section><div class="card glass">'
+    +'<div class="card-hd"><h2>接入源</h2>'
+    +'<button class="btn sm gh" onclick="switchView(\'sources\')">查看全部 '+items.length+' 个 ›</button></div>';
+  if(!shown.length){
+    h+='<div class="empty">还没有接入任何源。'
+      +'<button class="btn sm pri" onclick="switchView(\'sources\')">去接入</button></div>';
+  }else{
+    h+='<div class="mini-grid">'
+      +shown.map(i=>'<div class="mini glass" onclick="switchView(\'sources\');'
+        +'setTimeout(function(){expandSrc(\''+esc(i.key)+'\')},60)">'
+        +'<b>'+esc(i.name)+'</b>'
+        +'<span class="faint">'+(i.models?i.models+' 个模型':'已接入')+'</span></div>').join('')
+      +'</div>';
+  }
+  h+='</div></section>';
+  h+='</div>';
+  return h;
+}
+
+/* ================================================================
+ * 积分到期（2026-10-16 新增）
+ *
+ * 抄参考框架的「积分到期」面板。免费额度真正的风险不是"有多少"，而是"还剩几天"：
+ * 6000 积分 3 天后清零，比 800 积分 30 天后到期更该先烧掉。
+ * 数据源 `/api/credits`：把每个资源包拆成一行，按到期升序，给 ≤1/3/7/14/30 天分布。
+ * ================================================================ */
+const CR_BUCKETS=[
+  ['expired','已到期','c-bad'],
+  ['d1','≤1 天','c-bad'],
+  ['d3','≤3 天','c-warn'],
+  ['d7','≤7 天','c-warn'],
+  ['d14','≤14 天',''],
+  ['d30','≤30 天',''],
+  ['later','更远','c-ok'],
+  ['none','无到期信息','faint'],
+];
+let CR_ALL=false;            // 明细是否展开全部（默认只显示还有余额的）
+
+async function loadCredits(force){
+  // accounts 顺手拉：urgency_* 字段由 /api/credits 写回 accounts.json，
+  // 这里读出来做「选号优先序」可视化（请求路径就是按这个顺序挑凭据的）。
+  // ★ S5：后端 rows 默认只返前 30 条（响应体积治理）；展开全部时才要全量。
+  const q=(force?'?refresh=1':'?')+(CR_ALL?'&all=1':'');
+  const [r,ac]=await Promise.all([
+    api('api/credits'+q).catch(()=>({})),
+    api('api/accounts').catch(()=>({accounts:[]})),
+  ]);
+  S.data.credits=r;
+  S.data.accounts=ac.accounts||[];
+  render();
+}
+function refreshCredits(){
+  toast('正在逐个账号拉取额度…');
+  loadCredits(true);
+}
+
+function crDayCls(d){
+  if(d==null) return 'faint';
+  if(d<=3) return 'c-bad';
+  if(d<=7) return 'c-warn';
+  return '';
+}
+function crDayTxt(d){
+  if(d==null) return '—';
+  if(d<=0) return '已到期';
+  return d+' 天';
+}
+
+function viewCredits(){
+  const c=S.data.credits||{};
+  const rows=c.rows||[];
+  const dist={}; for(const d of (c.dist||[])) dist[d.key]=d;
+  const byP=c.by_platform||[];
+  const maxC=Math.max(1,...(c.dist||[]).map(d=>Number(d.credits||0)));
+  let h='';
+
+  // 工具栏
+  h+='<section><div class="toolbar">'
+    +'<span class="faint">'+(c.ts?('更新于 '+new Date(c.ts).toLocaleTimeString()):'尚未拉取')
+      +(c.scanned?(' · 扫描 '+c.scanned+' 个账号'):'')+'</span>'
+    +'<span style="flex:1"></span>'
+    +'<button class="btn sm" onclick="CR_ALL=!CR_ALL;loadCredits()">'
+      +(CR_ALL?'只看有余额':('显示全部 '+(c.rows_total||rows.length)+' 个包'))+'</button>'
+    +'<button class="btn sm pri" onclick="refreshCredits()">重新拉取</button>'
+    +'</div></section>';
+
+  // ① KPI
+  h+='<section><div class="grid g4">'
+    +ovKpi('剩余积分', nfmt(c.total_remain||0),
+      (c.packages?c.packages+' 个资源包 · '+c.live+' 个还有余额':'—'))
+    +ovKpi('7 天内到期', nfmt(c.at_risk||0),
+      (Number(c.at_risk||0)>0?'<span class="c-warn">优先消耗</span>':'<span class="c-ok">无风险</span>'))
+    +ovKpi('已用完的包', nfmt(c.depleted||0), '<span class="faint">不参与风险提示</span>')
+    +ovKpi('最早到期', byP.length&&byP[0].days_left!=null
+        ? '<span class="'+crDayCls(byP[0].days_left)+'">'+crDayTxt(byP[0].days_left)+'</span>'
+        : '—',
+      byP.length?esc(byP[0].platform):'<span class="faint">暂无数据</span>')
+    +'</div></section>';
+
+  // ② 风险分布
+  h+='<section><div class="card"><h2>到期风险分布</h2><div class="cr-dist">'
+    +CR_BUCKETS.map(b=>{
+      const d=dist[b[0]]||{packages:0,credits:0};
+      return '<div class="cr-d">'
+        +'<div class="cr-d-hd"><span>'+b[1]+'</span>'
+        +'<b class="'+b[2]+'">'+nfmt(d.credits)+'</b></div>'
+        +'<div class="bar"><i class="'+(b[2]||'')+'" style="width:'
+        +(Number(d.credits||0)/maxC*100).toFixed(1)+'%"></i></div>'
+        +'<div class="cr-d-ex faint">'+d.packages+' 个包</div></div>';
+    }).join('')
+    +'</div></div></section>';
+
+  // ③ 平台紧迫度
+  h+='<section><div class="card"><h2>按平台紧迫度</h2>';
+  if(!byP.length){
+    h+='<div class="empty">还没有可分析的积分账号（需要有余额接口的平台，如 WorkBuddy / WPS）。</div>';
+  }else{
+    h+='<table><thead><tr><th>平台</th><th class="right">剩余</th>'
+      +'<th class="right">包数</th><th class="right">最早到期</th></tr></thead><tbody>'
+      +byP.map(p=>'<tr><td>'+esc(p.platform)+'</td>'
+        +'<td class="right">'+nfmt(p.remain)+'</td>'
+        +'<td class="right">'+p.packages+'</td>'
+        +'<td class="right '+crDayCls(p.days_left)+'">'+crDayTxt(p.days_left)+'</td></tr>').join('')
+      +'</tbody></table>';
+  }
+  h+='</div></section>';
+
+  // ③.5 分页提示：后端默认只返前 30 条明细（汇总口径不受影响）
+  if(c.rows_truncated && !CR_ALL){
+    h+='<div class="note" style="margin-top:10px">明细默认只显示前 '
+      +(c.rows_shown||rows.length)+' 条（共 '+(c.rows_total||0)+' 条资源包）；'
+      +'汇总数字（总余额 / 风险积分 / 分布）始终是全量口径。'
+      +'<button class="btn sm gh" onclick="CR_ALL=true;loadCredits()">展开全部</button></div>';
+  }
+
+  // ④ 账号选号优先序（urgency_rank 实际生效顺序）
+  const ranked=(S.data.accounts||[])
+    .filter(a=>a.urgency!=null)
+    .sort((x,y)=>(x.urgency||0)-(y.urgency||0));
+  h+='<section><div class="card"><h2>账号选号优先序'
+    +'<span class="faint" style="font-weight:400;font-size:12px"> · 请求时按此顺序挑凭据，先烧快过期的</span></h2>';
+  if(!ranked.length){
+    h+='<div class="empty">还没有可排序的账号（需要有余额接口的平台）。点右上角「重新拉取」。</div>';
+  }else{
+    h+='<table><thead><tr><th class="right">#</th><th>平台</th><th>账号</th>'
+      +'<th class="right">紧迫度</th><th class="right">剩余</th></tr></thead><tbody>'
+      +ranked.map((a,i)=>'<tr>'
+        +'<td class="right faint">'+(i+1)+'</td>'
+        +'<td>'+esc(a.platform)+'</td>'
+        +'<td>'+esc(a.name||'')+'</td>'
+        +'<td class="right">'+urgencyCell(a)+'</td>'
+        +'<td class="right">'+nfmt(a.urgency_remain)+'</td></tr>').join('')
+      +'</tbody></table>';
+  }
+  h+='</div></section>';
+
+  // ⑤ 明细
+  const list=CR_ALL?rows:rows.filter(r=>Number(r.remain||0)>0);
+  const shown=list.slice(0,50);
+  h+='<section><div class="card"><h2>资源包明细'
+    +'<span class="faint" style="font-weight:400;font-size:12px"> · '
+    +'显示 '+shown.length+' / '+list.length+'</span></h2>';
+  if(!list.length){
+    h+='<div class="empty">没有'+(CR_ALL?'':'还有余额的')+'资源包。'
+      +(CR_ALL?'':'<button class="btn sm gh" onclick="CR_ALL=true;loadCredits()">显示全部</button>')+'</div>';
+  }else{
+    h+='<div class="scroll"><table><thead><tr>'
+      +'<th>平台</th><th>资源包</th><th class="right">剩余</th>'
+      +'<th class="right">到期</th><th>来源</th></tr></thead><tbody>'
+      +shown.map(r=>'<tr>'
+        +'<td>'+esc(r.platform)+'</td>'
+        +'<td>'+esc(r.name)+'</td>'
+        +'<td class="right">'+nfmt(r.remain)+'</td>'
+        +'<td class="right '+crDayCls(r.days_left)+'">'+crDayTxt(r.days_left)+'</td>'
+        +'<td class="faint">'+esc(r.expire_src||'—')+'</td></tr>').join('')
+      +'</tbody></table></div>';
+    if(list.length>shown.length){
+      h+='<div class="faint" style="margin-top:8px;font-size:11.5px">'
+        +'只显示前 50 行（共 '+list.length+' 行）</div>';
+    }
+  }
+  h+='</div></section>';
+  return h;
+}
+
+const VIEWS={
+  overview:viewOverview,
+  sources: viewSources,
+  accounts:viewAccount,
+  credits: viewCredits,
+  models:  viewModels,
+  route:   viewRoute,
+  usage:   viewUsage,
+  growth:  viewGrowth,
+  settings:viewSettings,
+  about:   viewAbout,
+};
+
+function viewAbout(){
+  const ver=(S.data.overview&&S.data.overview.version)||'';
+  return `
+  <div class="about">
+    <div class="about-hero">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <span class="ah-logo">◈</span>
+        <div style="min-width:0">
+          <h1>AI 资源网关面板</h1>
+          <div class="ah-sub">免费 AI 额度 → 本地 OpenAI 兼容端点（/v1）的统一聚合面板</div>
+          <div style="margin-top:10px"><span class="version-pill">当前版本 v${esc(ver)} · Rust 全量重写</span></div>
+        </div>
+      </div>
+    </div>
+
+    <section><div class="card glass">
+      <h2>项目更新</h2>
+      <p class="muted" style="font-size:12.5px;margin-top:-4px">从 v0.1 路由与数据源，到 v0.3 面板原生 + 安装模式，一步步把「免费额度」做成开箱即用的本地工具。</p>
+      <ul class="timeline">
+        <li><b>v0.3.x · 本次更新</b>
+          <span>新增「独立 EXE 安装模式」（<code>--install/--uninstall/--purge</code>，一键装到 %LOCALAPPDATA% + 开始菜单/桌面快捷方式 + 开机自启）；新增「数据备份与恢复」（设置→数据备份）；新增本「关于」页。</span></li>
+        <li><b>v0.3.0 · 面板原生</b>
+          <span>彻底移除 Go EXE（WorkBuddy Gateway），所有登录/倍率/签到/对话/用量/通知均为面板原生实现；单 EXE 自洽，无外部网关依赖。</span></li>
+        <li><b>v0.2.x · 积分与号池</b>
+          <span>积分到期快照 + 紧迫度排序（先烧快过期的）；S3 号池治理（并发租约 / 冷却 / WAF 拉黑 / 半开探测）。</span></li>
+        <li><b>v0.1.x · 路由与数据源</b>
+          <span>模型→上游熔断/EWMA/亲和路由；单一数据源 <code>catalog_bundled.json</code>（由 Python 一手模块导出，零手写）。</span></li>
+      </ul>
+    </div></section>
+
+    <section><div class="card glass">
+      <h2>公告</h2>
+      <div class="note">
+        <p>① <b>数据源唯一</b>：平台/模型清单只来自 <code>catalog_bundled.json</code>，由 <code>gen_catalog.py</code> 从一手模块导出，不手工维护，避免口径漂移。</p>
+        <p>② <b>免费车道</b>：开箱即走 Pollinations 免密钥车道；填入自有上游 Key 才透传。</p>
+        <p>③ <b>安装与数据</b>：安装后数据落在 <code>%LOCALAPPDATA%\\aigw-panel-rs\\data</code>，重装/升级不丢；建议定期用「设置→数据备份」留档。</p>
+        <p>④ <b>平台展示</b>：WorkBuddy / CodeBuddy 的国内站与国际站均作为独立账号行展示，不合并。</p>
+      </div>
+    </div></section>
+
+    <section><div class="card glass">
+      <h2>安全与隐私</h2>
+      <table class="tbl"><tbody>
+        <tr><td>本地优先</td><td>面板是纯本地程序，所有请求从你的机器发出；不内置任何遥测、不上报任何使用数据。</td></tr>
+        <tr><td>凭据存储</td><td>账号/Key 仅存于本机 <code>data/</code> 目录（如 <code>accounts.json</code>），页面只显示掩码指纹，后台才读取明文。</td></tr>
+        <tr><td>网络出口</td><td>仅在你需要时走代理（可设直连/绕过大陆/全局）；默认不拦截任何本地地址以外的流量。</td></tr>
+        <tr><td>备份文件</td><td>备份含明文凭据，请自行保管；恢复后建议确认文件权限，勿上传到公共位置。</td></tr>
+      </tbody></table>
+    </div></section>
+
+    <section><div class="card glass">
+      <h2>免责声明</h2>
+      <div class="note warn">
+        <p>① 本项目与任何 AI 服务商（OpenAI / Anthropic / 智谱 / 豆包 / WorkBuddy / CodeBuddy 等）<b>无任何隶属或合作关系</b>，仅为本地聚合与调用工具。</p>
+        <p>② 所接入的免费额度 / 公益中转站由第三方提供，可能限流、掺水、跑路或随时变更；<b>请勿上传隐私、勿绑主账号、勿大额充值</b>。</p>
+        <p>③ 多数平台额度有有效期（30/90 天），请开启「用完即停」避免超额扣费；使用风险由使用者自行承担。</p>
+        <p>④ 本项目按「现状」提供，作者不对因使用造成的任何直接或间接损失负责。</p>
+      </div>
+    </div></section>
+  </div>`;
+}
+
+const LOADERS={
+  overview:loadOverview,
+  sources: loadSources,
+  accounts:loadAccount,
+  credits: loadCredits,
+  models:  loadModels,
+  route:   loadRoute,
+  usage:   loadUsage,
+  growth:  loadGrowth,
+  settings:loadSettings,
+};
 
 function loadExtra(){
   const f=LOADERS[S.v];
@@ -5028,6 +5528,20 @@ async function submitLobsterCode(){
   }
 }
 
+/* 侧栏「积分到期」角标：只在真有 7 天内到期的积分时才出现。
+ * 参考框架的做法 —— 角标是"待处理"信号，不是装饰，平时必须不显示。 */
+async function updateCreditsBadge(){
+  const el=document.getElementById('navCreditsBadge');
+  if(!el)return;
+  try{
+    const c=await api('api/credits');
+    S.data.credits=c;
+    const n=Number(c.at_risk||0);
+    if(n>0){ el.textContent=nfmt(n); el.style.display=''; }
+    else el.style.display='none';
+  }catch(e){ el.style.display='none'; }
+}
+
 window.addEventListener('DOMContentLoaded',()=>{
   // 主题（先应用，避免闪白）
   let th='light';
@@ -5036,21 +5550,25 @@ window.addEventListener('DOMContentLoaded',()=>{
   applyTheme(th);
   dtBindOnce();
 
+  // ★ 2026-10-16：默认着陆改成「总览」（对齐参考框架的概览首页）；
+  //   带 hash 且命中 9 个一级面板之一则直达（老的 #route/#settings 依然可用）。
   const h=(location.hash||'').replace('#','');
   refresh().then(()=>{
     // 预取签到中心依赖的站点列表
     api('api/sites').then(r=>{S.data.sites=r.sites||[];S.data.catalogSites=r.catalog||[];});
-    // 默认着陆（无 hash）也要拉数据；带 hash 且是合法视图则直达
-    const target=TITLES[h]?h:'sources';
-    const b=$(`.navbtn[data-v="${target}"]`);
-    if(b)b.classList.add('on');
+    const target=PANELS.some(p=>p.k===h)?h:'overview';
     switchView(target);
+    updateCreditsBadge();
   });
   // 后台轮询总览
   setInterval(()=>{
     if(document.hidden)return;
     api('api/overview').then(o=>{S.data.overview=o;$('#stl').textContent=
       '面板原生模式 · 账号池 '+(S.data.accounts||[]).length+' 个'+
-      ' · 面板已运行 '+dur(o.uptime);}).catch(()=>{});
+      ' · 面板已运行 '+dur(o.uptime);
+      if(o&&o.version){ const sf=document.getElementById('sideFoot'); if(sf) sf.textContent='v'+o.version; }
+    }).catch(()=>{});
+    // 积分到期角标（后端 60s 内走缓存，这里最多每 60s 真打一次上游）
+    updateCreditsBadge();
   },15000);
 });

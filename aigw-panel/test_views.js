@@ -12,9 +12,9 @@ const HTML = String.raw`<!DOCTYPE html>`;  // 占位，保持文件可独立阅�
 
 const mk = () => ({
   addEventListener() {},
-  querySelector() { return { textContent: '', innerHTML: '' }; },
+  querySelector() { return { textContent: '', innerHTML: '', value: '', style: { display: '' }, classList: { add() {}, remove() {}, contains() { return false; } }, remove() {}, closest() { return null; }, setAttribute() {}, getAttribute() { return null; } }; },
   querySelectorAll() { return []; },
-  createElement() { return { classList: { add() {}, remove() {} }, remove() {}, style: {} }; },
+  createElement() { return { textContent: '', innerHTML: '', value: '', style: { display: '' }, classList: { add() {}, remove() {}, contains() { return false; } }, remove() {}, closest() { return null; }, setAttribute() {}, getAttribute() { return null; } }; },
   body: { appendChild() {} },
   hidden: false,
 });

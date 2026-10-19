@@ -234,8 +234,7 @@ fn save_conv(secret: &str, cid: &str) {
 pub async fn chat(messages: &[Value], secret: &str, model: &str, timeout: u64) -> Result<Value, (i64, String)> {
     let url = format!("{}?{}", API, url_params(secret));
     let body = body_of(messages, model, secret).to_string().into_bytes();
-    let client = reqwest::Client::new();
-    let mut req = client.post(&url).timeout(std::time::Duration::from_secs(timeout));
+    let mut req = super::out_client(false, timeout, false).post(&url);
     for (k, v) in headers(secret) {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -298,8 +297,8 @@ pub async fn chat_stream(
 
     let url = format!("{}?{}", API, url_params(secret));
     let body = body_of(messages, model, secret).to_string().into_bytes();
-    let client = reqwest::Client::new();
-    let mut req = client.post(&url).timeout(std::time::Duration::from_secs(timeout));
+    let _ = timeout; // 流式：不设总时长（S3 四项分设）
+    let mut req = super::out_client(true, 0, false).post(&url);
     for (k, v) in headers(secret) {
         req = req.header(k.as_str(), v.as_str());
     }

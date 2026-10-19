@@ -8,6 +8,10 @@ use std::sync::Mutex;
 pub struct UsageRecorder {
     inner: Mutex<Vec<Value>>,
     loaded: Mutex<bool>,
+    /// S5：SQLite 存储（打不开时 available()==false，自动降级回 JSON 全量写）
+    db: crate::server::db::Db,
+    /// 自上次裁剪以来的插入数（攒够一批才裁剪，避免每条都跑 DELETE）
+    since_prune: std::sync::atomic::AtomicUsize,
 }
 
 const CAP_EVENTS: usize = 5000;
@@ -18,6 +22,8 @@ impl UsageRecorder {
         UsageRecorder {
             inner: Mutex::new(Vec::new()),
             loaded: Mutex::new(false),
+            db: crate::server::db::Db::open(),
+            since_prune: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -26,8 +32,17 @@ impl UsageRecorder {
         if *l {
             return;
         }
-        let v = crate::server::store::load("usage_events");
-        let ev = v.get("events").and_then(|e| e.as_array()).cloned().unwrap_or_default();
+        // S5：优先读 SQLite（启动时已把 JSON 里更新的事件合并进来）；
+        //       DB 不可用才回退读 JSON。
+        let ev = if self.db.available() {
+            self.db.usage_load()
+        } else {
+            crate::server::store::load("usage_events")
+                .get("events")
+                .and_then(|e| e.as_array())
+                .cloned()
+                .unwrap_or_default()
+        };
         *self.inner.lock().unwrap() = ev;
         *l = true;
     }
@@ -40,7 +55,7 @@ impl UsageRecorder {
         self.ensure_loaded();
         let mut ev = self.inner.lock().unwrap();
         let now = SystemNanos() as f64 / 1e9;
-        ev.push(json!({
+        let row = json!({
             "ts": now,
             "platform": platform,
             "model": model,
@@ -49,14 +64,28 @@ impl UsageRecorder {
             "ms": ms,
             "ok": ok,
             "upstream": upstream,
-        }));
+        });
+        ev.push(row.clone());
         let cutoff = now - CAP_DAYS;
         ev.retain(|x| x.get("ts").and_then(|v| v.as_f64()).unwrap_or(0.0) >= cutoff);
         let len = ev.len();
         if len > CAP_EVENTS {
             ev.drain(..len - CAP_EVENTS);
         }
-        self.flush(&ev);
+        // ★ S5：落库方式按 DB 可用性二选一
+        if self.db.available() {
+            // 单条 INSERT —— 不再每次请求全量重写 750KB 的 JSON
+            self.db.usage_insert(&row);
+            let n = self
+                .since_prune
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n >= 500 {
+                self.since_prune.store(0, std::sync::atomic::Ordering::Relaxed);
+                self.db.usage_prune(now - CAP_DAYS, CAP_EVENTS as i64);
+            }
+        } else {
+            self.flush(&ev);
+        }
     }
 
     /// 聚合（对齐 api_usage：totals/days[-14]/today/rows/recent）。

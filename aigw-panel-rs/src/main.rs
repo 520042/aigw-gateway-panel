@@ -48,6 +48,26 @@ struct Cli {
     /// 禁止启动后自动打开浏览器（默认对齐 Python 版：1.5s 后自动开面板）
     #[arg(long)]
     no_open: bool,
+
+    /// 后台托盘模式：启动面板+托盘但不自动开浏览器（开机自启项写入的就是这个）
+    #[arg(long)]
+    tray: bool,
+
+    /// 不启动系统托盘图标
+    #[arg(long)]
+    no_tray: bool,
+
+    /// 自检安装：复制 exe+静态资源到 %LOCALAPPDATA%\aigw-panel-rs\，建快捷方式+自启，结束后启动面板
+    #[arg(long)]
+    install: bool,
+
+    /// 卸载：删除快捷方式+自启（保留数据目录）
+    #[arg(long)]
+    uninstall: bool,
+
+    /// 彻底卸载：卸载并删除数据目录
+    #[arg(long)]
+    purge: bool,
 }
 
 /// 打开默认浏览器访问面板（对齐 Python `_open_browser`：cmd /c start 最稳，
@@ -58,6 +78,18 @@ fn open_browser(url: &str) {
 
 #[tokio::main]
 async fn main() {
+    // ── CLI 解析（最早；安装/卸载/清理早于一切，不建数据目录、不初始化日志）──
+    let cli = Cli::parse();
+    if cli.install {
+        std::process::exit(aigw_panel::install::run_install());
+    }
+    if cli.uninstall {
+        std::process::exit(aigw_panel::install::run_uninstall());
+    }
+    if cli.purge {
+        std::process::exit(aigw_panel::install::run_purge());
+    }
+
     // ── 结构化日志 ─────────────────────────────────────────────
     // GUI 子系统（windows_subsystem）下没有 stdout：日志落到 data/panel.log
     //（追加，10MB 轮转），同时保留 stdout（console feature / 手动 --console 时可见）。
@@ -91,8 +123,6 @@ async fn main() {
         .with_ansi(false)
         .init();
     tracing::info!("日志文件：{}", log_path.display());
-
-    let cli = Cli::parse();
 
     // ── 配置装配（CLI > env > settings.json > default） ──────────
     let mut settings: Settings = match &cli.config {
@@ -171,6 +201,8 @@ async fn main() {
             started: std::time::Instant::now(),
             login,
             usage,
+            credits_cache: RwLock::new(None),
+            pool: std::sync::Arc::new(aigw_panel::server::pool::Pool::new()),
         }),
     };
 
@@ -204,11 +236,20 @@ async fn main() {
     tracing::info!(url = %format!("http://{}:{}/", bind_host, port), "面板地址");
     tracing::info!("免费车道: Pollinations(gpt-oss-20b) + 上游透传；逐平台登录/原生中继按 relay_spec 接入中");
 
+    // ── 后台自动签到调度器（APP 平台按配置时间自动跑，幂等 + 失败重试）──
+    aigw_panel::server::autocheckin::spawn_scheduler(state.clone());
+
+    // ── 系统托盘（右键：打开面板 / 开机自启动 / 退出）──
+    let panel_url = format!("http://{}:{}/", bind_host, port);
+    if !cli.no_tray && !aigw_panel::tray::start(&panel_url) {
+        tracing::warn!("系统托盘未启动（--no-tray 或平台不支持），关闭面板请用任务管理器");
+    }
+
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
 
-    // ── 自动开浏览器（对齐 Python 版：启动 1.5s 后打开面板） ─────
-    if !cli.no_open && std::env::var("AIGW_NO_OPEN").is_err() {
+    // ── 自动开浏览器（对齐 Python 版：启动 1.5s 后打开面板；--tray 模式不弹） ─────
+    if !cli.no_open && !cli.tray && std::env::var("AIGW_NO_OPEN").is_err() {
         let url = format!("http://{}:{}/", bind_host, port);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(1500));

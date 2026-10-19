@@ -5,6 +5,9 @@
 //!   （必须带 Origin+Referer+CLI UA，否则 APISIX 拦）→ data.state/authUrl；
 //!   用户在授权页登录 → GET /v2/plugin/auth/token?state= → data.accessToken。
 //! - **MiniMax Code**：OAuth2 设备码 PKCE S256（client_id=mcode-public）。
+//! - **Kimi Code（sub-kimi / sub-kimi-ai）**：RFC 8628 设备码流
+//!   （一手来源：CLIProxyAPI v6 internal/auth/kimi，client_id=17e5f671-…-c098；
+//!   国内站 OAuth host=auth.kimi.com，国际站=auth.kimi.ai；带 X-Msh-* 头）。
 //! - **其余 cookie 型平台**：跳转登录（返回 login_url，用户浏览器打开），
 //!   登录后手动粘贴 Cookie/凭据落账号池（v2 不做扫码/受控浏览器收割）。
 //! token 拿到即 add_account 持久化（v2 data/accounts.json）。
@@ -16,6 +19,12 @@ use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 
 const CLI_UA: &str = "CLI/2.63.2 CodeBuddy/2.63.2";
+
+/// Kimi Code OAuth（CLIProxyAPI v6 一手来源）。
+const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+const KIMI_OAUTH_COM: &str = "https://auth.kimi.com";
+const KIMI_OAUTH_AI: &str = "https://auth.kimi.ai";
+const KIMI_MSH_VERSION: &str = "v6.10.9";
 
 #[derive(Debug, Clone)]
 struct Session {
@@ -123,6 +132,23 @@ impl LoginEngine {
                     sess.message = format!("设备码申请失败：{e}");
                 }
             }
+        } else if let Some(oauth_host) = kimi_oauth_host(platform) {
+            // Kimi Code 设备码（RFC 8628）：sub-kimi 国内站 / sub-kimi-ai 国际站
+            match kimi_start(&client.http, oauth_host).await {
+                Ok((device_code, user_code, verify_url)) => {
+                    sess.state = format!("kimi:{device_code}");
+                    sess.login_url = verify_url.clone();
+                    sess.user_code = user_code.clone();
+                    sess.message = format!(
+                        "Kimi 设备码：打开验证页（{}）输入 {} 完成授权，面板自动拿到 token 入库。",
+                        verify_url, user_code
+                    );
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Kimi 设备码申请失败：{e}（可回退手动粘贴 token）");
+                }
+            }
         } else if let Some(spec) = specs.iter().find(|s| s.id == platform && !s.login_url.is_empty()) {
             // 跳转登录：用户自己浏览器打开登录页，登录后手动粘贴 Cookie/凭据入库。
             sess.login_url = spec.login_url.clone();
@@ -178,6 +204,12 @@ impl LoginEngine {
                 Err("设备码会话不完整".to_string())
             } else {
                 minimax_poll(&client.http, parts[1], parts[2]).await
+            }
+        } else if sess.state.starts_with("kimi:") {
+            let device_code = sess.state.trim_start_matches("kimi:").to_string();
+            match kimi_oauth_host(&sess.platform) {
+                Some(host) => kimi_poll(&client.http, host, &device_code).await,
+                None => Err("Kimi 平台映射缺失".to_string()),
             }
         } else {
             Err("跳转登录会话：请粘贴 Cookie/凭据后走 save 动作入库（不自动轮询）".to_string())
@@ -363,6 +395,129 @@ async fn minimax_poll(http: &reqwest::Client, device_code: &str, verifier: &str)
             return Err("等待授权中（登录完成后自动入库）".into());
         }
         return Err(format!("oauth 错误：{err}"));
+    }
+    let tok = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if tok.is_empty() {
+        return Err("响应无 access_token".into());
+    }
+    Ok(tok)
+}
+
+// ══════════════════════════════════════════════════════════════
+// Kimi Code 设备码（RFC 8628，CLIProxyAPI v6 一手来源）
+// ══════════════════════════════════════════════════════════════
+
+/// 按平台解析 Kimi OAuth host：sub-kimi（国内）→ auth.kimi.com；sub-kimi-ai（国际）→ auth.kimi.ai。
+fn kimi_oauth_host(platform: &str) -> Option<&'static str> {
+    match platform {
+        "sub-kimi" => Some(KIMI_OAUTH_COM),
+        "sub-kimi-ai" => Some(KIMI_OAUTH_AI),
+        _ => None,
+    }
+}
+
+/// 生成 X-Msh-Device-Id（随机 32 hex；无 uuid crate，用 rand）。
+fn kimi_device_id() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// X-Msh-* 公共头（CLIProxyAPI 兼容）。
+fn kimi_headers(device_id: &str) -> Vec<(&'static str, String)> {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "aigw".into());
+    let model = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
+    vec![
+        ("X-Msh-Platform", "CLIProxyAPI".into()),
+        ("X-Msh-Version", KIMI_MSH_VERSION.into()),
+        ("X-Msh-Device-Name", host),
+        ("X-Msh-Device-Model", model),
+        ("X-Msh-Device-Id", device_id.to_string()),
+    ]
+}
+
+/// 发起 Kimi 设备码流程 → (device_code, user_code, verification_uri)。
+async fn kimi_start(
+    http: &reqwest::Client,
+    oauth_host: &str,
+) -> Result<(String, String, String), String> {
+    let device_id = kimi_device_id();
+    let mut rb = http
+        .post(format!("{oauth_host}/api/oauth/device_authorization"))
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("client_id={KIMI_CLIENT_ID}"));
+    for (k, v) in kimi_headers(&device_id) {
+        rb = rb.header(k, v);
+    }
+    let resp = rb.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {status}：{}", v.to_string().chars().take(150).collect::<String>()));
+    }
+    let device_code = v
+        .get("device_code")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let user_code = v
+        .get("user_code")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let verify = v
+        .get("verification_uri_complete")
+        .or_else(|| v.get("verification_uri"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if device_code.is_empty() || user_code.is_empty() {
+        return Err(format!(
+            "响应缺 device_code/user_code：{}",
+            v.to_string().chars().take(200).collect::<String>()
+        ));
+    }
+    Ok((device_code, user_code, verify))
+}
+
+/// Kimi token 轮询（authorization_pending → 继续等待）。
+async fn kimi_poll(
+    http: &reqwest::Client,
+    oauth_host: &str,
+    device_code: &str,
+) -> Result<String, String> {
+    let device_id = kimi_device_id();
+    let mut rb = http
+        .post(format!("{oauth_host}/api/oauth/token"))
+        .timeout(std::time::Duration::from_secs(15))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "client_id={KIMI_CLIENT_ID}&device_code={device_code}&grant_type=urn:ietf:params:oauth:grant-type:device_code"
+        ));
+    for (k, v) in kimi_headers(&device_id) {
+        rb = rb.header(k, v);
+    }
+    let resp = rb.send().await.map_err(|e| e.to_string())?;
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    if let Some(err) = v.get("error").and_then(|x| x.as_str()) {
+        match err {
+            "authorization_pending" | "slow_down" => {
+                return Err("等待授权中（打开验证页输入用户码，面板自动入库）".into())
+            }
+            "expired_token" => return Err("设备码已过期，请重新发起登录".into()),
+            "access_denied" => return Err("授权被拒绝".into()),
+            _ => return Err(format!("oauth 错误：{err}")),
+        }
     }
     let tok = v
         .get("access_token")

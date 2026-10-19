@@ -33,12 +33,10 @@ use std::sync::Mutex;
 
 // 与 Python 一致：出站直连、不吃系统代理（避免把聊天凭据泄露给代理），
 // 且开启证书校验（native-tls/Schannel 默认即校验）。
+// 网页反代全是非流式（post_collect 收完整正文再转 SSE），
+// 但超时仍按四项分设给：总时长 + 建连 + 读取各自独立。
 fn http_client(timeout: u64) -> reqwest::Client {
-    reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(timeout))
-        .build()
-        .expect("reqwest client 构建失败")
+    super::out_client(false, timeout, true)
 }
 
 const UA_CHROME: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \

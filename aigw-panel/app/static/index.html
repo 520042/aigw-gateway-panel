@@ -5,39 +5,48 @@
 <base href="/">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI 资源整合网关面板</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20261016f">
 </head>
 <body>
 <div class="wrap">
-  <aside class="side">
-    <div class="brand"><span class="logo">◈</span>AI 资源网关</div>
-
-    <div class="navgrp">主流程</div>
-    <button class="navbtn on" data-v="sources"><span class="ic">◈</span>接入源</button>
-    <button class="navbtn" data-v="route"><span class="ic">⇄</span>路由与模型</button>
-
-    <div class="navgrp navgrp-toggle" id="advToggle" onclick="toggleAdv()" title="展开 / 收起高级功能">
-      <span>高级</span><span class="caret">▸</span>
-    </div>
-    <div class="navsub" id="advSub">
-      <button class="navbtn" data-v="settings"><span class="ic">⚙</span>设置与日志</button>
-      <button class="navbtn" data-v="growth"><span class="ic">✦</span>任务中心</button>
+  <aside class="side" id="side">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <span class="brand-txt">AI 资源网关</span>
+      <button class="nav-close" onclick="closeDrawer()" title="收起菜单">✕</button>
     </div>
 
-    <div style="flex:1"></div>
-    <div class="faint" style="padding:8px 10px;font-size:11px;line-height:1.6">
+    <!-- ★ 一级导航：10 项平铺（2026-10-16 重构，关于页为第 10 项）。
+         旧结构是「2 主流程 + 高级折叠组」，一级只有 4 项、层级最深 5 层、易显杂乱。
+         现在每个一级入口只对应一个职责，层级固定为：侧栏 → 面板 → 面板内分段。 -->
+    <nav class="nav">
+      <button class="navbtn on" data-v="overview"><span class="ic">◎</span><span class="tx">总览</span></button>
+      <button class="navbtn" data-v="sources"><span class="ic">◈</span><span class="tx">接入源</span></button>
+      <button class="navbtn" data-v="accounts"><span class="ic">☰</span><span class="tx">账号</span></button>
+      <button class="navbtn" data-v="credits"><span class="ic">⏳</span><span class="tx">积分到期</span><span class="badge" id="navCreditsBadge" style="display:none">0</span></button>
+      <button class="navbtn" data-v="models"><span class="ic">⌗</span><span class="tx">模型</span></button>
+      <button class="navbtn" data-v="route"><span class="ic">⇄</span><span class="tx">路由</span></button>
+      <button class="navbtn" data-v="usage"><span class="ic">◔</span><span class="tx">用量</span></button>
+      <button class="navbtn" data-v="growth"><span class="ic">✦</span><span class="tx">任务中心</span></button>
+      <button class="navbtn" data-v="settings"><span class="ic">⚙</span><span class="tx">设置与日志</span></button>
+      <button class="navbtn" data-v="about"><span class="ic">ℹ</span><span class="tx">关于</span></button>
+    </nav>
+
+    <div class="side-foot">
       统一网关<br>
       <span id="sideFoot">v1.0.0</span>
     </div>
   </aside>
+  <div class="side-mask" id="sideMask" onclick="closeDrawer()"></div>
 
   <main class="main">
     <div class="hd">
-      <div>
-        <h1 id="ttl">接入源</h1>
+      <button class="nav-toggle" onclick="openDrawer()" title="菜单">☰</button>
+      <div class="hd-ttl">
+        <h1 id="ttl">总览</h1>
         <div class="sub" id="stl">正在加载…</div>
       </div>
-      <div class="flex">
+      <div class="hd-act">
         <button class="btn" onclick="copyEndpoint()">复制网关地址</button>
         <button class="btn pri" id="hdOneClick" onclick="oneClick()"
           title="所有已接入的源跑一轮签到与任务">⚡ 一键执行</button>
@@ -50,6 +59,6 @@
   </main>
 </div>
 <script src="vendor/qrcode.min.js"></script>
-<script src="app.js"></script>
+<script src="app.js?v=20261016f"></script>
 </body>
 </html>

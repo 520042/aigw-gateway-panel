@@ -24,6 +24,8 @@ fn mk_state() -> aigw_panel::server::state::AppState {
             started: std::time::Instant::now(),
             login: Arc::new(aigw_panel::server::login::LoginManager::new(tmp)),
             usage: Arc::new(aigw_panel::server::usage::UsageRecorder::new()),
+            credits_cache: RwLock::new(None),
+            pool: Arc::new(aigw_panel::server::pool::Pool::new()),
         }),
     }
 }
@@ -161,4 +163,108 @@ async fn http_cross_origin_denied() {
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), axum::http::StatusCode::FORBIDDEN);
+}
+
+// ---- 2026-10-16 契约回归：拆分 routers/ 与新增 credits 后，接口形状必须锁住 ----
+
+#[tokio::test]
+async fn http_route_models_are_object_not_array() {
+    // ★ 回归点：曾经 `/api/route` 把 Vec<String> 塞进 "models"，
+    //   前端 Object.keys() 拿到下标 "0"/"1"，整列 undefined。
+    let state = mk_state();
+    let app = aigw_panel::server::build_app(state);
+    let req = axum::http::Request::builder()
+        .uri("/api/route")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    let body = http_body_util::BodyExt::collect(res.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let m = &v["models"];
+    assert!(m.is_object(), "models 必须是对象映射，实际 {:?}", m);
+    for (name, d) in m.as_object().unwrap() {
+        assert!(
+            name == "auto" || name == "free",
+            "默认只应有 auto/free 两个模型，实际 {}",
+            name
+        );
+        assert!(d["healthy"].is_number(), "{} 缺 healthy", name);
+        assert!(d["total"].is_number(), "{} 缺 total", name);
+        let tg = d["targets"].as_array().expect("targets 必须是数组");
+        assert!(!tg.is_empty(), "{} 应有候选上游", name);
+        for t in tg {
+            assert!(t["name"].is_string(), "targets[].name 缺失");
+            assert!(t["endpoint"].is_string(), "targets[].endpoint 缺失");
+            assert!(t["state"].is_string(), "targets[].state 缺失");
+        }
+    }
+}
+
+#[tokio::test]
+async fn http_credits_snapshot_shape() {
+    // ★ 回归点：list_accounts() 会把 secret 脱敏，/api/credits 必须用 raw_rows，
+    //   否则打上游全 401、包数为 0。空账号池时也必须是完整形状（前端不炸）。
+    let state = mk_state();
+    let app = aigw_panel::server::build_app(state);
+    let req = axum::http::Request::builder()
+        .uri("/api/credits")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    let body = http_body_util::BodyExt::collect(res.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["ok"], serde_json::Value::Bool(true));
+    for k in [
+        "scanned",
+        "packages",
+        "live",
+        "depleted",
+        "total_remain",
+        "at_risk",
+        "dist",
+        "by_platform",
+        "rows",
+    ] {
+        assert!(v.get(k).is_some(), "credits 快照缺字段 {}", k);
+    }
+    assert!(v["dist"].as_array().unwrap().len() == 8, "dist 应有 8 个分桶");
+    assert!(v["rows"].is_array());
+}
+
+#[tokio::test]
+async fn http_nine_panels_routes_exist() {
+    // 侧栏 9 个一级入口对应的后端接口都必须可达（防止拆分时漏搬某个 handler）。
+    let state = mk_state();
+    let app = aigw_panel::server::build_app(state);
+    for uri in [
+        "/api/overview",
+        "/api/models?action=grouped",
+        "/api/models?action=sources",
+        "/api/accounts",
+        "/api/credits",
+        "/api/route",
+        "/api/usage?range=all",
+        "/api/growth",
+        "/api/settings",
+        "/api/login?action=platforms",
+        "/api/autocheckin?action=status",
+        "/api/catalog",
+        "/api/checkins",
+        "/api/logs",
+        "/api/sites",
+        "/api/custom_apis?action=list",
+    ] {
+        let req = axum::http::Request::builder()
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK, "{} 应 200", uri);
+    }
 }

@@ -1,0 +1,37 @@
+﻿git : "C:/Users/liang.zhao/.workbuddy/binaries/PortableGit/versions/1.2.0/mingw64/bin/git-credential-manager.exe" store
+: line 1: C:/Users/liang.zhao/.workbuddy/binaries/PortableGit/versions/1.2.0/mingw64/bin/git-credential-manager.exe: No
+ such file or directory
+所在位置 行:1 字符: 52
++ ... ang.zhao\Downloads\网关项目"; git push origin main *> pushlog.txt; Get-Co ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ("C:/Users/liang...le or directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+remote: error: GH013: Repository rule violations found for refs/heads/main.        
+remote: 
+remote: - GITHUB PUSH PROTECTION        
+remote:   —————————————————————————————————————————        
+remote:     Resolve the following violations before pushing again        
+remote: 
+remote:     - Push cannot contain secrets        
+remote: 
+remote:             
+remote:      (?) Learn how to resolve a blocked push        
+remote:      https://docs.github.com/code-security/secret-scanning/working-with-secret-scanning-and-push-protection/wor
+king-with-push-protection-from-the-command-line#resolving-a-blocked-push        
+remote:             
+remote:             
+remote:       —— GitHub OAuth Access Token —————————————————————————        
+remote:        locations:        
+remote:          - commit: 189bd339a9110152070af2574054cfc3f8d4ec3a        
+remote:            path: .workbuddy/memory/2026-10-19.md:76        
+remote:             
+remote:        (?) To push, remove secret from commit(s) or follow this URL to allow the secret.        
+remote:        https://github.com/520042/aigw-gateway-panel/security/secret-scanning/unblock-secret/3KtjvCKEs3XczRi7A4H
+ExeAMpNX        
+remote:             
+remote: 
+remote: 
+To https://github.com/520042/aigw-gateway-panel.git
+ ! [remote rejected] main -> main (push declined due to repository rule violations)
+error: failed to push some refs to 'https://github.com/520042/aigw-gateway-panel.git'

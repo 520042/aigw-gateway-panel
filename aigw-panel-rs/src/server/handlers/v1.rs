@@ -59,6 +59,110 @@ fn wb_upgrade(plan: &relay::Plan, secrets: &[String], body: &mut Vec<u8>) -> Opt
     })
 }
 
+/// 号池治理中继宏（2026-10-16，S3；治理规则见 `server/pool.rs`）。
+///
+/// **为什么是宏而不是 `async fn` + 闭包**：闭包返回的 future 借用入参 `&str`，
+/// 而 `FnMut(&str) -> Fut` 要求 `Fut` 与入参生命周期无关（Rust 没有 lending
+/// closure）—— 写成函数必然撞 E0515。宏把循环体原地展开，借用检查自然通过。
+///
+/// 行为：按「紧迫度 → RecentPick → last_used」排序，跳过冷却 / WAF 拉黑 /
+/// 在途已满的账号；成功即返回并 `mark_ok`；失败 `mark_fail`（401/403 账号级
+/// 拉黑）后换下一个（单次请求最多 3 个）；全部被挡住 → 半开最紧迫的一个。
+/// ★ 只读内存，绝不打上游余额/探测接口。
+///
+/// 用法（`$call` = 用 `$sec` 打一次上游的 async 表达式）：
+/// ```ignore
+/// match pooled_attempt!(&st, pid, dm, |sec| relay::web::chat(pid, &msgs, sec, dm, 180)) {
+///     Ok(payload) => { /* 成功 */ }
+///     Err((status, msg)) => { /* 失败 */ }
+/// }
+/// ```
+macro_rules! pooled_attempt {
+    ($st:expr, $pid:expr, $model:expr, |$sec:ident| $call:expr) => {{
+        let __st: &crate::server::state::AppState = $st;
+        let __pid: &str = $pid;
+        let __model: &str = $model;
+        let mut __ranked = __st.inner.login.accounts_ranked(__pid);
+        if __ranked.is_empty() {
+            Err((503i64, format!("{} 需要先在「接入源」登录获取凭据", __pid)))
+        } else {
+            // RecentPick：紧迫度相同（都没到期数据）时让给窗口内被选次数少的
+            __ranked.sort_by(|a, b| {
+                a.urgency
+                    .cmp(&b.urgency)
+                    .then_with(|| {
+                        __st
+                            .inner
+                            .pool
+                            .recent_count(__pid, &a.id, __model)
+                            .cmp(&__st.inner.pool.recent_count(__pid, &b.id, __model))
+                    })
+                    .then_with(|| a.last_used.cmp(&b.last_used))
+            });
+            let mut __last: Option<(i64, String)> = None;
+            let mut __tried = 0usize;
+            let mut __out: Result<_, (i64, String)> = Err((503i64, String::new()));
+            for __a in &__ranked {
+                if __tried >= 3 {
+                    break;
+                }
+                if __st.inner.pool.is_blocked(__pid, &__a.id, __model) {
+                    continue;
+                }
+                let Some(__lease) = __st.inner.pool.try_acquire(__pid, &__a.id, __model) else {
+                    continue; // 在途已满，换号
+                };
+                __tried += 1;
+                __st.inner.pool.note_pick(__pid, &__a.id, __model);
+                let $sec: &str = __a.secret.as_str();
+                let __r = $call.await;
+                drop(__lease);
+                match __r {
+                    Ok(v) => {
+                        __st.inner.pool.mark_ok(&__a.id, __model);
+                        __out = Ok(v);
+                        break;
+                    }
+                    Err((status, msg)) => {
+                        __st.inner.pool.mark_fail(__pid, &__a.id, __model, status as u16);
+                        __last = Some((status, msg));
+                    }
+                }
+            }
+            // 半开：全部被治理状态挡住时，放行最紧迫的一个（不清冷却，靠本次结果说话）
+            if __tried == 0 {
+                let __a = &__ranked[0];
+                if let Some(__lease) = __st.inner.pool.try_acquire(__pid, &__a.id, __model) {
+                    __st.inner.pool.note_pick(__pid, &__a.id, __model);
+                    let $sec: &str = __a.secret.as_str();
+                    let __r = $call.await;
+                    drop(__lease);
+                    match __r {
+                        Ok(v) => {
+                            __st.inner.pool.mark_ok(&__a.id, __model);
+                            __out = Ok(v);
+                        }
+                        Err((status, msg)) => {
+                            __st.inner.pool.mark_fail(__pid, &__a.id, __model, status as u16);
+                            __last = Some((status, msg));
+                        }
+                    }
+                }
+            }
+            if __out.is_ok() {
+                __out
+            } else {
+                Err(__last.unwrap_or((
+                    503i64,
+                    format!("{} 的可用账号都在冷却或在途，请稍后重试", __pid),
+                )))
+            }
+        }
+    }};
+}
+
+
+
 #[tracing::instrument(skip(st, headers, body))]
 pub async fn chat_completions(
     State(st): State<AppState>,
@@ -80,8 +184,8 @@ pub async fn chat_completions(
 
     // 网页版反代（智谱清言 / Trae 国内 / DeepSeek 网页）：私有协议，凭据取账号池
     if let relay::Plan::Web { pid, model: dm } = &plan {
-        let secrets = st.inner.login.secrets_for(pid);
-        if secrets.is_empty() {
+        // ★ 号池治理：紧迫度优先 + 冷却/在途过滤 + 失败自动换号（见 pooled_attempt 宏）
+        if st.inner.login.accounts_ranked(pid).is_empty() {
             st.inner.usage.record(pid, &model, 0, 0, 0, false, pid);
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -102,7 +206,7 @@ pub async fn chat_completions(
             .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
             .unwrap_or(false);
         if stream {
-            match relay::web::chat(pid, &msgs, &secrets[0], dm, 180).await {
+            match pooled_attempt!(&st, pid, dm, |sec| relay::web::chat(pid, &msgs, sec, dm, 180)) {
                 Ok(payload) => {
                     st.inner.usage.record(pid, &model, 0, 0, t0.elapsed().as_millis() as i64, true, pid);
                     return relay::web::envelope_to_sse(&payload);
@@ -121,7 +225,7 @@ pub async fn chat_completions(
                 }
             }
         }
-        match relay::web::chat(pid, &msgs, &secrets[0], dm, 180).await {
+        match pooled_attempt!(&st, pid, dm, |sec| relay::web::chat(pid, &msgs, sec, dm, 180)) {
             Ok(payload) => {
                 let tin = payload.pointer("/usage/prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                 let tout = payload.pointer("/usage/completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -143,10 +247,10 @@ pub async fn chat_completions(
         }
     }
 
-    // 原生中继（凭据轮询账号池）：豆包 samantha + 通用 OpenAI 透明（小浣熊/Trae）
+    // 原生中继（号池治理选号）：豆包 samantha + 元宝 + Loomy + 通用 OpenAI 透明（小浣熊/Trae）
     if let relay::Plan::Native { pid, model: dm } = &plan {
-        let secrets = st.inner.login.secrets_for(pid);
-        if secrets.is_empty() {
+        // ★ 号池治理：紧迫度优先 + 冷却/在途过滤 + 失败自动换号（见 pooled_attempt 宏）
+        if st.inner.login.accounts_ranked(pid).is_empty() {
             st.inner.usage.record(pid, &model, 0, 0, 0, false, pid);
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -158,19 +262,19 @@ pub async fn chat_completions(
             )
                 .into_response();
         }
-        // 共享：请求是否流式（豆包 / 元宝 / 通用透明中继都用到）
+        // 共享：请求是否流式 + messages（豆包 / 元宝 / Loomy / 通用都用到）
         let stream = serde_json::from_slice::<Value>(&body)
             .ok()
             .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
             .unwrap_or(false);
+        let msgs: Vec<Value> = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("messages").and_then(|m| m.as_array()).cloned())
+            .unwrap_or_default();
         // 豆包走专用 samantha 协议
         if pid == "apk-doubao" {
-            let msgs: Vec<Value> = serde_json::from_slice::<Value>(&body)
-                .ok()
-                .and_then(|v| v.get("messages").and_then(|m| m.as_array()).cloned())
-                .unwrap_or_default();
             if stream {
-                match relay::doubao::chat_stream(&msgs, &secrets[0], dm, 180).await {
+                match pooled_attempt!(&st, pid, dm, |sec| relay::doubao::chat_stream(&msgs, sec, dm, 180)) {
                     Ok(resp) => {
                         st.inner.usage.record(pid, &model, 0, 0, t0.elapsed().as_millis() as i64, true, pid);
                         return resp;
@@ -189,7 +293,7 @@ pub async fn chat_completions(
                     }
                 }
             }
-            match relay::doubao::chat(&msgs, &secrets[0], dm, 180).await {
+            match pooled_attempt!(&st, pid, dm, |sec| relay::doubao::chat(&msgs, sec, dm, 180)) {
                 Ok(payload) => {
                     let tin = payload.pointer("/usage/prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                     let tout = payload.pointer("/usage/completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -212,12 +316,8 @@ pub async fn chat_completions(
         }
         // 元宝多步私有协议原生中继（建会话 + 流式对话）
         if pid == "apk-yuanbao" {
-            let msgs: Vec<Value> = serde_json::from_slice::<Value>(&body)
-                .ok()
-                .and_then(|v| v.get("messages").and_then(|m| m.as_array()).cloned())
-                .unwrap_or_default();
             if stream {
-                match relay::yuanbao::chat_stream(&msgs, &secrets[0], dm, 180).await {
+                match pooled_attempt!(&st, pid, dm, |sec| relay::yuanbao::chat_stream(&msgs, sec, dm, 180)) {
                     Ok(resp) => {
                         st.inner.usage.record(pid, &model, 0, 0, t0.elapsed().as_millis() as i64, true, pid);
                         return resp;
@@ -236,7 +336,7 @@ pub async fn chat_completions(
                     }
                 }
             }
-            match relay::yuanbao::chat(&msgs, &secrets[0], dm, 180).await {
+            match pooled_attempt!(&st, pid, dm, |sec| relay::yuanbao::chat(&msgs, sec, dm, 180)) {
                 Ok(payload) => {
                     let tin = payload.pointer("/usage/prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                     let tout = payload.pointer("/usage/completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -249,6 +349,49 @@ pub async fn chat_completions(
                         StatusCode::BAD_GATEWAY,
                         Json(json!({
                             "error": {"message": format!("元宝原生中继失败（HTTP {}）：{}", status, msg),
+                                      "type": "aigw_native_relay_error"},
+                            "pid": pid,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        // Loomy（讯飞）模型网关：OpenAI 兼容 + 每请求 traceparent 头
+        if pid == "apk-loomy" {
+            if stream {
+                match pooled_attempt!(&st, pid, dm, |sec| relay::loomy::chat_stream(&msgs, sec, dm, 180)) {
+                    Ok(resp) => {
+                        st.inner.usage.record(pid, &model, 0, 0, t0.elapsed().as_millis() as i64, true, pid);
+                        return resp;
+                    }
+                    Err((status, msg)) => {
+                        st.inner.usage.record(pid, &model, 0, 0, t0.elapsed().as_millis() as i64, false, pid);
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({
+                                "error": {"message": format!("Loomy 原生中继失败（HTTP {}）：{}", status, msg),
+                                          "type": "aigw_native_relay_error"},
+                                "pid": pid,
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            match pooled_attempt!(&st, pid, dm, |sec| relay::loomy::chat(&msgs, sec, dm, 180)) {
+                Ok(payload) => {
+                    let tin = payload.pointer("/usage/prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let tout = payload.pointer("/usage/completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+                    st.inner.usage.record(pid, &model, tin, tout, t0.elapsed().as_millis() as i64, true, pid);
+                    return (StatusCode::OK, Json(payload)).into_response();
+                }
+                Err((status, msg)) => {
+                    st.inner.usage.record(pid, &model, 0, 0, t0.elapsed().as_millis() as i64, false, pid);
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({
+                            "error": {"message": format!("Loomy 原生中继失败（HTTP {}）：{}", status, msg),
                                       "type": "aigw_native_relay_error"},
                             "pid": pid,
                         })),
@@ -278,12 +421,8 @@ pub async fn chat_completions(
                     .into_response();
             }
         };
-        let stream = serde_json::from_slice::<Value>(&body)
-            .ok()
-            .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
-            .unwrap_or(false);
         if stream {
-            match relay::native::chat_stream(&spec, &body, &secrets[0], 180).await {
+            match pooled_attempt!(&st, pid, dm, |sec| relay::native::chat_stream(&spec, &body, sec, 180)) {
                 Ok(resp) => {
                     st.inner.usage.record(pid, &model, 0, 0, t0.elapsed().as_millis() as i64, true, pid);
                     return resp;
@@ -302,7 +441,7 @@ pub async fn chat_completions(
                 }
             }
         }
-        match relay::native::chat(&spec, &body, &secrets[0], 180).await {
+        match pooled_attempt!(&st, pid, dm, |sec| relay::native::chat(&spec, &body, sec, 180)) {
             Ok(payload) => {
                 let tin = payload.pointer("/usage/prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                 let tout = payload.pointer("/usage/completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -325,46 +464,85 @@ pub async fn chat_completions(
     }
 
     // wb-gateway 族：有凭据 → 升级为 Bearer 直打
-    let mut body_v = body.to_vec();
+    // copilot 系上游**只收流式**（实测非流式 400/11101）——客户端要非流式时强制转流式，
+    // 执行后把 SSE 聚合回完整的 chat.completion（对齐 Python native_relay stream_only）。
+    let body_v = body.to_vec();
     let orig_stream = serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
         .unwrap_or(false);
-    let plan = if let Some(up) = wb_upgrade(&plan, &st.inner.login.secrets_for(upstream.trim()), &mut body_v) {
-        up
-    } else {
-        plan
+    let wb_pid = match &plan {
+        relay::Plan::NeedLogin { pid, .. } if pid.starts_with("wb-gateway") => Some(pid.clone()),
+        _ => None,
     };
-
-    // copilot 系上游**只收流式**（实测非流式 400/11101）——客户端要非流式时强制转流式，
-    // 执行后把 SSE 聚合回完整的 chat.completion（对齐 Python native_relay stream_only）。
-    let wb_force_stream = matches!(plan, relay::Plan::Upstream { .. }) && !orig_stream;
-    if wb_force_stream {
-        if let Ok(mut v) = serde_json::from_slice::<Value>(&body_v) {
-            if let Value::Object(ref mut o) = v {
-                o.insert("stream".to_string(), Value::Bool(true));
+    // ★ 号池治理失败转移：最多试 3 个账号；冷却/在途的跳过；
+    //   全在冷却 → 半开最紧迫的那个（对齐 router half-open，避免一次风控永久锁死）。
+    let mut wb_ok: Option<Response> = None;
+    let mut wb_err: Option<Response> = None;
+    if let Some(pid) = wb_pid {
+        let mut cands = st.inner.login.accounts_ranked(&pid);
+        cands.truncate(3);
+        if cands.iter().any(|a| !st.inner.pool.is_blocked(&pid, &a.id, &model)) {
+            cands.retain(|a| !st.inner.pool.is_blocked(&pid, &a.id, &model));
+        } else {
+            cands.truncate(1);
+        }
+        for a in cands {
+            if st.inner.pool.try_acquire(&pid, &a.id, &model).is_none() {
+                continue; // 在途已满，换号
             }
-            if let Ok(b) = serde_json::to_vec(&v) {
-                body_v = b;
+            st.inner.pool.note_pick(&pid, &a.id, &model);
+            let mut b2 = body_v.clone();
+            if !orig_stream {
+                if let Ok(mut v) = serde_json::from_slice::<Value>(&b2) {
+                    if let Value::Object(ref mut o) = v {
+                        o.insert("stream".to_string(), Value::Bool(true));
+                    }
+                    if let Ok(b) = serde_json::to_vec(&v) {
+                        b2 = b;
+                    }
+                }
             }
+            let Some(up) = wb_upgrade(&plan, std::slice::from_ref(&a.secret), &mut b2) else {
+                continue;
+            };
+            let r = relay::execute(up, b2, &headers, &cfg).await;
+            let code = r.status().as_u16();
+            if (200..300).contains(&code) {
+                st.inner.pool.mark_ok(&a.id, &model);
+                wb_ok = Some(r);
+                break;
+            }
+            st.inner.pool.mark_fail(&pid, &a.id, &model, code);
+            wb_err = Some(r);
         }
     }
-
-    let resp = relay::execute(plan, body_v, &headers, &cfg).await;
-    if wb_force_stream {
+    // 全失败 → 原样回最后一次失败（状态码非 2xx，record_usage 会如实记账）
+    if wb_ok.is_none() {
+        if let Some(r) = wb_err {
+            return record_usage(&st, &model, &upstream, t0, r).await;
+        }
+    }
+    let (resp, wb_streamed) = match wb_ok {
+        // 成功：非流式请求是被强制转成流式的，需要聚合回完整 completion
+        Some(r) => (r, !orig_stream),
+        // 没有 wb 凭据 / 非 wb 计划 → 原样执行（NeedLogin 会返 503 引导登录）
+        None => (relay::execute(plan, body_v, &headers, &cfg).await, false),
+    };
+    if wb_streamed {
         match relay::aggregate_sse_response(resp).await {
             Ok(payload) => {
                 let tin = payload.pointer("/usage/prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                 let tout = payload.pointer("/usage/completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                 st.inner
                     .usage
-                    .record(&model, &model, tin, tout, t0.elapsed().as_millis() as i64, true, &model);
+                    .record(&upstream, &model, tin, tout, t0.elapsed().as_millis() as i64, true, &upstream);
                 return (StatusCode::OK, Json(payload)).into_response();
             }
             Err((status, msg)) => {
                 st.inner
                     .usage
-                    .record(&model, &model, 0, 0, t0.elapsed().as_millis() as i64, false, &model);
+                    .record(&upstream, &model, 0, 0, t0.elapsed().as_millis() as i64, false, &upstream);
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({
@@ -376,6 +554,7 @@ pub async fn chat_completions(
             }
         }
     }
+
     record_usage(&st, &model, &upstream, t0, resp).await
 }
 
@@ -479,8 +658,8 @@ pub async fn messages(
 
     // 2) 同一 relay 引擎（豆包原生模型走原生中继）
     if crate::relay::doubao::is_doubao_model(&model) {
-        let secrets = st.inner.login.secrets_for("apk-doubao");
-        if secrets.is_empty() {
+        // ★ 号池治理：紧迫度优先 + 冷却/在途过滤 + 失败自动换号
+        if st.inner.login.accounts_ranked("apk-doubao").is_empty() {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({"type":"error","error":{"type":"invalid_request_error",
@@ -489,7 +668,9 @@ pub async fn messages(
                 .into_response();
         }
         if stream {
-            match relay::doubao::chat_stream(&msgs, &secrets[0], &model, 180).await {
+            match pooled_attempt!(&st, "apk-doubao", &model, |sec| {
+                relay::doubao::chat_stream(&msgs, sec, &model, 180)
+            }) {
                 Ok(r) => return anthropic_sse(r).await,
                 Err((s, m)) => {
                     return (StatusCode::BAD_GATEWAY, Json(json!({"type":"error",
@@ -498,7 +679,9 @@ pub async fn messages(
                 }
             }
         }
-        return match relay::doubao::chat(&msgs, &secrets[0], &model, 180).await {
+        return match pooled_attempt!(&st, "apk-doubao", &model, |sec| {
+            relay::doubao::chat(&msgs, sec, &model, 180)
+        }) {
             Ok(payload) => {
                 let text = payload.pointer("/choices/0/message/content").and_then(|c| c.as_str()).unwrap_or("").to_string();
                 let tin = payload.pointer("/usage/prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -520,13 +703,14 @@ pub async fn messages(
                 .into_response(),
         };
     }
+
     let plan = st.inner.registry.resolve(&model, &openai_bytes, &headers, &cfg);
     // 通用 OpenAI 原生中继（小浣熊/Trae）也支持 Anthropic 入站：openai_bytes 已是
     // 标准 OpenAI 形状，直接走 native::chat / chat_stream。
     if let relay::Plan::Native { pid, .. } = &plan {
         if matches!(pid.as_str(), "apk-raccoon" | "apk-trae") {
-            let secrets = st.inner.login.secrets_for(pid);
-            if secrets.is_empty() {
+            // ★ 号池治理：紧迫度优先 + 冷却/在途过滤 + 失败自动换号
+            if st.inner.login.accounts_ranked(pid).is_empty() {
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(json!({"type":"error","error":{"type":"invalid_request_error",
@@ -541,7 +725,9 @@ pub async fn messages(
                 .and_then(|v| relay::native::NativeSpec::from_catalog(&v));
             if let Some(spec) = spec {
                 if stream {
-                    match relay::native::chat_stream(&spec, &openai_bytes, &secrets[0], 180).await {
+                    match pooled_attempt!(&st, pid, &model, |sec| {
+                        relay::native::chat_stream(&spec, &openai_bytes, sec, 180)
+                    }) {
                         Ok(r) => return anthropic_sse(r).await,
                         Err((s, m)) => {
                             return (StatusCode::BAD_GATEWAY, Json(json!({"type":"error",
@@ -550,7 +736,9 @@ pub async fn messages(
                         }
                     }
                 }
-                return match relay::native::chat(&spec, &openai_bytes, &secrets[0], 180).await {
+                return match pooled_attempt!(&st, pid, &model, |sec| {
+                    relay::native::chat(&spec, &openai_bytes, sec, 180)
+                }) {
                     Ok(payload) => {
                         let text = payload.pointer("/choices/0/message/content").and_then(|c| c.as_str()).unwrap_or("").to_string();
                         let tin = payload.pointer("/usage/prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -572,6 +760,7 @@ pub async fn messages(
             }
         }
     }
+
     let resp = relay::execute(plan, openai_bytes, &headers, &cfg).await;
     let ms = t0.elapsed().as_millis() as i64;
     let status = resp.status();

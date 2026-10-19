@@ -5,7 +5,7 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261019c';
+const BUILD = 'v20261019d';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -218,10 +218,11 @@ function srcCard(p) {
   </div>`;
 }
 
-// 登录抽屉：跳转登录 + 手动粘贴凭据（不扫码）
+// 登录抽屉：跳转登录 + 手动粘贴凭据（不扫码）；wb/minimax/kimi 走设备码
 function srcDrawer(p) {
   const isWb = p.id === 'wb-gateway' || p.id === 'wb-gateway-intl' || p.id === 'codebuddy';
   const isMinimax = p.id === 'minimax';
+  const isKimi = p.id === 'sub-kimi' || p.id === 'sub-kimi-ai';
   const isKey = p.auth === 'api_key';
   const isAnon = p.auth === 'anon';
   const loginUrl = p.login_url || '';
@@ -229,8 +230,8 @@ function srcDrawer(p) {
   if (isAnon) {
     body = `<div class="note">免密平台：无需凭据，直接可用。点下面的「测试连通」看是否可转发。</div>
       <button class="btn pri" onclick="testAnon('${esc(p.id)}')">测试连通</button>`;
-  } else if (isWb || isMinimax) {
-    body = `<div class="note">${isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : 'MiniMax 设备码：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
+  } else if (isWb || isMinimax || isKimi) {
+    body = `<div class="note">${isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : isMinimax ? 'MiniMax 设备码：' : 'Kimi Code 设备码（RFC 8628）：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
       <div class="row">
         <button class="btn pri" onclick="authStart('${esc(p.id)}')">开始登录</button>
         <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>

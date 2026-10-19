@@ -4,6 +4,7 @@ use crate::core::config::Settings;
 use crate::platforms::Registry;
 use crate::router::Router;
 use crate::server::login::LoginManager;
+use crate::server::pool::Pool;
 use crate::server::usage::UsageRecorder;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -26,4 +27,8 @@ pub struct AppStateInner {
     pub login: Arc<LoginManager>,
     /// 用量记录
     pub usage: Arc<UsageRecorder>,
+    /// 积分到期快照缓存（/api/credits，60s 内复用）
+    pub credits_cache: RwLock<Option<serde_json::Value>>,
+    /// 号池治理（S3）：InFlight 租约 / (账号,模型)冷却 / WafIpGate / RecentPick
+    pub pool: Arc<Pool>,
 }

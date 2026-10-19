@@ -1,0 +1,91 @@
+name: tests
+
+# main 上的推送由这里覆盖；其它分支与所有 PR（含 fork）走 pull_request。
+# 两个事件都列而不加分支过滤会让同一次更新跑两遍——两套完整矩阵。
+on:
+  push:
+    branches: [main]
+    # v* tag 跑完整矩阵 + 下方 tag == 源码版本断言：
+    # 发版不可能带着与代码不一致的 tag 出门。
+    tags: ["v*"]
+  pull_request:
+
+# 同一分支的第二次推送让第一次变得没有意义：取消它而不是付两套矩阵的钱。
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    # run_all.py 已给每个套件设了界；这是兜底——套件之外挂住的作业
+    # 不能占着 runner 挂满默认的六小时。
+    timeout-minutes: 20
+    env:
+      # 与 run_all.py 自己的 reconfigure 双保险：作业里每个 Python 进程
+      # 无论 runner locale 是什么都按 utf-8 读写。
+      PYTHONUTF8: "1"
+    strategy:
+      # 一个版本红了不能取消其它版本：矩阵的意义就是看清哪个解释器挂了。
+      fail-fast: false
+      matrix:
+        include:
+          # README 宣称 Python 3.9+，最低版本在 Linux 上锻炼；
+          # 主力平台（Windows）跑当前版本。
+          - os: ubuntu-latest
+            python: "3.9"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run every suite
+        # 套件是独立进程（自己的临时目录、空闲端口），所以可以重叠；
+        # 每个套件的完整输出保留在磁盘上，就在它的汇总行旁边。
+        run: python tests/run_all.py --jobs 4 --logs suite-logs
+      - name: Check the suites left the checkout clean
+        # 通过的运行必须证明自己待在临时目录里：往 checkout 写东西的套件
+        # 不会红，只有后来发现散落文件的人才会注意到。
+        if: success()
+        run: python scripts/check_clean_checkout.py
+      - name: Keep what the failing suites printed
+        # 控制台只显示每个套件一行 + 第一个错误；这里保住红运行需要的
+        # 每个套件的完整输出。
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-logs-${{ matrix.os }}-${{ matrix.python }}
+          path: suite-logs
+          if-no-files-found: ignore
+
+  # 发版纪律：v* tag 必须等于 qoder_proxy.py 里的 VERSION，
+  # 两处源码版本串必须互相一致。
+  version-assert:
+    name: tag matches source version
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert tag == source version
+        run: |
+          set -euo pipefail
+          SRC=$(grep -oP 'VERSION = "\K[^"]+' qoder_proxy.py | head -n1 || true)
+          echo "source: version=$SRC tag=$GITHUB_REF_NAME"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ -z "$SRC" ]; then
+            echo "::error::could not read VERSION from qoder_proxy.py"
+            exit 1
+          fi
+          if [ "$TAG" != "$SRC" ]; then
+            echo "::error::tag $GITHUB_REF_NAME != source version $SRC (bump the source first)"
+            exit 1
+          fi
+          echo "version assert OK: $TAG"

@@ -142,17 +142,34 @@ pub fn unauthorized_response() -> Response {
 
 /// 中间件：校验 origin 与 /api 鉴权。
 pub async fn auth_mw(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    // ★ 2026-10-15：加一行请求日志（method/path/status）——排查「前端拿不到后端数据」
+    //   时，能直接看到浏览器到底打了哪些接口、返回什么码。只记 /api 与 /v1，避免刷屏。
+    let log_method = req.method().clone();
+    let log_path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_default();
     let (token, need) = {
         let s = st.inner.settings.read().await;
         let token_set = !s.panel_token.is_empty();
         let loopback = local_hosts().contains(&s.bind_host.as_str());
         (s.panel_token.clone(), token_set || !loopback)
     };
-    if !origin_ok(req.headers()) {
-        return cross_origin_response();
+    let resp = if !origin_ok(req.headers()) {
+        cross_origin_response()
+    } else if need && !extract_token(req.headers(), &token) {
+        unauthorized_response()
+    } else {
+        next.run(req).await
+    };
+    if log_path.starts_with("/api/") || log_path.starts_with("/v1/") {
+        tracing::info!(
+            method = %log_method,
+            path = %log_path,
+            status = resp.status().as_u16(),
+            "req"
+        );
     }
-    if need && !extract_token(req.headers(), &token) {
-        return unauthorized_response();
-    }
-    next.run(req).await
+    resp
 }

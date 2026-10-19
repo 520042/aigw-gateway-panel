@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LobsterAI2API 控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>🦞 LobsterAI2API 控制台</h1>
+    <div class="sub">多账号 API 桥接 · 本地运行</div>
+  </header>
+
+  <section class="card">
+    <div class="row between">
+      <h2>代理服务</h2>
+      <span id="proxy-badge" class="badge off">未运行</span>
+    </div>
+    <div class="kv"><span>地址</span><code id="proxy-addr">-</code></div>
+    <div class="kv"><span>API Key</span><code id="proxy-key">-</code></div>
+    <div class="kv"><span>Base URL</span><code id="proxy-base">-</code></div>
+    <div class="actions">
+      <button id="btn-start" class="primary">启动代理</button>
+      <button id="btn-stop" class="ghost">停止代理</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row between">
+      <h2>添加账号</h2>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="oauth">扫码登录</button>
+      <button class="tab" data-tab="client">客户端导入</button>
+      <button class="tab" data-tab="cookie">导入 Cookie</button>
+    </div>
+
+    <div id="tab-oauth" class="tabpane">
+      <p class="hint">点击下方按钮后会自动打开登录页面，用你的有道账号登录即可。</p>
+      <button id="btn-login" class="primary">开始登录</button>
+      <div id="login-box" class="hidden">
+        <div class="kv"><span>登录链接</span><a id="login-url" href="#" target="_blank">打开登录页</a></div>
+        <div class="kv"><span>状态</span><span id="login-status">等待登录...</span></div>
+      </div>
+    </div>
+
+    <div id="tab-client" class="tabpane hidden">
+      <p class="hint">若本机已安装并登录了 <b>LobsterAI 桌面客户端</b>，可一键读取其本地 token 导入，无需重新登录。</p>
+      <button id="btn-client-import" class="primary">从客户端导入</button>
+      <div id="client-msg" class="msg"></div>
+      <div id="client-results" class="results"></div>
+    </div>
+
+    <div id="tab-cookie" class="tabpane hidden">
+      <p class="hint">从浏览器开发者工具复制 LobsterAI 网站的 Cookie（或含 token 的 JSON），粘贴到下方。会自动识别 accessToken / refreshToken。<br><b>批量导入：一行一条</b>（每行一段 Cookie 或一个 JSON）。</p>
+      <textarea id="cookie-input" rows="7" placeholder="每行一条，例如：&#10;accessToken=eyJ...; refreshToken=eyJ...&#10;accessToken=eyJ...; refreshToken=eyJ..."></textarea>
+      <button id="btn-import" class="primary">导入</button>
+      <div id="cookie-msg" class="msg"></div>
+      <div id="cookie-results" class="results"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row between">
+      <h2>账号池</h2>
+      <button id="btn-refresh" class="ghost">刷新额度</button>
+    </div>
+    <div id="accounts" class="accounts"></div>
+  </section>
+
+  <section class="card collapsible">
+    <div class="row between" id="cfg-toggle">
+      <h2>高级设置</h2>
+      <span class="chev">▸</span>
+    </div>
+    <div id="cfg-body" class="hidden">
+      <div class="field"><label>本地 API Key</label><input id="cfg-key" type="text"></div>
+      <div class="field"><label>代理监听地址</label><input id="cfg-listen" type="text"></div>
+      <div class="field"><label>上游 API 地址</label><input id="cfg-upstream" type="text"></div>
+      <div class="field"><label>登录门户</label><input id="cfg-portal" type="text"></div>
+      <button id="btn-save-cfg" class="primary">保存设置</button>
+      <div id="cfg-msg" class="msg"></div>
+    </div>
+  </section>
+
+  <footer>关闭本页不影响后台运行 · 关闭程序窗口即可退出</footer>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

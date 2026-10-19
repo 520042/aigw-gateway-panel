@@ -197,10 +197,8 @@ pub async fn chat(
     timeout: u64,
 ) -> Result<Value, (i64, String)> {
     let (url, _conv_id, hdrs, body) = open_stream(secret, messages, model, timeout).await?;
-    let client = reqwest::Client::new();
-    let mut req = client
+    let mut req = super::out_client(false, timeout, false)
         .post(&url)
-        .timeout(std::time::Duration::from_secs(timeout))
         .header("content-type", "application/json");
     for (k, v) in &hdrs {
         req = req.header(k.as_str(), v.as_str());
@@ -279,10 +277,9 @@ pub async fn chat_stream(
     timeout: u64,
 ) -> Result<Response, (i64, String)> {
     let (url, _conv_id, hdrs, body) = open_stream(secret, messages, model, timeout).await?;
-    let client = reqwest::Client::new();
-    let mut req = client
+    let _ = timeout; // 流式：不设总时长（S3 四项分设）
+    let mut req = super::out_client(true, 0, false)
         .post(&url)
-        .timeout(std::time::Duration::from_secs(timeout))
         .header("content-type", "application/json");
     for (k, v) in &hdrs {
         req = req.header(k.as_str(), v.as_str());
@@ -390,4 +387,67 @@ fn nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
+}
+
+const MODEL_LIST_URL: &str = "https://yuanbao.tencent.com/api/agent/model/list";
+
+/// ★ 2026-10-15（用户要求）：用账号 Cookie **实时**拉元宝模型清单。
+/// 实测响应：`{"modelList":[{"chatModelId":"hunyuan_gpt_175B_0404","modelName":"Hunyuan","modelDesc":"…"}]}`
+/// 拉不到就返回空 Vec（调用方回退到缓存 / 内置清单）。
+pub async fn model_rows(cookie: &str, timeout: u64) -> Vec<Value> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    // ★ 2026-10-15 修正：真实调用是 **POST + {"agentId":"naQivTmsDa"}**
+    //   （用 CDP 抓元宝页面自己的请求实证）。原来按 catalog 的 GET 打，只回 2 个模型，
+    //   漏掉最新的 `hunyuan_omnipotent_hy4`（混元全能版）；POST 后是 3 个。
+    let resp = client
+        .post(MODEL_LIST_URL)
+        .header("Cookie", cookie)
+        .header("User-Agent", UA)
+        .header(
+            "Referer",
+            format!("https://yuanbao.tencent.com/chat/{}", AGENT_ID),
+        )
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Content-Type", "application/json")
+        // ★ 2026-10-15 实测（CDP 抓页面请求 + 逐个头对照）：只有带上这个「实验开关」头，
+        //   服务端才返回完整清单（3 个）；不带就少掉最新的 `hunyuan_omnipotent_hy4`（混元全能版）。
+        .header("X-Exp-Params", "enableNewPcStyle=2")
+        .header("X-AgentID", AGENT_ID)
+        .header("X-Platform", "win")
+        .header("X-Source", "web")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .body(json!({ "agentId": AGENT_ID }).to_string())
+        .send()
+        .await;
+    let Ok(r) = resp else {
+        return Vec::new();
+    };
+    if !r.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(v) = r.json::<Value>().await else {
+        return Vec::new();
+    };
+    let arr = v
+        .get("modelList")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    arr.iter()
+        .filter_map(|m| {
+            let id = m.get("chatModelId").and_then(|x| x.as_str())?;
+            Some(json!({
+                "id": id,
+                "name": m.get("modelName").and_then(|x| x.as_str()).unwrap_or(id),
+                "desc": m.get("modelDesc").and_then(|x| x.as_str()).unwrap_or("元宝模型"),
+                "on": true,
+            }))
+        })
+        .collect()
 }

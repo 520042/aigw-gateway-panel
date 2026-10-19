@@ -1,0 +1,1 @@
+{"ok": true, "platform": "apk-yuanbao", "name": "apk-yuanbao", "models": [{"id": "hunyuan_gpt_175B_0404", "name": "Hunyuan", "key": "hunyuan_gpt_175B_0404", "desc": "全能处理，深度思考", "credits": ""}, {"id": "deep_seek_v3", "name": "DeepSeek", "key": "deep_seek_v3", "desc": "适合深度思考", "credits": ""}], "live": true, "note": "云端实时拉取（2 个）"}

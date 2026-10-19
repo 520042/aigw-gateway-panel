@@ -1,0 +1,1 @@
+{"ok": true, "platform": "web-deepseek", "name": "DeepSeek 网页版（deepseek-free-api 逆向）", "models": [{"id": "deepseek-chat", "name": "DeepSeek Chat", "desc": "DeepSeek 网页版"}, {"id": "deepseek-reasoner", "name": "DeepSeek Reasoner", "desc": "DeepSeek 网页版（R1 深度思考）"}], "live": false, "note": "静态清单（社区逆向端点）；登录后可拉动态清单", "source": "社区项目逆向"}

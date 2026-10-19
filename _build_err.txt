@@ -1,0 +1,67 @@
+﻿cargo :    Compiling aigw-relay v0.1.0 (C:\Users\liang.zhao\Downloads\网关项目\aigw2\crates\aigw-relay)
+所在位置 行:4 字符: 1
++ cargo build --target x86_64-pc-windows-msvc -p aigw-server 2>&1 | Out ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling ai...tes\aigw-relay):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused variable: `total`
+   --> crates\aigw-relay\src\browser_dl.rs:104:9
+    |
+104 |     let total = resp
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_total`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling aigw-server v0.1.0 (C:\Users\liang.zhao\Downloads\网关项目\aigw2\crates\aigw-server)
+error[E0277]: the trait bound `fn(State<AppState>, Json<Value>) -> _ {auth_action}: Handler<_, _>` is not satisfied
+    --> crates\aigw-server\src\lib.rs:105:34
+     |
+ 105 |         .route("/api/auth", post(auth_action))
+     |                             ---- ^^^^^^^^^^^ the trait `Handler<_, _>` is not implemented for fn item `fn(State<
+AppState>, Json<Value>) -> _ {auth_action}`
+     |                             |
+     |                             required by a bound introduced by this call
+     |
+     = note: Consider using `#[axum::debug_handler]` to improve the error message
+help: the following other types implement trait `Handler<T, S>`
+    --> C:\Users\liang.zhao\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\axum-0.7.9\src\routing\method_routing.
+rs:1309:1
+     |
+1309 | / impl<S> Handler<(), S> for MethodRouter<S>
+1310 | | where
+1311 | |     S: Clone + 'static,
+     | |_______________________^ `MethodRouter<S>` implements `Handler<(), S>`
+     |
+    ::: C:\Users\liang.zhao\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\axum-0.7.9\src\handler\mod.rs:303:1
+     |
+ 303 | / impl<H, S, T, L> Handler<T, S> for Layered<L, H, T, S>
+ 304 | | where
+ 305 | |     L: Layer<HandlerService<H, T, S>> + Clone + Send + 'static,
+ 306 | |     H: Handler<T, S>,
+...    |
+ 310 | |     T: 'static,
+ 311 | |     S: 'static,
+     | |_______________^ `Layered<L, H, T, S>` implements `Handler<T, S>`
+note: required by a bound in `post`
+    --> C:\Users\liang.zhao\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\axum-0.7.9\src\routing\method_routing.
+rs:166:16
+     |
+ 166 |             H: Handler<T, S>,
+     |                ^^^^^^^^^^^^^ required by this bound in `post`
+...
+ 443 | top_level_handler_fn!(post, POST);
+     | ---------------------------------
+     | |                     |
+     | |                     required by a bound in this function
+     | in this macro invocation
+     = note: the full name for the type has been written to 'C:/aigw-target\x86_64-pc-windows-msvc\debug\deps\aigw_serv
+er-08b7db60a8587ea4.long-type-13920529396648244906.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `top_level_handler_fn` (in Nightly builds, run with -Z macro-backtrace 
+for more info)
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `aigw-server` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+warning: `aigw-relay` (lib) generated 1 warning (run `cargo fix --lib -p aigw-relay` to apply 1 suggestion)

@@ -7,6 +7,7 @@
 //!
 //! 解析（Plan 生成）由 [`crate::platforms::Registry::resolve`] 负责，本模块只负责「执行」。
 pub mod doubao;
+pub mod loomy;
 pub mod native;
 pub mod web;
 pub mod yuanbao;
@@ -25,6 +26,33 @@ use axum::{
 use futures_util::StreamExt;
 use http::HeaderMap;
 use serde_json::{json, Value};
+
+/// 出站客户端（2026-10-16 S3：超时**四项分设**）。
+///
+/// 原来的实现是一个 `.timeout(N)` 管到底 —— 对流式响应那是**总时长**，
+/// 一个超过 N 秒的长回答会被拦腰砍断（客户端只收到半截 SSE）。现在：
+///
+/// | 项 | 值 | 说明 |
+/// |---|---|---|
+/// | connect | 10s | 建连（`connect_timeout`） |
+/// | 首包 TTFB | 90s | `read_timeout` 在等响应头期间同样生效 |
+/// | 包间 idle | 90s | `read_timeout` 每次成功读取后重置 |
+/// | 总时长 | 非流式 180s / **流式不设** | 长会话可能持续数分钟 |
+///
+/// `no_proxy` 只为网页反代（`web`）开启：那类请求带完整登录 Cookie，
+/// 不能泄露给系统代理；原生中继走默认代理策略（与改动前一致）。
+pub fn out_client(stream: bool, total_s: u64, no_proxy: bool) -> reqwest::Client {
+    let mut b = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(90));
+    if no_proxy {
+        b = b.no_proxy();
+    }
+    if !stream {
+        b = b.timeout(std::time::Duration::from_secs(total_s));
+    }
+    b.build().unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// 执行中继计划，返回（流式或错误）响应。
 pub async fn execute(plan: Plan, mut body: Vec<u8>, headers: &HeaderMap, cfg: &Settings) -> Response {
@@ -104,11 +132,10 @@ pub async fn execute(plan: Plan, mut body: Vec<u8>, headers: &HeaderMap, cfg: &S
         }
     };
 
-    let client = reqwest::Client::new();
-    let mut builder = client
+    // ★ S3：流式语义 —— connect 10s / idle 90s / 不设总时长
+    let mut builder = out_client(true, RELAY_TIMEOUT, false)
         .post(&url)
-        .header(header::CONTENT_TYPE, "application/json")
-        .timeout(std::time::Duration::from_secs(RELAY_TIMEOUT));
+        .header(header::CONTENT_TYPE, "application/json");
     if let Some(a) = auth {
         builder = builder.header(header::AUTHORIZATION, a);
     }

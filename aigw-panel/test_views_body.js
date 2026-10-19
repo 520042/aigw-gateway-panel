@@ -7,16 +7,17 @@ function ck(n, c, extra) {
 }
 
 // ---------------------------------------------------------------- 架构
-// ★ 2026-10-13：删掉「工具与集成」整栏、任务管理并入任务中心 → 4 个视图
-ck('导航 4 项（工具与集成/任务管理已移除）',
-  Object.keys(VIEWS).length === 4 && !('tools' in VIEWS) && !('tasks' in VIEWS),
+// ★ 2026-10-13：删掉「工具与集成」整栏、任务管理并入任务中心 → 9 项平铺
+// ★ 2026-10-16：新增「关于」静态页 → 10 项平铺
+ck('导航 10 项平铺（关于页已加）',
+  Object.keys(VIEWS).length === 10 && !('tools' in VIEWS),
   Object.keys(VIEWS).join(','));
 ck('VIEWS 注册 sources', typeof VIEWS.sources === 'function');
 ck('VIEWS 注册 route', typeof VIEWS.route === 'function');
 ck('VIEWS 注册 settings', typeof VIEWS.settings === 'function');
 ck('VIEWS 注册 growth（任务中心）', typeof VIEWS.growth === 'function');
-ck('LOADERS 与 VIEWS 一一对应',
-  Object.keys(LOADERS).sort().join() === Object.keys(VIEWS).sort().join(),
+ck('每个 LOADER 都有对应 VIEWS（无孤儿 loader；静态页 about 无需 loader）',
+  Object.keys(LOADERS).every(k => k in VIEWS),
   Object.keys(LOADERS).sort().join() + ' vs ' + Object.keys(VIEWS).sort().join());
 ck('TITLES 覆盖全部视图',
   Object.keys(VIEWS).every(v => TITLES[v]),
@@ -132,7 +133,9 @@ S.data.srcDetail=null; SRC_VIEW='card';
 expandSrc('apk-yuanbao'); h = viewSources();
 ck('抽屉有模型清单入口（拉取清单/⟳ 刷新）', h.includes('拉取清单') && h.includes('⟳ 刷新'));
 SRC_EXPAND=null;
-ck('已接入详情给解除接入', h.includes('解除接入'));
+// ★ 2026-10-15：「解除接入」改名为「解绑」并移到「账号」区右侧，详情区不再显示
+ck('已接入详情无旧的「解除接入」按钮',
+  !h.includes('解除接入'));
 openSrc('apk-yuanbao');
 h = viewSources();
 ck('已接入详情不再显示接入按钮（fixture 元宝已登录）',
@@ -149,17 +152,13 @@ closeSrc();
 ck('closeSrc 回到卡片墙', SRC_VIEW === 'card' && S.data.srcDetail === null);
 
 // ---------------------------------------------------------------- 路由
-ROUTE_TAB = 'models';
+// ★ 2026-10-15：路由/模型/用量拆成三个一级侧边栏；路由页不再分 Tab
 h = viewRoute();
-ck('路由页有 3 个 Tab（上游档案已按统一路由要求移除）',
-  h.includes('模型与倍率') && h.includes('自动路由') && h.includes('用量')
-  && !h.includes('上游档案'));
-ck('模型 Tab 是分组总表（gm-group）', h.includes('gm-group') && h.includes('模型总表'));
-ck('模型 Tab 有连接测试按钮', h.includes('gmTest(') || h.includes('连接测试'));
-ck('模型 Tab 不再有倍率覆盖横幅', !h.includes('倍率覆盖'));
-ROUTE_TAB = 'usage'; h = viewRoute();
-ck('用量 Tab 切过去了', !h.includes('模型总表'), h.length + ' 字节');
-ROUTE_TAB = 'models';
+ck('路由页渲染不崩', typeof h === 'string' && h.length > 0, 'len=' + h.length);
+ck('路由页含自动路由说明', h.includes('面板即中转层'));
+ck('路由页有候选上游明细', h.includes('候选上游明细'));
+ck('路由页有号池治理卡', h.includes('号池治理'));
+ck('路由页不再有旧 Tab 名称', !h.includes('模型与倍率') && !h.includes('上游档案'));
 
 // ---------------------------------------------------------------- 工具（2026-10-13 已整栏删除）
 ck('工具页已删除（viewTools 不再存在）', typeof viewTools !== 'function');
@@ -178,18 +177,18 @@ ck('任务中心含新建任务表单', h.includes('tName') && h.includes('tSite
 ck('任务中心不再有「去任务管理」跳转', !h.includes("go('tasks')"));
 
 // ---------------------------------------------------------------- 设置
-SET_TAB = 'main';
+S.tab = S.tab || {}; S.tab.settings = 'main';
 h = viewSettings();
 // ★ 2026-10-13：设置 Tab 收敛为「代理设置 / 日志」两个
 ck('设置页 Tab 化', h.includes('代理设置') && h.includes('日志'));
 ck('设置页已无网关连接字段（sAddr/监听地址 均移除）',
    !h.includes('sAddr') && !h.includes('监听地址'));
 ck('设置页不再有网关 EXE 段落', !h.includes('workbuddy-gateway') && h.includes('CLIProxyAPI'));
-SET_TAB = 'sites'; h = viewSettings();
+S.tab.settings = 'sites'; h = viewSettings();
 ck('设置→资源站点切过去了', h.length > 0);
-SET_TAB = 'logs'; h = viewSettings();
+S.tab.settings = 'logs'; h = viewSettings();
 ck('设置→日志切过去了', h.length > 0);
-SET_TAB = 'main';
+S.tab.settings = 'main';
 
 // ---------------------------------------------------------------- 一键执行
 ONECLICK = {running:false, steps:[], result:null};

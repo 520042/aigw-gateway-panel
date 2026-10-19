@@ -159,10 +159,8 @@ pub async fn chat(
     timeout: u64,
 ) -> Result<Value, (i64, String)> {
     let url = url(spec);
-    let client = reqwest::Client::new();
-    let mut req = client
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(timeout));
+    // 非流式：总时长 timeout（+ connect 10s / read 90s，见 out_client）
+    let mut req = super::out_client(false, timeout, false).post(&url);
     let (ah_k, ah_v) = auth_header(spec, secret);
     req = req
         .header("content-type", "application/json")
@@ -197,10 +195,8 @@ pub async fn chat_stream(
     timeout: u64,
 ) -> Result<Response, (i64, String)> {
     let url = url(spec);
-    let client = reqwest::Client::new();
-    let mut req = client
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(timeout));
+    let _ = timeout; // 流式：不设总时长（S3 四项分设）
+    let mut req = super::out_client(true, 0, false).post(&url);
     let (ah_k, ah_v) = auth_header(spec, secret);
     req = req
         .header("content-type", "application/json")

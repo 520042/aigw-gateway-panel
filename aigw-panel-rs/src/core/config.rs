@@ -36,10 +36,24 @@ impl Default for Settings {
 
 pub fn default_static_dir() -> String {
     if let Ok(exe) = std::env::current_exe() {
+        // ★ 2026-10-15：symlink 启动（桌面快捷方式）时 `current_exe()` 可能是**链接自身**
+        //   的路径，且进程 CWD 不一定等于 exe 目录 —— 只靠 `../../aigw-panel/app/static`
+        //   和相对 "app/static" 都会失配，导致 /app.js 等**全部 404（前端白屏）**。
+        //   这里：① 先 canonicalize 去掉链接；② 再按「便携安装位 exe 同级 app/static」
+        //   →「开发期 target 下」的顺序找。全部转成绝对路径，与 CWD 无关。
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
         if let Some(parent) = exe.parent() {
-            let cand = parent.join("../../aigw-panel/app/static");
-            if cand.exists() {
-                return cand.to_string_lossy().into_owned();
+            let cands = [
+                parent.join("app/static"),                   // 便携安装位：<install>/app/static
+                parent.join("../../aigw-panel/app/static"),  // 开发期：dist 在 target 下
+                parent.join("../app/static"),
+            ];
+            for cand in cands {
+                if cand.is_dir() {
+                    // canonicalize 在 Windows 会带 `\\?\` 扩展前缀；去掉更干净（仅做 fs join，去掉无碍）
+                    let s = cand.to_string_lossy().into_owned();
+                    return s.strip_prefix(r"\\?\").map(|x| x.to_string()).unwrap_or(s);
+                }
             }
         }
     }

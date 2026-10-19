@@ -1,15 +1,24 @@
 //! HTTP 服务层：状态、鉴权中间件、静态资源、handlers、路由装配。
 pub mod auth;
+pub mod autocheckin;
+pub mod balance;
+pub mod cdp;
+pub mod db;
 pub mod checkin;
+pub mod credits;
 pub mod free_lane_models;
 pub mod free_models;
 pub mod handlers;
 pub mod loomy_auth;
+pub mod model_extract;
+pub mod localproxy;
 pub mod login;
 pub mod notify;
+pub mod pool;
 pub mod state;
 pub mod static_files;
 pub mod store;
+pub mod tencent;
 pub mod usage;
 
 use crate::server::state::AppState;
@@ -50,17 +59,26 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/accounts", get(handlers::api::accounts).post(handlers::api::accounts))
         .route("/api/login", get(handlers::api::login).post(handlers::api::login))
         .route("/api/platform", get(handlers::api::platform_actions))
+        .route("/api/tencent", get(handlers::api::tencent).post(handlers::api::tencent))
+        .route("/api/gwextra", get(handlers::api::gwextra).post(handlers::api::gwextra))
+        .route("/api/credentials", get(handlers::api::credentials).post(handlers::api::credentials))
+        .route("/api/catalog", get(handlers::api::catalog))
+        .route("/api/localproxy", get(handlers::api::localproxy).post(handlers::api::localproxy))
         .route("/api/sites", get(handlers::api::sites))
         .route("/api/custom_apis", get(handlers::api::custom_apis).post(handlers::api::custom_apis))
         .route("/api/autocheckin", get(handlers::api::autocheckin).post(handlers::api::autocheckin))
         .route("/api/route", get(handlers::api::route))
         .route("/api/usage", get(handlers::api::usage))
+        .route("/api/credits", get(handlers::api::credits).post(handlers::api::credits))
         .route("/api/growth", get(handlers::api::growth))
         .route("/api/tasks", get(handlers::api::tasks).post(handlers::api::tasks))
         .route("/api/free_models", get(handlers::api::free_models))
         .route("/api/free_lane_models", get(handlers::api::free_lane_models))
         .route("/api/notify", get(handlers::api::notify).post(handlers::api::notify))
         .route("/api/logs", get(handlers::api::logs))
+        .route("/api/data/backup", post(handlers::api::data_backup))
+        .route("/api/data/backups", get(handlers::api::data_backups))
+        .route("/api/data/restore", post(handlers::api::data_restore))
         .route("/auth/callback", get(handlers::callback::auth_callback))
         .route("/v1/models", get(handlers::v1::models))
         .route("/v1/chat/completions", post(handlers::v1::chat_completions))

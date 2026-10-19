@@ -13,6 +13,7 @@
 //! 接入 axum；日志走 [`tracing`]，不再使用 `println!`；启动参数走 [`clap`]。
 pub mod catalog;
 pub mod core;
+pub mod install;
 pub mod platforms;
 pub mod relay;
 pub mod router;

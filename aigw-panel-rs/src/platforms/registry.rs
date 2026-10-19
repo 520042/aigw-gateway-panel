@@ -204,6 +204,17 @@ impl Registry {
                     model: if mid.is_empty() { "deepseek".to_string() } else { mid.to_string() },
                 };
             }
+            // Loomy（讯飞）模型网关原生中继（凭据取账号池 apk-loomy；OpenAI 兼容 + traceparent）
+            if pid == "apk-loomy" {
+                return Plan::Native {
+                    pid: "apk-loomy".to_string(),
+                    model: if mid.is_empty() {
+                        crate::relay::loomy::default_model().to_string()
+                    } else {
+                        mid.to_string()
+                    },
+                };
+            }
             // 网页版反代（智谱清言 / Trae 国内 / DeepSeek 网页）：私有协议，
             // 凭据取账号池 <pid>（对接平台账户里粘贴的 refresh_token / x-ide-token / userToken）。
             if crate::relay::web::is_web_pid(pid) {

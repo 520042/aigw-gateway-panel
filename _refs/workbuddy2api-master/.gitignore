@@ -1,0 +1,112 @@
+# ===== 依赖（不要上传） =====
+.venv/
+venv/
+env/
+node_modules/
+
+# ===== Python 缓存 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+
+# ===== 密钥 / 本地配置（绝不能上传） =====
+.env
+.env.docker
+.env.local
+.env.*.local
+
+# ===== 运行日志 / 运行时产物 =====
+*.log
+logs/
+*.pid
+
+
+# ===== 压缩包备份 =====
+*.zip
+*.tar.gz
+*.rar
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+
+# ===== 本地工作记忆与工具态（不在仓库内） =====
+.workbuddy/
+
+# ===== 本地部署 / SSH 快捷脚本（含服务器 IP 与密码，禁止提交） =====
+# 这些只是本机往线上推的快捷脚本，保留在本地即可，切勿上传。
+ssh_exec.py
+ssh_run.py
+ssh_sync.py
+ssh_probe_backup.py
+sync_auth.py
+sync_auth.bat
+start_admin.bat
+start_converter.bat
+
+# ===== 数据库备份（含真实账号凭据 token，禁止提交） =====
+backup_*.sql
+*.sql.gz
+
+# ===== 测试文件（不提交到仓库；本地可保留用于回归测试） =====
+# 回归测试保留在本地，不纳入发布仓库。
+test_*.py
+tests/
+*_test.py
+test/
+
+# ===== 内部分析文档（不提交） =====
+# docs/ 里是协议逆向取证与排查记录，含**未脱敏的真实手机号、真实 token
+# 片段、以及本地账号池的真实数据**（例：某次实测记录里直接写了手机号）。
+# 这些属于内部资料而非产品代码，一律不上传；需要时本地保留。
+docs/
+
+# ===== 逆向取证 / 本地诊断脚本（不提交） =====
+# 默认忽略 Python 排障脚本；通用构建与用户工具在下方显式保留。
+scripts/*.py
+
+# ===== 强制保留（即便以点开头也要提交） =====
+!.gitignore
+!.env.example
+
+# ===== 本地诊断脚本 / 探针（含真实凭证备份，绝不入库）=====
+_zcode_probe/
+_chrome_profile*/
+
+# Desktop build outputs (never package local credentials or databases)
+.desktop-build/
+build/
+dist/
+desktop/assets/*.ico
+desktop/assets/*.png
+
+!scripts/build_desktop.py
+!scripts/build_android.py
+!scripts/check_runtime.py
+!scripts/export_credential_key.py
+!scripts/asar_grep.py
+!scripts/asar_slice.py
+android/.gradle/
+android/local.properties
+android/**/build/
+*.jks
+*.keystore
+
+
+# Local SQLite databases (runtime data)
+workbuddy_admin.db
+workbuddy_admin.db-shm
+workbuddy_admin.db-wal
+
+# Local credentials file
+登录密码.txt
+
+# Sanitized public implementation notes
+!docs/
+docs/*
+!docs/2api-increment-risk-scheduling.md
+!docs/protocol-reference.md
+!docs/RELEASE_NOTES_*.md

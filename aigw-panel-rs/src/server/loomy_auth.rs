@@ -98,7 +98,7 @@ fn sign_request(method: &str, path: &str, query: &str, body_text: &str) -> (Stri
     (format!("account {}:{}", AK_ID, sig), date, nonce)
 }
 
-fn base64_std(data: &[u8]) -> String {
+pub(crate) fn base64_std(data: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
@@ -161,7 +161,11 @@ async fn account_post(path: &str, param: Value) -> Value {
 
 /// 发送短信验证码 → msgid。
 pub async fn send_sms(phone: &str) -> Result<String, String> {
-    let d = account_post("/login/phone/sendMsgCode", json!({"ccode": "86", "phone": phone, "expire": 300})).await;
+    let (ok, ph) = norm_phone(phone);
+    if !ok {
+        return Err(ph);
+    }
+    let d = account_post("/login/phone/sendMsgCode", json!({"ccode": "86", "phone": ph, "expire": 300})).await;
     let msgid = d.pointer("/data/msgid").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if !msgid.is_empty() {
         return Ok(msgid);
@@ -175,8 +179,12 @@ pub async fn send_sms(phone: &str) -> Result<String, String> {
 
 /// 短信验证码校验 → (session, userid)。
 pub async fn verify_sms(phone: &str, code: &str, msgid: &str) -> Result<(String, String), String> {
+    let (ok, ph) = norm_phone(phone);
+    if !ok {
+        return Err(ph);
+    }
     let d = account_post("/login/phone/checkCode", json!({
-        "ccode": "86", "phone": phone, "mcode": code, "msgid": msgid, "expire": SESSION_EXPIRE
+        "ccode": "86", "phone": ph, "mcode": code, "msgid": msgid, "expire": SESSION_EXPIRE
     })).await;
     let session = d.pointer("/data/session").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if !session.is_empty() {
@@ -188,6 +196,10 @@ pub async fn verify_sms(phone: &str, code: &str, msgid: &str) -> Result<(String,
 
 /// 密码登录 → (session, userid)。getPuKey → RSA PKCS1v15 → byPwd。
 pub async fn pwd_login(phone: &str, password: &str) -> Result<(String, String), String> {
+    let (ok, ph) = norm_phone(phone);
+    if !ok {
+        return Err(ph);
+    }
     let d = account_post("/login/account/getPuKey", json!({})).await;
     let pukey = d.pointer("/data/pukey").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let rcode = d.pointer("/data/rcode").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -196,7 +208,7 @@ pub async fn pwd_login(phone: &str, password: &str) -> Result<(String, String), 
     }
     let enc = rsa_encrypt_pkcs1v15(&pukey, password).map_err(|e| format!("RSA 加密失败: {}", e))?;
     let d2 = account_post("/login/account/byPwd", json!({
-        "loginid": phone, "password": enc, "rcode": rcode, "type": 1, "expire": SESSION_EXPIRE
+        "loginid": ph, "password": enc, "rcode": rcode, "type": 1, "expire": SESSION_EXPIRE
     })).await;
     let session = d2.pointer("/data/session").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if !session.is_empty() {
@@ -207,38 +219,77 @@ pub async fn pwd_login(phone: &str, password: &str) -> Result<(String, String), 
 }
 
 /// RSA PKCS1 v1.5 加密（SPKI DER 公钥，纯大整数 pow，不引 rsa crate）。
+///
+/// ★ 2026-10-15 修正：原实现把 `der_skip_len`（返回*内容结束*位置）当成了
+///   Python `_der_read_len`（返回*内容起始*位置）用 —— SPKI 解析整体多跳一段，
+///   第一步就 index out of bounds **panic**，导致 Loomy 密码登录连接被直接掐断
+///   （前端表现为请求失败/空响应）。现严格对齐 Python `_rsa_encrypt` 的读取顺序，
+///   并对每处 `der[i]` / 切片加边界保护，畸形公钥返回错误而非 panic。
 fn rsa_encrypt_pkcs1v15(pubkey_b64: &str, plaintext: &str) -> Result<String, String> {
     let der = base64_decode(pubkey_b64).ok_or("公钥 base64 非法")?;
-    let mut i = 0usize;
-    if der[i] != 0x30 { return Err("公钥 DER 形状不对".into()); }
-    i = der_skip_len(&der, i + 1)?;
-    if der[i] != 0x30 { return Err("公钥缺算法块".into()); }
-    i = der_skip_len(&der, i + 1)?; // 跳过 OID+NULL
-    if der[i] != 0x03 { return Err("公钥缺 BIT STRING".into()); }
-    i = der_skip_len(&der, i + 1)?;
-    i += 1; // BIT STRING 未用位占位字节
-    if der[i] != 0x30 { return Err("公钥缺 RSAPublicKey".into()); }
-    i = der_skip_len(&der, i + 1)?;
-    if der[i] != 0x02 { return Err("DER 缺 modulus".into()); }
-    i += 1;
-    let (ln, ni) = der_read_len(&der, i)?;
-    let n = BigUint::from_bytes_be(&der[ni..ni + ln]);
-    let mut i = ni + ln;
-    if der[i] != 0x02 { return Err("DER 缺 exponent".into()); }
-    i += 1;
-    let (le, ei) = der_read_len(&der, i)?;
+    // 边界安全的取字节
+    let at = |idx: usize| -> Result<u8, String> {
+        der.get(idx).copied().ok_or_else(|| "公钥 DER 越界".to_string())
+    };
+    // 读 TLV 长度字段，返回 (内容长度, 内容起始下标) —— 对齐 Python `_der_read_len`
+    let (ln, ni) = der_read_len(&der, 1)?;
+    if at(0)? != 0x30 {
+        return Err("公钥 DER 形状不对".into());
+    }
+    let mut i = ni; // 外层 SEQUENCE 内容起点
+    if at(i)? != 0x30 {
+        return Err("公钥缺算法块".into());
+    }
+    let (la, ci) = der_read_len(&der, i + 1)?;
+    i = ci + la; // 跳过 AlgorithmIdentifier(OID+NULL)
+    if at(i)? != 0x03 {
+        return Err("公钥缺 BIT STRING".into());
+    }
+    let (_lb, bi) = der_read_len(&der, i + 1)?;
+    i = bi + 1; // 跳过 BIT STRING 未用位占位字节 → 指向内层 RSAPublicKey
+    if at(i)? != 0x30 {
+        return Err("公钥缺 RSAPublicKey".into());
+    }
+    let (_lr, ri) = der_read_len(&der, i + 1)?;
+    i = ri;
+    if at(i)? != 0x02 {
+        return Err("DER 缺 modulus".into());
+    }
+    let (ln_n, ni_n) = der_read_len(&der, i + 1)?;
+    if ni_n + ln_n > der.len() {
+        return Err("DER modulus 越界".into());
+    }
+    let n = BigUint::from_bytes_be(&der[ni_n..ni_n + ln_n]);
+    i = ni_n + ln_n;
+    if at(i)? != 0x02 {
+        return Err("DER 缺 exponent".into());
+    }
+    let (le, ei) = der_read_len(&der, i + 1)?;
+    if ei + le > der.len() {
+        return Err("DER exponent 越界".into());
+    }
     let e = BigUint::from_bytes_be(&der[ei..ei + le]);
+    let _ = ln;
+
     let k = (n.bits() + 7) / 8;
     let m = plaintext.as_bytes();
-    if m.len() > k as usize - 11 { return Err("密码过长".into()); }
+    if k < 11 || m.len() > k as usize - 11 {
+        return Err("密码过长".into());
+    }
     // PKCS1 v1.5: 00 02 + 非零随机填充 + 00 + message
     let ps_len = k as usize - 3 - m.len();
     let mut ps = Vec::with_capacity(ps_len);
-    let mut x = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let mut x = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
+        | 1;
     while ps.len() < ps_len {
         x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let b = (x >> 56) as u8;
-        if b != 0 { ps.push(b); }
+        if b != 0 {
+            ps.push(b);
+        }
     }
     let mut em = vec![0u8, 2];
     em.extend_from_slice(&ps);
@@ -246,14 +297,46 @@ fn rsa_encrypt_pkcs1v15(pubkey_b64: &str, plaintext: &str) -> Result<String, Str
     em.extend_from_slice(m);
     let c = BigUint::from_bytes_be(&em).modpow(&e, &n);
     let cb = c.to_bytes_be();
+    if cb.len() > k as usize {
+        return Err("RSA 结果长度异常".into());
+    }
     let mut padded = vec![0u8; k as usize - cb.len()];
     padded.extend_from_slice(&cb);
     Ok(base64_std(&padded))
 }
 
-fn der_skip_len(der: &[u8], mut i: usize) -> Result<usize, String> {
-    let (len, ni) = der_read_len(der, i)?;
-    Ok(ni + len)
+/// 手机号归一化（对齐 Python `loomy_client.norm_phone`）：
+/// 剥离 +86 / 0086 / 86 前缀与空格横线括号，再用 `1[3-9]\d{9}` 校验。
+/// 返回 (ok, 归一化号码或错误说明)。
+pub fn norm_phone(phone: &str) -> (bool, String) {
+    let cleaned: String = phone
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '(' | ')' | '（' | '）'))
+        .collect();
+    let s = if let Some(r) = cleaned.strip_prefix("+86") {
+        r.to_string()
+    } else if let Some(r) = cleaned.strip_prefix("0086") {
+        r.to_string()
+    } else if cleaned.starts_with("86") && cleaned.len() == 13 {
+        cleaned[2..].to_string()
+    } else {
+        cleaned
+    };
+    let ok = s.len() == 11
+        && s.as_bytes()[0] == b'1'
+        && (b'3'..=b'9').contains(&s.as_bytes()[1])
+        && s.as_bytes()[2..].iter().all(|b| b.is_ascii_digit());
+    if ok {
+        (true, s)
+    } else {
+        (
+            false,
+            format!(
+                "手机号格式不正确（{}）：请填 11 位大陆手机号，支持带 +86/86 前缀，不要带空格或横线",
+                phone.chars().take(24).collect::<String>()
+            ),
+        )
+    }
 }
 
 fn der_read_len(der: &[u8], mut i: usize) -> Result<(usize, usize), String> {

@@ -38,6 +38,22 @@ tracing = "0.1"                             # 结构化日志（替代 println!�
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 clap = { version = "4", features = ["derive", "env"] }  # CLI
+# SQLite（S5）：只给高频追加型数据用（usage_events）——JSON 每次请求全量重写
+# 750KB 是实际瓶颈。凭据类（accounts.json）仍留 JSON：用户可读可备份。
+# bundled = 自带 SQLite amalgamation，单 EXE 自包含，不依赖系统 dll。
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Windows 桌面托盘：直接调 Win32（Shell_NotifyIcon / 窗口消息循环 / 注册表自启）。
+# 只在 Windows 目标编译；非 Windows 目标走空实现（服务端逻辑与平台无关）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
