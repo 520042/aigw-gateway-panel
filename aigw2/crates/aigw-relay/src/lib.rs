@@ -9,6 +9,10 @@
 //! 超时四项（旧项目沉淀）：connect 10s / read 90s / 流式不设总时长 / 非流式 180s。
 
 pub mod glm;
+pub mod doubao;
+pub mod yuanbao;
+pub mod kuku;
+pub mod metaso;
 pub mod auth_login;
 pub mod proxy;
 pub mod wb;
@@ -99,7 +103,26 @@ impl OutClient {
         if body {
             rb = rb.header("Content-Type", "application/json");
         }
+        // Loomy 模型网关（signer="loomy"）：除 Bearer 外还要 token 双写 +
+        // 每次随机的 traceparent（缺失会挂起到超时）+ loomy-version。
+        if spec.signer == "loomy" && !secret.is_empty() {
+            rb = rb
+                .header("token", secret)
+                .header(
+                    "traceparent",
+                    format!("00-{}-{}-01", Self::rand_hex(32), Self::rand_hex(16)),
+                )
+                .header("loomy-version", "0.9.38")
+                .header("Accept", "application/json");
+        }
         rb
+    }
+
+    /// 非加密安全随机 hex（Loomy traceparent 幂等用，足够）。
+    fn rand_hex(n: usize) -> String {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        (0..n).map(|_| format!("{:x}", rng.gen_range(0..16u8))).collect()
     }
 
     /// CodeArts `SDK-HMAC-SHA256` 签名注入（signer="codearts"，账号 secret 存 `AK:SK`）。
@@ -164,9 +187,49 @@ impl OutClient {
         secret: &str,
         body: &[u8],
     ) -> Result<Value, RelayError> {
+        if !spec.chat_supported {
+            return Err(RelayError {
+                status: 501,
+                class: ErrorClass::Transient,
+                body: format!(
+                    "{} 暂不支持对话反代（仅支持登录/验活）：该平台无公开对话端点，官方逆向需浏览器环境，与本项目纯 HTTP 架构不符",
+                    spec.name
+                ),
+            });
+        }
         match spec.upstream_kind.as_str() {
             "chatglm" => glm::chat_nonstream(&self.http, spec, secret, body).await,
+            "doubao" => doubao::chat_nonstream(&self.http, spec, secret, body).await,
+            "yuanbao" => yuanbao::chat_nonstream(&self.http, spec, secret, body).await,
+            "kuku" => kuku::chat_nonstream(&self.http, spec, secret, body).await,
+            "metaso" => metaso::chat_nonstream(&self.http, spec, secret, body).await,
             _ => self.post_openai_nonstream(spec, secret, body).await,
+        }
+    }
+
+    /// 账号验活：按 upstream_kind 分派到各平台 adapter（cookie 平台走真实轻量端点）。
+    pub async fn verify_account(&self, spec: &ProviderSpec, secret: &str) -> bool {
+        match spec.upstream_kind.as_str() {
+            "doubao" => doubao::verify(&self.http, spec, secret).await,
+            "yuanbao" => yuanbao::verify(&self.http, spec, secret).await,
+            "kuku" => kuku::verify(&self.http, spec, secret).await,
+            "metaso" => metaso::verify(&self.http, spec, secret).await,
+            _ => self.verify_openai(spec, secret).await,
+        }
+    }
+
+    /// 通用 openai 透传验活：GET models_path，2xx 即有效。
+    async fn verify_openai(&self, spec: &ProviderSpec, secret: &str) -> bool {
+        let path = if spec.models_path.is_empty() {
+            "/models".to_string()
+        } else {
+            spec.models_path.clone()
+        };
+        let url = format!("{}{}", spec.base_url, path);
+        let rb = Self::apply_headers(self.http.get(&url), spec, secret, false);
+        match rb.timeout(std::time::Duration::from_secs(15)).send().await {
+            Ok(r) => r.status().is_success(),
+            Err(_) => false,
         }
     }
 
@@ -185,9 +248,35 @@ impl OutClient {
         ),
         RelayError,
     > {
+        if !spec.chat_supported {
+            return Err(RelayError {
+                status: 501,
+                class: ErrorClass::Transient,
+                body: format!(
+                    "{} 暂不支持对话反代（仅支持登录/验活）：该平台无公开对话端点，官方逆向需浏览器环境，与本项目纯 HTTP 架构不符",
+                    spec.name
+                ),
+            });
+        }
         match spec.upstream_kind.as_str() {
             "chatglm" => {
                 let (s, rx) = glm::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
+            "doubao" => {
+                let (s, rx) = doubao::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
+            "yuanbao" => {
+                let (s, rx) = yuanbao::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
+            "kuku" => {
+                let (s, rx) = kuku::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
+            "metaso" => {
+                let (s, rx) = metaso::chat_stream(&self.http, spec, secret, body).await?;
                 Ok((Box::pin(s), rx))
             }
             _ => {

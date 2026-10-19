@@ -1,5 +1,7 @@
-# 豆包 网页版 —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/apk-doubao
+# 豆包 网页版 —— samantha 私有协议 adapter（纯 HTTP + 手动 Cookie，不依赖无头浏览器/扫码）
+# 一手来源：aigw-panel-rs/src/relay/doubao.rs（线上实测，走 /samantha 旧端点绕开浏览器签名）
+# 上游：POST {base}/samantha/chat/completion?aid=497858&device_id=...（SSE 双层 JSON → OpenAI delta）
+# 凭据：登录 www.doubao.com 后整段 Cookie（DevTools→Application→Cookies 复制，手动粘贴）
 id = "apk-doubao"
 name = "豆包 网页版"
 enabled = true
@@ -7,12 +9,16 @@ enabled = true
 auth = "cookie"
 base_url = "https://www.doubao.com"
 format = "openai"
+chat_path = "/samantha/chat/completion"
 
-models = []
-models_policy = "none"
+models = ["doubao-pro", "doubao-fast", "doubao-lite", "doubao-think", "doubao-expert", "doubao-coding", "doubao-2.1-pro", "doubao-2.1-lite"]
+models_policy = "static"
 stream_dialect = "sse_delta"
 
-login_url = "https://www.doubao.com/"
-hosts = ["doubao.com"]
+upstream_kind = "doubao"
+biz_err = ["登录", "失效", "未登录", "请登录", "device"]
 
-notes = "在打开的浏览器里登录豆包，面板自动取 Cookie（也支持手动粘贴）"
+login_url = "https://www.doubao.com/"
+hosts = ["doubao.com", "www.doubao.com"]
+
+notes = "登录 www.doubao.com 后，在 DevTools→Application→Cookies 复制整段 Cookie 粘贴。think=深度思考，expert=联网+思考，coding=编程。"

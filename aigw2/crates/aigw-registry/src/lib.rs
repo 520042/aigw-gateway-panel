@@ -97,14 +97,18 @@ pub struct ProviderSpec {
     /// 假成功指纹关键词：HTTP 2xx 且 body 命中任一关键词 → Auth 类错误（loomy/星火系）。
     #[serde(default)]
     pub biz_err: Vec<String>,
-    /// CDP 抓 Cookie 的域过滤清单（host 后缀命中，如 ["doubao.com","www.doubao.com"]）。
+    /// 凭据所属域（host 后缀说明，如 ["doubao.com","www.doubao.com"]，纯展示用，不启动浏览器）。
     #[serde(default)]
     pub hosts: Vec<String>,
-    /// 登录页 URL（CDP 受控浏览器打开用；空 = 无自动登录）。
+    /// 登录页 URL（前端「打开登录页」链接，引导用户在自己的浏览器登录后手动粘贴 Cookie；空 = 无）。
     #[serde(default)]
     pub login_url: String,
     #[serde(default)]
     pub notes: String,
+    /// 是否支持对话反代（默认 true）。经全网调研确无纯 HTTP 对话端点的平台设 false：
+    /// 目前仅 WPS 灵犀、360 纳米（仅登录/验活，官方逆向需浏览器或只有付费 API）。
+    #[serde(default = "default_true")]
+    pub chat_supported: bool,
 }
 
 impl ProviderSpec {
@@ -166,12 +170,12 @@ pub fn validate(spec: &ProviderSpec) -> Result<(), String> {
         other => return Err(format!("format 非法：{other}（openai|anthropic|responses）")),
     }
     match spec.upstream_kind.as_str() {
-        "openai" | "chatglm" => {}
-        other => return Err(format!("upstream_kind 非法：{other}（openai|chatglm）")),
+        "openai" | "chatglm" | "doubao" | "yuanbao" | "kuku" | "metaso" => {}
+        other => return Err(format!("upstream_kind 非法：{other}（openai|chatglm|doubao|yuanbao|kuku|metaso）")),
     }
     match spec.signer.as_str() {
-        "" | "glm" | "codearts" => {}
-        other => return Err(format!("signer 非法：{other}（空|glm|codearts）")),
+        "" | "glm" | "codearts" | "loomy" => {}
+        other => return Err(format!("signer 非法：{other}（空|glm|codearts|loomy）")),
     }
     if spec.upstream_kind == "chatglm" && spec.signer != "glm" {
         return Err("upstream_kind=chatglm 要求 signer=glm".into());

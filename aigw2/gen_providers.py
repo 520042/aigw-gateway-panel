@@ -130,10 +130,8 @@ def gen(pid):
             auth = 'api_key'  # token 类凭据
         base = 'https://' + upstream if upstream else ''
         policy = 'live'
-    # 特殊 base 修正
-    if pid == 'apk-go':
-        base = 'https://copilot.tencent.com'
-    elif pid == 'apk-coze':
+    # 特殊 base 修正（apk-go 已按用户要求永久移除，不再生成）
+    if pid == 'apk-coze':
         base = 'https://api.coze.cn'
     elif pid == 'web-trae':
         base = 'https://trae-api-cn.mchost.guru'

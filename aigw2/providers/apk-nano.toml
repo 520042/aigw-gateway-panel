@@ -1,5 +1,6 @@
-# 纳米 AI（360） —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/apk-nano
+# 纳米 AI（360，n.cn） —— v2 声明式接入
+# 定性（2026-10 全网调研）：网页版 n.cn 无公开对话逆向；官方仅提供付费 API
+# （developer.n.cn / api.nano-ai.com），纯 HTTP 架构下暂不支持对话，仅保留登录/验活。
 id = "apk-nano"
 name = "纳米 AI（360）"
 enabled = true
@@ -12,7 +13,9 @@ models = []
 models_policy = "none"
 stream_dialect = "sse_delta"
 
+chat_supported = false
+
 login_url = "https://www.n.cn/"
 hosts = ["n.cn", "360.cn"]
 
-notes = "360 旗下 AI 搜索/办公。端点需登录后探测"
+notes = "360 纳米 AI 网页版（n.cn）暂无公开对话逆向，官方仅提供付费 API（developer.n.cn），本项目暂不支持对话反代，仅保留登录/验活。"

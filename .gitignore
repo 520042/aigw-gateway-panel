@@ -66,3 +66,9 @@ aigw-panel/dist/data/
 
 # Rust 重构产物
 aigw-panel-rs/target/
+
+# 参考项目克隆（GitHub 拉取，不入库）
+_refs/
+
+# Rust v2 编译产物
+aigw2/target/

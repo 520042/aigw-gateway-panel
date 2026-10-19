@@ -1,18 +1,24 @@
-# 秘塔 AI（metaso.cn） —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/apk-metaso
+# 秘塔 AI 搜索（metaso.cn）—— /api/search/chat 纯 HTTP adapter（无浏览器）
+# 一手来源：rsfree/metaso（纯 HTTP，指纹 cookie 门票层只验存在性）
+# 门票三件套（tid/_c_WBKFRo/_nb_ioWEgULi）随机生成；匿名约 13 发/出口/窗口；
+# 粘贴登录 uid-sid（或含 uid=/sid= 的 Cookie）享 500/天。
 id = "apk-metaso"
-name = "秘塔 AI（metaso.cn）"
+name = "秘塔 AI 搜索"
 enabled = true
 
+# cookie 车道，但允许留空（留空走匿名指纹；粘贴 uid-sid 走登录额度）
 auth = "cookie"
 base_url = "https://metaso.cn"
 format = "openai"
 
-models = []
-models_policy = "none"
+models = ["metaso:search", "metaso:concise", "metaso:research", "metaso:scholar", "metaso:video"]
+models_policy = "static"
 stream_dialect = "sse_delta"
+
+upstream_kind = "metaso"
+biz_err = ["额度", "限流", "验证", "WAF"]
 
 login_url = "https://metaso.cn/"
 hosts = ["metaso.cn"]
 
-notes = "唯一有官方 Open API + MCP 的国内办公 AI（¥0.03/次）。它的积分是「每日自动刷新到账」，**不需要签到** —— 别给它做签到按钮"
+notes = "免登录即可用（匿名约 13 次/IP/窗口，搜索带引用来源）。想提高额度：登录 metaso.cn 后从 Cookies 复制 uid 和 sid，拼成 uid-sid 粘贴（约 500/天）。被人机验证时可在设置里配置代理。"

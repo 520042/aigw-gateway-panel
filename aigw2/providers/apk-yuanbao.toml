@@ -1,19 +1,23 @@
-# 腾讯元宝网页版 —— OpenAI 兼容透传（cookie 认证）
-# 一手来源：aigw-panel-rs catalog relay_specs/apk-yuanbao + platforms.json#apk-yuanbao
-# 认证：登录后的 localStorage 会话（secret 整串放 Cookie 头）
+# 元宝（腾讯 YuanBao）—— hy 私有协议 adapter（纯 HTTP，两步建会话 + 流式对话）
+# 一手来源：aigw-panel-rs/src/relay/yuanbao.rs（移植自 juzeon/yuanbao-chat2api）
+# 上游：POST {base}/api/user/agent/conversation/create 拿 id → POST {base}/api/chat/{id}（仅流式）
+# 凭据：yuanbao.tencent.com 的 Cookie，必须含 hy_user 与 hy_token（缺一不可）
 id = "apk-yuanbao"
-name = "元宝（网页版 cookie）"
+name = "腾讯元宝（网页版）"
 enabled = true
 
 auth = "cookie"
 base_url = "https://yuanbao.tencent.com"
 format = "openai"
 
-models = []
-models_policy = "none"
+models = ["yuanbao-deepseek-r1", "yuanbao-deepseek-v3"]
+models_policy = "static"
 stream_dialect = "sse_delta"
+
+upstream_kind = "yuanbao"
+biz_err = ["登录", "失效", "未登录", "请登录"]
 
 login_url = "https://yuanbao.tencent.com/"
 hosts = ["yuanbao.tencent.com"]
 
-notes = "凭据为元宝网页登录态（面板 CDP 收割/手动导入）；模型路由建议用 模型id@apk-yuanbao 后缀指定。"
+notes = "登录 yuanbao.tencent.com 后，从 DevTools→Application→Cookies 复制 Cookie，必须包含 hy_user 和 hy_token 两条。r1=DeepSeek-R1 深度思考，v3=DeepSeek-V3。"

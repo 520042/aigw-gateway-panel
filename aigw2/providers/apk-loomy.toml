@@ -1,18 +1,27 @@
-# Loomy 讯飞（loomy.xunfei.cn） —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/apk-loomy
+# Loomy 讯飞（loomy.xunfei.cn）—— OpenAI 兼容模型网关 + 动态 traceparent 头
+# 一手来源：aigw-panel-rs/src/relay/loomy.rs（对齐 loomy2api 官方桌面客户端）
+# 上游：POST {base}/chat/completions、GET {base}/models（标准 OpenAI 形态）
+# 鉴权：Authorization: Bearer <session> + token: <session> 双写 +
+#       每次随机 traceparent: 00-<32hex>-<16hex>-01（缺失会挂起到超时）+ loomy-version
+# 凭据：账号 session（14 天有效，无 refreshToken），登录后粘贴
 id = "apk-loomy"
-name = "Loomy 讯飞（loomy.xunfei.cn）"
+name = "Loomy 讯飞（模型网关）"
 enabled = true
 
 auth = "api_key"
-base_url = "https://loomyad.xunfei.cn"
+base_url = "https://loomyad.xunfei.cn/api/v1"
 format = "openai"
+chat_path = "/chat/completions"
+models_path = "/models"
 
 models = []
 models_policy = "live"
 stream_dialect = "sse_delta"
 
-login_url = "https://loomy.xunfei.cn/login"
-hosts = ["loomy.xunfei.cn", "xunfei.cn", "xfinfr.com"]
+signer = "loomy"
+biz_err = ["登录已失效", "登录", "失效", "未登录", "授权"]
 
-notes = "讯飞 Loomy。★ 支持三种登录（均无需浏览器）：① 手机号+短信验证码 ② 手机号+密码 ③ 粘贴 session。登录后模型清单实时拉取（含倍率）。"
+login_url = "https://loomy.xunfei.cn/login"
+hosts = ["loomy.xunfei.cn", "loomyad.xunfei.cn", "xunfei.cn"]
+
+notes = "讯飞 Loomy 模型网关，模型 id 为 provider/model 形态（如 imodel/spark-x）。凭据为登录后的 session，鉴权头会自动双写 token 与 traceparent。模型清单实时拉取。"

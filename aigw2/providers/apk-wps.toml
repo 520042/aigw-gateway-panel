@@ -1,5 +1,6 @@
 # WPS AI（金山办公） —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/apk-wps
+# 定性（2026-10 全网调研）：WPS 灵犀无公开自由对话逆向，仅能通过 wps_sid 调用
+# 办公文档技能（非自由对话端点），纯 HTTP 架构下暂不支持对话，仅保留登录/验活。
 id = "apk-wps"
 name = "WPS AI（金山办公）"
 enabled = true
@@ -12,7 +13,9 @@ models = []
 models_policy = "none"
 stream_dialect = "sse_delta"
 
+chat_supported = false
+
 login_url = "https://www.wps.cn/"
 hosts = ["wps.cn", "kdocs.cn"]
 
-notes = "⚠ WPS 是「积分 / 灵犀智点」双轨制，别把两者当同一个。端点需登录后探测"
+notes = "WPS 灵犀暂无公开的自由对话逆向（仅能通过 wps_sid 调用办公文档技能），本项目纯 HTTP 架构下暂不支持对话反代，仅保留登录/验活。"

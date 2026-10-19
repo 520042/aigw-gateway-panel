@@ -221,6 +221,9 @@ function srcCard(p) {
     'apk-qoder': '设备码', 'web-qoder': '设备码',
     'apk-trae': '跳转回调', 'web-trae': '跳转回调',
     'apk-loomy': '粘贴Session', 'web-deepseek': '粘贴Token',
+    'apk-metaso': '免密/Cookie',
+    'apk-doubao': 'Cookie', 'apk-yuanbao': 'Cookie', 'apk-kuku': 'Cookie',
+    'apk-raccoon': 'Cookie', 'apk-wps': 'Cookie', 'apk-nano': 'Cookie',
     'sub-antigravity': '跳转登录', 'sub-devin': '跳转登录', 'sub-meta': '设备码',
     'sub-codex': '跳转登录', 'sub-claude': '跳转登录', 'sub-grok': '设备码',
     'sub-kimi': '设备码', 'sub-kimi-ai': '设备码',
@@ -233,6 +236,7 @@ function srcCard(p) {
     <div class="srcmeta">
       ${p.custom ? pill('ok', '自定义') : p.id.startsWith('sub-') ? pill('mut', '订阅') : p.id.startsWith('free-') ? pill('mut', '公益') : pill('mut', authTxt)}
       ${configured ? pill('ok', `${p.custom ? '已配置' : p.accounts_n + ' 账号'}`) : pill('mut', '未接入')}
+      ${p.chat_supported === false ? pill('mut', '仅验活·不可对话') : ''}
       ${p.models_policy === 'live' ? pill('mut', 'live 模型') : p.models_n ? pill('mut', `${p.models_n} 模型`) : ''}
     </div>
     <button class="btn sm ${configured ? '' : 'pri'}" onclick="event.stopPropagation();SRC_EXPAND='${esc(p.id)}';render()">
@@ -314,13 +318,44 @@ function srcDrawer(p) {
       </div>
       <div id="authBox"></div>`;
   } else {
-    // cookie 类：跳转登录 + 粘贴 Cookie
-    body = `<div class="note">${loginUrl ? `① <a href="${esc(loginUrl)}" target="_blank" rel="noopener">打开登录页 →</a> 在自己的浏览器完成登录（面板不支持扫码）` : '该平台未配置登录页'}　② 登录后把 Cookie / 凭据粘贴到下面，点保存入库。</div>
-      <div class="row">
-        <input class="q mono" id="keyInput" placeholder="粘贴 Cookie / 凭据…">
-        <button class="btn pri" onclick="authSave('${esc(p.id)}')">保存凭据</button>
-      </div>
-      <div id="authBox"></div>`;
+    // cookie 类：跳转登录 + 手动粘贴 Cookie（纯 HTTP，禁扫码）
+    const COOKIE_HINT = {
+      'apk-doubao': '登录 <b>www.doubao.com</b> 后，F12 → Application → Cookies，复制整段 Cookie（含 sessionid 等）。面板走豆包旧版 samantha 端点，纯 Cookie 直连，无需扫码。',
+      'apk-yuanbao': '登录 <b>yuanbao.tencent.com</b> 后，F12 → Application → Cookies，复制整段 Cookie，<b>必须包含 hy_user 和 hy_token</b> 两条，否则验活失败。',
+      'apk-kuku': '登录 <b>kuku.baidu.com</b> 后，F12 → Application → Cookies，复制整段 Cookie，<b>必须包含 BDUSS 和 STOKEN</b>（httpOnly，在 Cookies 列表里可见）。',
+      'apk-raccoon': '登录小浣熊网页版后，F12 → Application → Cookies 复制整段 Cookie。',
+    };
+    const COOKIE_PH = {
+      'apk-yuanbao': '粘贴整段 Cookie（含 hy_user=…; hy_token=…）…',
+      'apk-kuku': '粘贴整段 Cookie（含 BDUSS=…; STOKEN=…）…',
+      'apk-doubao': '粘贴整段 Cookie（含 sessionid=…）…',
+      'apk-raccoon': '粘贴整段 Cookie…',
+    };
+    if (p.id === 'apk-metaso') {
+      body = `<div class="note oknote">秘塔<b>免登录即可用</b>（匿名约 13 次 / IP / 窗口，搜索带引用来源）：无需粘贴任何凭据，直接在对话里选 metaso 模型即可。</div>
+        <div class="note">想提高额度（约 500/天）：登录 <a href="https://metaso.cn/" target="_blank" rel="noopener">metaso.cn</a> → F12 → Application → Cookies，复制 <b>uid</b> 和 <b>sid</b>，拼成 <span class="mono">uid-sid</span> 粘到下面（可选）。遇人机验证可在「设置 → 代理」配置代理。</div>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="可选：粘贴 uid-sid（留空即匿名，无需保存）…">
+          <button class="btn pri" onclick="authSave('${esc(p.id)}', true)">保存登录态</button>
+        </div>
+        <div id="authBox"></div>`;
+    } else if (p.chat_supported === false) {
+      body = `<div class="note errnote">该平台<b>暂不支持对话反代</b>（仅可登录/验活）：全网暂无公开的纯 HTTP 自由对话逆向，官方仅有付费 API 或办公文档技能。下方仅保存登录态用于验活。</div>
+        <div class="note">${loginUrl ? `① <a href="${esc(loginUrl)}" target="_blank" rel="noopener">打开登录页 →</a> 在自己的浏览器登录　` : ''}② F12 → Application → Cookies 复制整段 Cookie 粘到下面。</div>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="粘贴整段 Cookie…">
+          <button class="btn pri" onclick="authSave('${esc(p.id)}')">保存登录态</button>
+        </div>
+        <div id="authBox"></div>`;
+    } else {
+      const hint = COOKIE_HINT[p.id] || '登录后 F12 → Application → Cookies 复制整段 Cookie（面板不支持扫码）。';
+      body = `<div class="note">${loginUrl ? `① <a href="${esc(loginUrl)}" target="_blank" rel="noopener">打开登录页 →</a> 在自己的浏览器完成登录（面板不支持扫码）　` : ''}② ${hint}　③ 粘贴到下面保存入库。</div>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="${COOKIE_PH[p.id] || '粘贴整段 Cookie / 凭据…'}">
+          <button class="btn pri" onclick="authSave('${esc(p.id)}')">保存凭据</button>
+        </div>
+        <div id="authBox"></div>`;
+    }
   }
   return `<div class="modal-mask" onclick="if(event.target===this){SRC_EXPAND=null;render()}"><div class="modal drawer" id="srcDrawer">
     <div class="modal-hd">${esc(p.name)}<span class="faint mono"> ${esc(p.id)}</span>
@@ -380,10 +415,18 @@ async function authPoll(platform) {
       <div class="row"><button class="btn" onclick="authPoll('${esc(platform)}')">再查一次</button></div>`;
   }
 }
-async function authSave(platform) {
+async function authSave(platform, allowEmpty) {
   const input = $('#keyInput');
   const secret = input ? input.value.trim() : '';
-  if (!secret) { alert('请先粘贴凭据'); return; }
+  if (!secret) {
+    if (allowEmpty) {
+      const b0 = $('#authBox');
+      if (b0) b0.innerHTML = '<div class="note oknote">留空即匿名免登录、直接可用，无需保存。关闭窗口后在对话里选 metaso 模型即可；想提高额度再粘贴 uid-sid。</div>';
+      return;
+    }
+    alert('请先粘贴凭据');
+    return;
+  }
   const box = $('#authBox');
   if (box) box.innerHTML = '<div class="faint">保存中…</div>';
   const r = await post('/api/auth', { action: 'save', platform, secret }).catch((e) => ({ ok: false, message: e.message }));

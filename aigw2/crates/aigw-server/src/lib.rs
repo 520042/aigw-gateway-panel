@@ -142,6 +142,7 @@ fn custom_to_spec(c: &aigw_store::CustomApi) -> ProviderSpec {
         hosts: Vec::new(),
         login_url: String::new(),
         notes: String::new(),
+        chat_supported: true,
     }
 }
 
@@ -168,6 +169,7 @@ fn free_to_spec(s: &aigw_store::FreeSite) -> ProviderSpec {
         hosts: Vec::new(),
         login_url: s.url.clone(),
         notes: s.desc.clone(),
+        chat_supported: true,
     }
 }
 
@@ -228,6 +230,7 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
                 "login_url": s.login_url,
                 "notes": s.notes,
                 "chat_path": s.chat_path(),
+                "chat_supported": s.chat_supported,
                 "custom": is_custom,
                 "key_mask": key_mask,
             })
@@ -754,7 +757,23 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
             if platform.is_empty() || secret.is_empty() {
                 return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 platform 或 secret"}))).into_response();
             }
-            Json(st.login.save(platform, secret, &st.accounts)).into_response()
+            let saved = st.login.save(platform, secret, &st.accounts);
+            // 保存成功后即时验活（cookie 平台走各自真实端点），让用户立刻知道 Cookie 是否有效
+            if saved.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+                let specs = st.all_specs();
+                if let Some(spec) = specs.iter().find(|s| s.id == platform) {
+                    let ok = st.client.verify_account(spec, secret).await;
+                    let mut obj = saved;
+                    obj["verified"] = json!(ok);
+                    obj["message"] = json!(if ok {
+                        "凭据已保存，验活通过 ✓"
+                    } else {
+                        "凭据已保存，但验活未通过：请确认所需 Cookie 字段是否完整、是否已过期（可重新复制后再保存）"
+                    });
+                    return Json(obj).into_response();
+                }
+            }
+            Json(saved).into_response()
         }
         "callback" => {
             // 用户粘贴回调 URL（服务器场景）→ 提取 code/state 入队
@@ -944,11 +963,15 @@ async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
 
     // 账号 candidates：anon 平台走免密单账号；其余从 AccountStore 取启用账号（明文 secret）
     let anon = spec.auth == AuthKind::Anon;
-    let pool_accounts: Vec<(String, String)> = if anon {
+    let mut pool_accounts: Vec<(String, String)> = if anon {
         vec![("anon-public".to_string(), String::new())]
     } else {
         st.accounts.secrets_for(&spec.id)
     };
+    // 秘塔支持免登录指纹：未粘贴 uid-sid 时回退匿名单账号（约 13 发/出口/窗口）
+    if pool_accounts.is_empty() && spec.upstream_kind == "metaso" {
+        pool_accounts = vec![("metaso-anon".to_string(), String::new())];
+    }
     if pool_accounts.is_empty() {
         return openai_error(401, &format!("平台 {} 无可用账号，请先接入", spec.id));
     }
