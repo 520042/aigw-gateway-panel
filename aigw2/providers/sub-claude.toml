@@ -4,6 +4,7 @@
 id = "sub-claude"
 name = "Anthropic Claude Code"
 enabled = true
+login_url = "https://claude.ai/login"
 
 auth = "api_key"
 base_url = "https://api.anthropic.com/v1"

@@ -4,6 +4,7 @@
 id = "sub-antigravity"
 name = "Google Antigravity"
 enabled = true
+login_url = "https://antigravity.google.com"
 
 auth = "api_key"
 base_url = "https://cloudcode-pa.googleapis.com"

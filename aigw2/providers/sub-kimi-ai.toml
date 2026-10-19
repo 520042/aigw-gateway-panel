@@ -4,6 +4,7 @@
 id = "sub-kimi-ai"
 name = "Kimi Code 国际站"
 enabled = true
+login_url = "https://kimi.com/login"
 
 auth = "api_key"
 base_url = "https://api.kimi.ai/coding/v1"

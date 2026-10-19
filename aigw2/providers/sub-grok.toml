@@ -4,6 +4,7 @@
 id = "sub-grok"
 name = "xAI Grok"
 enabled = true
+login_url = "https://grok.com"
 
 auth = "api_key"
 base_url = "https://api.x.ai/v1"

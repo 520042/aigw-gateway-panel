@@ -4,6 +4,7 @@
 id = "sub-meta"
 name = "Meta Muse"
 enabled = true
+login_url = "https://muse.ai/login"
 
 auth = "api_key"
 base_url = "https://api.meta.ai/v1"

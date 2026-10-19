@@ -4,6 +4,7 @@
 id = "sub-codex"
 name = "OpenAI Codex"
 enabled = true
+login_url = "https://chatgpt.com/auth/login"
 
 auth = "api_key"
 base_url = "https://api.openai.com/v1"

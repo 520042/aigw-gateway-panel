@@ -10,6 +10,7 @@
 
 pub mod glm;
 pub mod auth_login;
+pub mod proxy;
 
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
@@ -42,12 +43,16 @@ pub struct OutClient {
 
 impl OutClient {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
+        let mut b = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
-            .no_proxy()
-            .build()
-            .expect("out client build");
+            .read_timeout(READ_TIMEOUT);
+        // 出站代理：direct/global/bypass_cn（proxy::current 全局配置，热更新生效）
+        if let Some(p) = proxy::proxy_for_current() {
+            b = b.proxy(p);
+        } else {
+            b = b.no_proxy();
+        }
+        let http = b.build().expect("out client build");
         OutClient { http }
     }
 

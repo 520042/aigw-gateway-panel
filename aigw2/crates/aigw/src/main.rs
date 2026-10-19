@@ -151,6 +151,12 @@ async fn main() {
     }
 
     let pool = aigw_pool::Pool::new();
+    // 出站代理：启动时加载 data/proxy.json 到全局（OutClient 构造即生效；/api/proxy 可热更新）
+    let pcfg = aigw_relay::proxy::load(&data_dir());
+    aigw_relay::proxy::apply(&pcfg);
+    if pcfg.mode != "direct" {
+        tracing::info!("proxy：mode={} url={}", pcfg.mode, pcfg.url);
+    }
     let client = Arc::new(aigw_relay::OutClient::new());
     // 账号池：双源装载（v2 data/accounts.json 权威；首次从 legacy 只读初始化）
     let legacy_accounts = legacy_dir()

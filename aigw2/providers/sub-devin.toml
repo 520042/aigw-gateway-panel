@@ -4,6 +4,7 @@
 id = "sub-devin"
 name = "Devin"
 enabled = true
+login_url = "https://app.devin.ai/login"
 
 auth = "api_key"
 base_url = "https://api.devin.ai/v1"

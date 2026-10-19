@@ -4,6 +4,7 @@
 id = "sub-kimi"
 name = "Kimi Code 国内站"
 enabled = true
+login_url = "https://kimi.moonshot.cn"
 
 auth = "api_key"
 base_url = "https://api.kimi.com/coding/v1"

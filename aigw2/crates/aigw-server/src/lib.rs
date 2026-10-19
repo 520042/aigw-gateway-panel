@@ -142,6 +142,7 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/requests", get(requests))
         .route("/api/platforms", get(platforms))
         .route("/api/custom", get(custom_list).post(custom_action))
+        .route("/api/proxy", get(proxy_get).post(proxy_set))
         .route("/api/accounts", get(accounts))
         .route("/api/pool", get(pool_snapshot))
         .route("/api/auth", post(auth_action))
@@ -262,6 +263,41 @@ async fn custom_action(State(st): State<AppState>, body: Bytes) -> Response {
             }
         }
         _ => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("未知 action：{action}")}))).into_response(),
+    }
+}
+
+/// 出站代理配置：GET /api/proxy → 当前配置（mode/url）。
+///   POST /api/proxy {"mode":"direct"|"global"|"bypass_cn","url":"http://127.0.0.1:7890"}
+///   保存 data/proxy.json 并热更新全局（后续所有上游/登录请求立即生效，无需重启）。
+async fn proxy_get() -> Json<Value> {
+    let cfg = aigw_relay::proxy::current();
+    Json(json!({
+        "ok": true,
+        "mode": cfg.mode,
+        "url": cfg.url,
+        "modes": ["direct", "global", "bypass_cn"],
+    }))
+}
+
+async fn proxy_set(body: Bytes) -> Response {
+    let v: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
+        }
+    };
+    let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("");
+    if !["direct", "global", "bypass_cn"].contains(&mode) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "mode 必须是 direct | global | bypass_cn"}))).into_response();
+    }
+    let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    if mode != "direct" && url.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "代理模式需要 url（如 http://127.0.0.1:7890）"}))).into_response();
+    }
+    let cfg = aigw_relay::proxy::ProxyConfig { mode: mode.into(), url };
+    match aigw_relay::proxy::save_and_apply(&aigw_relay::proxy::default_data_dir(), &cfg) {
+        Ok(()) => Json(json!({"ok": true, "message": format!("代理已切换为 {}，所有流程即时生效", mode), "cfg": cfg})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "message": format!("保存失败：{e}")}))).into_response(),
     }
 }
 

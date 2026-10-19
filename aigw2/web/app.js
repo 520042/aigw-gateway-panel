@@ -5,7 +5,7 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261019b';
+const BUILD = 'v20261019c';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -47,9 +47,49 @@ function renderHdBtns(v) {
   if (v === 'overview' || v === 'sources') {
     btns.push(`<button class="btn sm pri" onclick="showGatewayInfo()" title="查看本地网关地址 / KEY / 模型">服务网关信息</button>`);
   }
+  // 代理设置：每个页面都有（直连/全局/绕过大陆，所有流程即时生效）
+  btns.push(`<button class="btn sm" onclick="showProxySettings()" title="出站网络代理（直连 / 全局 / 绕过大陆）">⇅ 代理设置</button>`);
   // 全局刷新：每个页面都有（替代原「退出」）
   btns.push(`<button class="btn sm" onclick="window.location.reload()" title="全局刷新（重载面板数据）">⟳ 刷新</button>`);
   box.innerHTML = btns.join('');
+}
+
+// 代理设置弹窗（direct / global / bypass_cn）
+async function showProxySettings() {
+  let cur = { mode: 'direct', url: '' };
+  try { const r = await api('/api/proxy'); cur = r; } catch (_) {}
+  const MODES = [
+    ['direct', '全部直连', '不经过任何代理（默认）'],
+    ['global', '全局代理', '所有流程（登录/上游/模型同步）都走代理'],
+    ['bypass_cn', '绕过大陆', '大陆域名直连，其余走代理（推荐给 CODEX/Kimi 等海外平台）'],
+  ];
+  const mk = `<div class="modal-mask" onclick="if(event.target===this)this.remove()"><div class="modal">
+    <div class="modal-hd">代理设置<b class="x" onclick="this.closest('.modal-mask').remove()">✕</b></div>
+    <div class="modal-bd">
+      <div class="radios">
+        ${MODES.map(([m, t, d]) => `
+          <label class="radio-row ${cur.mode === m ? 'on' : ''}" onclick="document.querySelectorAll('.radio-row').forEach(r=>r.classList.remove('on'));this.classList.add('on');$('#px-mode').value='${m}';$('#px-url').disabled=${m === 'direct' ? 'true' : 'false'}">
+            <input type="radio" name="pxmode" value="${m}" ${cur.mode === m ? 'checked' : ''}>
+            <b>${t}</b><span class="faint">${d}</span>
+          </label>`).join('')}
+      </div>
+      <input type="hidden" id="px-mode" value="${cur.mode}">
+      <label>代理地址</label>
+      <input class="q mono" id="px-url" placeholder="http://127.0.0.1:7890" value="${esc(cur.url || '')}" ${cur.mode === 'direct' ? 'disabled' : ''}>
+      <div class="faint" style="font-size:12px">保存后立即生效（登录、上游转发、模型同步全部从代理走），无需重启</div>
+      <div class="modal-foot">
+        <button class="btn pri" onclick="saveProxy()">保存并应用</button>
+      </div>
+    </div>
+  </div></div>`;
+  document.body.insertAdjacentHTML('beforeend', mk);
+}
+async function saveProxy() {
+  const mode = $('#px-mode').value || 'direct';
+  const url = $('#px-url').value.trim();
+  const r = await post('/api/proxy', { mode, url });
+  const btn = document.querySelector('.modal-foot .btn.pri');
+  if (btn) { btn.textContent = r.ok ? '✓ 已应用（即时生效）' : ('✗ ' + (r.message || '失败')); setTimeout(() => btn.textContent = '保存并应用', 2000); }
 }
 
 // 服务网关信息弹窗（地址 + KEY + 模型）
