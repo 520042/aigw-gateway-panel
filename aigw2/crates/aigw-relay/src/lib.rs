@@ -94,6 +94,59 @@ impl OutClient {
         rb
     }
 
+    /// CodeArts `SDK-HMAC-SHA256` 签名注入（signer="codearts"，账号 secret 存 `AK:SK`）。
+    /// 对齐 codearts2api `_hmac_headers`：benefit 免费通道多签
+    /// `maas_type`/`model-id`/`model-name` 三头（新模型默认走 benefit，上游零改动可用）。
+    fn apply_codearts_sign(
+        rb: reqwest::RequestBuilder,
+        spec: &ProviderSpec,
+        secret: &str,
+        body: &[u8],
+    ) -> reqwest::RequestBuilder {
+        if spec.signer != "codearts" {
+            return rb;
+        }
+        let Some((ak, sk)) = secret.split_once(':') else {
+            return rb;
+        };
+        if ak.is_empty() || sk.is_empty() {
+            return rb;
+        }
+        let model = serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()))
+            .unwrap_or_default();
+        let sdk_date = aigw_crypto::codearts_sdk_date();
+        let host = reqwest::Url::parse(&spec.base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .unwrap_or_else(|| "snap-access.cn-north-4.myhuaweicloud.com".to_string());
+        let mut hs: Vec<(String, String)> = vec![
+            ("host".into(), host),
+            ("content-type".into(), "application/json".into()),
+            ("x-sdk-date".into(), sdk_date.clone()),
+        ];
+        if !model.is_empty() {
+            hs.push(("maas_type".into(), "benefit".into()));
+            hs.push(("model-id".into(), model.clone()));
+            hs.push(("model-name".into(), model));
+        }
+        let canonical_uri = format!("{}/", spec.chat_path()); // 必须带尾斜杠
+        let auth = aigw_crypto::codearts_build_sign(
+            "POST",
+            &canonical_uri,
+            "",
+            &hs,
+            body,
+            ak,
+            sk,
+            &sdk_date,
+        );
+        rb.header("x-sdk-date", sdk_date)
+            .header("maas_type", "benefit")
+            .header("Authorization", auth)
+    }
+
     // ================= 顶层分派（声明式 spec 驱动） =================
 
     /// 非流式转发：按 upstream_kind 分派。
@@ -146,7 +199,9 @@ impl OutClient {
         body: &[u8],
     ) -> Result<Value, RelayError> {
         let url = Self::chat_url(spec);
-        let rb = Self::apply_headers(self.http.post(&url), spec, secret, true)
+        let mut rb = Self::apply_headers(self.http.post(&url), spec, secret, true);
+        rb = Self::apply_codearts_sign(rb, spec, secret, body);
+        let rb = rb
             .timeout(NONSTREAM_TOTAL)
             .body(body.to_vec());
         let resp = rb.send().await.map_err(|e| RelayError {
@@ -193,8 +248,9 @@ impl OutClient {
         RelayError,
     > {
         let url = Self::chat_url(spec);
-        let rb = Self::apply_headers(self.http.post(&url), spec, secret, true)
-            .body(body.to_vec()); // 流式：不设总时长（read_timeout 兜底包间 idle）
+        let mut rb = Self::apply_headers(self.http.post(&url), spec, secret, true);
+        rb = Self::apply_codearts_sign(rb, spec, secret, body);
+        let rb = rb.body(body.to_vec()); // 流式：不设总时长（read_timeout 兜底包间 idle）
         let resp = rb.send().await.map_err(|e| RelayError {
             status: 0,
             body: format!("network: {e}"),

@@ -133,13 +133,13 @@ let SRC_EXPAND = null; // 展开的平台卡片 id
 
 // 分组规则（用户拍板）：
 //   custom-*        → 自定义 API（最前，默认展开）
-//   api-* / minimax → 开放平台 API（填 Key 即用，默认收起）
+//   api-* / minimax / codearts → 开放平台 API（填 Key 即用，默认收起）
 //   sub-*           → 订阅反代（OAuth/跳转，默认收起）
 //   free-*          → 公益站（填 Key 即用，默认收起）
 //   其余（apk-*/web-*/wb-*/anon-*/kilo/pollinations/codex/kimi-code）→ 客户端反代（默认收起）
 function srcGroupOf(p) {
   if (p.id.startsWith('custom-')) return 'custom';
-  if (p.id.startsWith('api-') || p.id === 'minimax') return 'official';
+  if (p.id.startsWith('api-') || p.id === 'minimax' || p.id === 'codearts') return 'official';
   if (p.id.startsWith('sub-')) return 'sub';
   if (p.id.startsWith('free-')) return 'free';
   return 'client';

@@ -90,7 +90,8 @@ pub struct ProviderSpec {
     /// 上游形态：openai（OpenAI 兼容，字节透传）| chatglm（智谱私有协议，走 adapter）。
     #[serde(default = "default_upstream_kind")]
     pub upstream_kind: String,
-    /// 请求签名器：""（无）| glm（X-Sign 头组，aigw-crypto::glm_build_sign）。
+    /// 请求签名器：""（无）| glm（X-Sign 头组，aigw-crypto::glm_build_sign）
+    /// | codearts（SDK-HMAC-SHA256，账号 secret 存 `AK:SK`，aigw-crypto::codearts）。
     #[serde(default)]
     pub signer: String,
     /// 假成功指纹关键词：HTTP 2xx 且 body 命中任一关键词 → Auth 类错误（loomy/星火系）。
@@ -169,8 +170,8 @@ pub fn validate(spec: &ProviderSpec) -> Result<(), String> {
         other => return Err(format!("upstream_kind 非法：{other}（openai|chatglm）")),
     }
     match spec.signer.as_str() {
-        "" | "glm" => {}
-        other => return Err(format!("signer 非法：{other}（空|glm）")),
+        "" | "glm" | "codearts" => {}
+        other => return Err(format!("signer 非法：{other}（空|glm|codearts）")),
     }
     if spec.upstream_kind == "chatglm" && spec.signer != "glm" {
         return Err("upstream_kind=chatglm 要求 signer=glm".into());

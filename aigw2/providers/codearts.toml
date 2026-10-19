@@ -1,0 +1,15 @@
+# 华为云 CodeArts（盘古/GLM 免费额度通道）· SDK-HMAC-SHA256 签名
+# 账号凭据格式：AK:SK（华为云 IAM 访问密钥，console.huaweicloud.com/iam → 新增访问密钥）
+# 免费额度通道：benefit（每日可签到领取，未登记新模型默认走 benefit）
+id = "codearts"
+name = "华为云 CodeArts"
+enabled = true
+auth = "api_key"
+base_url = "https://snap-access.cn-north-4.myhuaweicloud.com"
+format = "openai"
+models_policy = "static"
+models = ["deepseek-v4-flash-0731", "deepseek-v4-pro-0813", "glm-5.3-flash"]
+stream_dialect = "sse_delta"
+chat_path = "/api/v2/chat/completions"
+signer = "codearts"
+notes = "AK/SK 登录 https://console.huaweicloud.com/iam/#/mine/accessKey 获取；账号栏填 AK:SK。免费 benefit 通道，5 并发限制，低并发智能体适用。"

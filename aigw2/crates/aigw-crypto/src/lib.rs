@@ -4,11 +4,14 @@
 //! - [`qoder`]：COSY 推理签名 + 设备指纹（批3，一手：qoder2api-hub qoder_sign.py/fingerprint.py）。
 //! - [`loomy`]：account-service HMAC-SHA1 签名（批3，一手：loomy2api signer.py/constants.py）。
 //! - [`zcode`]：enc:v1 凭据信封 AES-256-GCM（批3，一手：zcode2api docs/03 定稿）。
-//! 待补：SDK-HMAC-SHA256（codearts）。
+//! - [`codearts`]：华为云 SDK-HMAC-SHA256 签名（批4，一手：codearts2api server.py `_hmac_headers`）。
 
+pub mod codearts;
 pub mod loomy;
 pub mod qoder;
 pub mod zcode;
+
+pub use codearts::{codearts_build_sign, codearts_sdk_date};
 
 use md5::{Digest, Md5};
 
