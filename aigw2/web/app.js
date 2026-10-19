@@ -5,7 +5,7 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261019d';
+const BUILD = 'v20261019e';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -218,11 +218,12 @@ function srcCard(p) {
   </div>`;
 }
 
-// 登录抽屉：跳转登录 + 手动粘贴凭据（不扫码）；wb/minimax/kimi 走设备码
+// 登录抽屉：跳转登录 + 手动粘贴凭据（不扫码）；wb/minimax/kimi/grok 走设备码，codex/claude 走 PKCE 回调
 function srcDrawer(p) {
   const isWb = p.id === 'wb-gateway' || p.id === 'wb-gateway-intl' || p.id === 'codebuddy';
   const isMinimax = p.id === 'minimax';
-  const isKimi = p.id === 'sub-kimi' || p.id === 'sub-kimi-ai';
+  const isKimi = p.id === 'sub-kimi' || p.id === 'sub-kimi-ai' || p.id === 'sub-grok';
+  const isPkce = p.id === 'sub-codex' || p.id === 'sub-claude';
   const isKey = p.auth === 'api_key';
   const isAnon = p.auth === 'anon';
   const loginUrl = p.login_url || '';
@@ -231,10 +232,21 @@ function srcDrawer(p) {
     body = `<div class="note">免密平台：无需凭据，直接可用。点下面的「测试连通」看是否可转发。</div>
       <button class="btn pri" onclick="testAnon('${esc(p.id)}')">测试连通</button>`;
   } else if (isWb || isMinimax || isKimi) {
-    body = `<div class="note">${isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : isMinimax ? 'MiniMax 设备码：' : 'Kimi Code 设备码（RFC 8628）：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
+    body = `<div class="note">${isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : isMinimax ? 'MiniMax 设备码：' : isKimi && p.id === 'sub-grok' ? 'Grok 设备码（RFC 8628，需代理访问）：' : 'Kimi Code 设备码（RFC 8628）：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
       <div class="row">
         <button class="btn pri" onclick="authStart('${esc(p.id)}')">开始登录</button>
         <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>
+      </div>
+      <div id="authBox"></div>`;
+  } else if (isPkce) {
+    body = `<div class="note">${p.id === 'sub-codex' ? 'Codex 跳转登录（PKCE + 本地 1455 回调）' : 'Claude Code 跳转登录（PKCE + 本地 54545 回调）'}：点「打开授权页」在浏览器完成登录（跳转登录，非扫码）。面板自动捕获回调换 token；若部署在服务器，把浏览器跳转后地址栏的完整 URL 粘贴到下方输入框。</div>
+      <div class="row">
+        <button class="btn pri" onclick="authStart('${esc(p.id)}')">打开授权页</button>
+        <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>
+      </div>
+      <div class="row">
+        <input class="q mono" id="cbUrl" placeholder="粘贴回调地址（含 ?code= 与 &state=）…">
+        <button class="btn" onclick="authCallback('${esc(p.id)}')">提交回调</button>
       </div>
       <div id="authBox"></div>`;
   } else if (isKey) {
@@ -283,6 +295,20 @@ async function authStart(platform) {
   SRC_SESSION = r.id;
 }
 let SRC_SESSION = null;
+async function authCallback(platform) {
+  const input = $('#cbUrl');
+  const url = input ? input.value.trim() : '';
+  if (!url) { alert('请先粘贴回调地址（含 ?code= 与 &state=）'); return; }
+  const box = $('#authBox');
+  if (box) box.innerHTML = '<div class="faint">提交回调中…</div>';
+  const r = await post('/api/auth', { action: 'callback', url }).catch((e) => ({ ok: false, message: e.message }));
+  const b = $('#authBox');
+  if (!b) return;
+  b.innerHTML = `<div class="note ${r.ok ? 'oknote' : 'errnote'}">${esc(r.message || '回调提交结果')}</div>`;
+  if (r.ok) {
+    b.innerHTML += `<div class="row"><button class="btn pri" onclick="authPoll('${esc(platform)}')">查询授权状态</button></div>`;
+  }
+}
 async function authPoll(platform) {
   const id = SRC_SESSION;
   if (!id) { alert('请先点「开始登录」'); return; }

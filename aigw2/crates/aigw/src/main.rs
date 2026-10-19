@@ -169,6 +169,8 @@ async fn main() {
     ));
     // 自定义 API 存储（data/custom.json）
     let custom = Arc::new(aigw_store::CustomStore::open(&dd));
+    // OAuth 本地回调监听（Codex 1455 / Claude 54545）——跳转登录自动捕获
+    aigw_relay::auth_login::start_callback_listeners();
     let app = aigw_server::build_app(aigw_server::AppState::new(
         specs, store, pool, client, accounts, custom,
     ));

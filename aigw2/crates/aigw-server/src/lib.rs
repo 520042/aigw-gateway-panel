@@ -345,6 +345,14 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
             }
             Json(st.login.save(platform, secret, &st.accounts)).into_response()
         }
+        "callback" => {
+            // 用户粘贴回调 URL（服务器场景）→ 提取 code/state 入队
+            let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("");
+            match aigw_relay::auth_login::submit_callback_url(url) {
+                Ok(()) => Json(json!({"ok": true, "message": "回调已捕获，点「查询授权状态」完成入库"})).into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": e}))).into_response(),
+            }
+        }
         _ => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("未知 action：{action}")}))).into_response(),
     }
 }

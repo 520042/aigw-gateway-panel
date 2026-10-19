@@ -14,17 +14,46 @@
 
 use crate::OutClient;
 use aigw_registry::ProviderSpec;
+use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 
 const CLI_UA: &str = "CLI/2.63.2 CodeBuddy/2.63.2";
 
+/// 登录专用 HTTP Client：每次按当前代理配置动态构建（热更新即时生效）。
+/// 有代理（global/bypass_cn）则注入，否则直连。
+fn auth_http() -> reqwest::Client {
+    let mut b = reqwest::Client::builder();
+    if let Some(p) = crate::proxy::proxy_for_current() {
+        b = b.proxy(p);
+    }
+    b.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// Kimi Code OAuth（CLIProxyAPI v6 一手来源）。
 const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 const KIMI_OAUTH_COM: &str = "https://auth.kimi.com";
 const KIMI_OAUTH_AI: &str = "https://auth.kimi.ai";
 const KIMI_MSH_VERSION: &str = "v6.10.9";
+
+/// xAI / Grok OAuth（CLIProxyAPI v6 internal/auth/xai 一手来源）。
+const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+const XAI_SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
+const XAI_DISCOVERY: &str = "https://auth.x.ai/.well-known/openid-configuration";
+
+/// OpenAI Codex OAuth（CLIProxyAPI v6 internal/auth/codex 一手来源）：PKCE 授权码 + 本地 1455 回调。
+const CODEX_AUTH_URL: &str = "https://auth.openai.com/oauth/authorize";
+const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_REDIRECT: &str = "http://localhost:1455/auth/callback";
+
+/// Anthropic Claude Code OAuth（CLIProxyAPI v6 internal/auth/claude 一手来源）：PKCE 授权码 + 本地 54545 回调 + JSON 换码。
+const CLAUDE_AUTH_URL: &str = "https://claude.ai/oauth/authorize";
+const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_REDIRECT: &str = "http://localhost:54545/callback";
+const CLAUDE_SCOPE: &str = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
 #[derive(Debug, Clone)]
 struct Session {
@@ -120,7 +149,7 @@ impl LoginEngine {
                 }
             }
         } else if platform == "minimax" {
-            match minimax_start(&client.http).await {
+            match minimax_start(&auth_http()).await {
                 Ok((device_code, user_code, verify_url, verifier)) => {
                     sess.state = format!("minimax:{device_code}:{verifier}:{user_code}");
                     sess.login_url = verify_url;
@@ -134,7 +163,7 @@ impl LoginEngine {
             }
         } else if let Some(oauth_host) = kimi_oauth_host(platform) {
             // Kimi Code 设备码（RFC 8628）：sub-kimi 国内站 / sub-kimi-ai 国际站
-            match kimi_start(&client.http, oauth_host).await {
+            match kimi_start(&auth_http(), oauth_host).await {
                 Ok((device_code, user_code, verify_url)) => {
                     sess.state = format!("kimi:{device_code}");
                     sess.login_url = verify_url.clone();
@@ -147,6 +176,49 @@ impl LoginEngine {
                 Err(e) => {
                     sess.status = "error".into();
                     sess.message = format!("Kimi 设备码申请失败：{e}（可回退手动粘贴 token）");
+                }
+            }
+        } else if platform == "sub-grok" {
+            // xAI Grok 设备码（RFC 8628 + OIDC discovery）
+            match xai_start(&auth_http()).await {
+                Ok((device_code, user_code, verify_url, tok_ep)) => {
+                    sess.state = format!("xai:{device_code}:{tok_ep}");
+                    sess.login_url = verify_url.clone();
+                    sess.user_code = user_code.clone();
+                    sess.message = format!(
+                        "Grok 设备码：打开验证页（{}）输入 {} 完成授权，面板自动拿到 token 入库。",
+                        verify_url, user_code
+                    );
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Grok 设备码申请失败：{e}（可回退手动粘贴 token）");
+                }
+            }
+        } else if platform == "sub-codex" {
+            // OpenAI Codex：PKCE 授权码 + 本地 1455 回调（跳转登录，非扫码）
+            match codex_start().await {
+                Ok((url, verifier, state)) => {
+                    sess.state = format!("codex:{verifier}:{state}");
+                    sess.login_url = url.clone();
+                    sess.message = "Codex 跳转登录：点「打开授权页」在浏览器完成登录，面板自动捕获回调换 token 入库；若面板部署在服务器，把浏览器跳转后地址栏的 URL 粘贴到下方输入框。".into();
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Codex 授权 URL 生成失败：{e}");
+                }
+            }
+        } else if platform == "sub-claude" {
+            // Anthropic Claude Code：PKCE 授权码 + 本地 54545 回调（跳转登录，非扫码）
+            match claude_start().await {
+                Ok((url, verifier, state)) => {
+                    sess.state = format!("claude:{verifier}:{state}");
+                    sess.login_url = url.clone();
+                    sess.message = "Claude 跳转登录：点「打开授权页」在浏览器完成登录，面板自动捕获回调换 token 入库；若面板部署在服务器，把浏览器跳转后地址栏的 URL 粘贴到下方输入框。".into();
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Claude 授权 URL 生成失败：{e}");
                 }
             }
         } else if let Some(spec) = specs.iter().find(|s| s.id == platform && !s.login_url.is_empty()) {
@@ -203,13 +275,45 @@ impl LoginEngine {
             if parts.len() < 3 {
                 Err("设备码会话不完整".to_string())
             } else {
-                minimax_poll(&client.http, parts[1], parts[2]).await
+                minimax_poll(&auth_http(), parts[1], parts[2]).await
             }
         } else if sess.state.starts_with("kimi:") {
             let device_code = sess.state.trim_start_matches("kimi:").to_string();
             match kimi_oauth_host(&sess.platform) {
-                Some(host) => kimi_poll(&client.http, host, &device_code).await,
+                Some(host) => kimi_poll(&auth_http(), host, &device_code).await,
                 None => Err("Kimi 平台映射缺失".to_string()),
+            }
+        } else if sess.state.starts_with("xai:") {
+            // xai:{device_code}:{token_endpoint}
+            let rest = sess.state.trim_start_matches("xai:").to_string();
+            match rest.split_once(':') {
+                Some((d, t)) => xai_poll(&auth_http(), t, d).await,
+                None => Err("Grok 设备码会话不完整".to_string()),
+            }
+        } else if sess.state.starts_with("codex:") || sess.state.starts_with("claude:") {
+            // {prefix}:{verifier}:{state} → 从回调队列取 code → 换 token
+            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+            if parts.len() < 3 {
+                Err("PKCE 会话不完整".to_string())
+            } else {
+            let (kind, verifier, state) = (parts[0], parts[1], parts[2]);
+            let code = AUTH_CALLBACKS
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(s, _)| s == state)
+                .map(|(_, c)| c.clone());
+            match code {
+                Some(code) => {
+                    AUTH_CALLBACKS.lock().unwrap().retain(|(s, _)| s != state);
+                    if kind == "codex" {
+                        codex_exchange(&auth_http(), &code, verifier).await
+                    } else {
+                        claude_exchange(&auth_http(), &code, verifier, state).await
+                    }
+                }
+                None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
+            }
             }
         } else {
             Err("跳转登录会话：请粘贴 Cookie/凭据后走 save 动作入库（不自动轮询）".to_string())
@@ -420,6 +524,256 @@ fn kimi_oauth_host(platform: &str) -> Option<&'static str> {
     }
 }
 
+/// 生成 PKCE S256 对（RFC 7636）：verifier 96 随机字节 base64url 无填充；challenge=SHA256(verifier)。
+fn pkce_pair() -> (String, String) {
+    use rand::RngCore;
+    let mut b = [0u8; 96];
+    rand::thread_rng().fill_bytes(&mut b);
+    let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let hash = Sha256::digest(verifier.as_bytes());
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash);
+    (verifier, challenge)
+}
+
+/// 生成随机 state（OAuth CSRF 防伪）。
+fn oauth_state() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+// ══════════════════════════════════════════════════════════════
+// xAI / Grok 设备码（RFC 8628 + OIDC discovery）
+// ══════════════════════════════════════════════════════════════
+
+/// 解析 xAI OIDC discovery → (device_authorization_endpoint, token_endpoint)。
+async fn xai_discovery(http: &reqwest::Client) -> Result<(String, String), String> {
+    let resp = http
+        .get(XAI_DISCOVERY)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    let dev = v
+        .get("device_authorization_endpoint")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let tok = v
+        .get("token_endpoint")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if dev.is_empty() || tok.is_empty() {
+        return Err("xAI discovery 缺端点".into());
+    }
+    Ok((dev, tok))
+}
+
+/// 发起 Grok 设备码 → (device_code, user_code, verification_uri, token_endpoint)。
+async fn xai_start(http: &reqwest::Client) -> Result<(String, String, String, String), String> {
+    let (dev_ep, tok_ep) = xai_discovery(http).await?;
+    let resp = http
+        .post(dev_ep)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("client_id={XAI_CLIENT_ID}&scope={}", urlencode(XAI_SCOPE)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "HTTP {status}：{}",
+            v.to_string().chars().take(150).collect::<String>()
+        ));
+    }
+    let device_code = v.get("device_code").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let user_code = v.get("user_code").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let verify = v
+        .get("verification_uri_complete")
+        .or_else(|| v.get("verification_uri"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if device_code.is_empty() || user_code.is_empty() {
+        return Err(format!(
+            "响应缺 device_code/user_code：{}",
+            v.to_string().chars().take(200).collect::<String>()
+        ));
+    }
+    Ok((device_code, user_code, verify, tok_ep))
+}
+
+/// Grok token 轮询。
+async fn xai_poll(
+    http: &reqwest::Client,
+    token_endpoint: &str,
+    device_code: &str,
+) -> Result<String, String> {
+    let resp = http
+        .post(token_endpoint)
+        .timeout(std::time::Duration::from_secs(15))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}&client_id={XAI_CLIENT_ID}"
+        ))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    if let Some(err) = v.get("error").and_then(|x| x.as_str()) {
+        match err {
+            "authorization_pending" => {
+                return Err("等待授权中（打开验证页输入用户码，面板自动入库）".into())
+            }
+            "slow_down" => return Err("等待授权中（请稍候再查）".into()),
+            "expired_token" => return Err("设备码已过期，请重新发起登录".into()),
+            "access_denied" => return Err("授权被拒绝".into()),
+            _ => return Err(format!("oauth 错误：{err}")),
+        }
+    }
+    let tok = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if tok.is_empty() {
+        return Err("响应无 access_token".into());
+    }
+    Ok(tok)
+}
+
+// ══════════════════════════════════════════════════════════════
+// OpenAI Codex / Anthropic Claude：PKCE 授权码 + 本地回调
+// ══════════════════════════════════════════════════════════════
+
+/// 生成 Codex 授权 URL（PKCE S256，OpenAI 账号）。
+async fn codex_start() -> Result<(String, String, String), String> {
+    let (verifier, challenge) = pkce_pair();
+    let state = oauth_state();
+    let url = format!(
+        "{CODEX_AUTH_URL}?client_id={CODEX_CLIENT_ID}&response_type=code&redirect_uri={}&scope=openid+email+profile+offline_access&state={state}&code_challenge={challenge}&code_challenge_method=S256&prompt=login&id_token_add_organizations=true&codex_cli_simplified_flow=true",
+        urlencode(CODEX_REDIRECT)
+    );
+    Ok((url, verifier, state))
+}
+
+/// 用授权码换 Codex token。
+async fn codex_exchange(
+    http: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+) -> Result<String, String> {
+    let resp = http
+        .post(CODEX_TOKEN_URL)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=authorization_code&client_id={CODEX_CLIENT_ID}&code={code}&redirect_uri={}&code_verifier={verifier}",
+            urlencode(CODEX_REDIRECT)
+        ))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "HTTP {status}：{}",
+            v.to_string().chars().take(150).collect::<String>()
+        ));
+    }
+    let tok = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if tok.is_empty() {
+        return Err("响应无 access_token".into());
+    }
+    Ok(tok)
+}
+
+/// 生成 Claude Code 授权 URL（PKCE S256，Anthropic 账号）。
+async fn claude_start() -> Result<(String, String, String), String> {
+    let (verifier, challenge) = pkce_pair();
+    let state = oauth_state();
+    let url = format!(
+        "{CLAUDE_AUTH_URL}?code=true&client_id={CLAUDE_CLIENT_ID}&redirect_uri={}&response_type=code&scope={}&state={state}&code_challenge={challenge}&code_challenge_method=S256",
+        urlencode(CLAUDE_REDIRECT),
+        urlencode(CLAUDE_SCOPE)
+    );
+    Ok((url, verifier, state))
+}
+
+/// 用授权码换 Claude token（JSON body，Claude Code 2.1.220 实测字段序）。
+async fn claude_exchange(
+    http: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+    state: &str,
+) -> Result<String, String> {
+    let resp = http
+        .post(CLAUDE_TOKEN_URL)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "axios/1.15.2")
+        .body(json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": CLAUDE_REDIRECT,
+            "client_id": CLAUDE_CLIENT_ID,
+            "code_verifier": verifier,
+            "state": state,
+        }).to_string())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "HTTP {status}：{}",
+            v.to_string().chars().take(150).collect::<String>()
+        ));
+    }
+    let tok = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if tok.is_empty() {
+        return Err("响应无 access_token".into());
+    }
+    Ok(tok)
+}
+
+/// 简易 URL 编码（OAuth 参数值内空格/特殊字符）。
+fn urlencode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            _ => {
+                let mut b = [0u8; 4];
+                c.encode_utf8(&mut b);
+                b[..c.len_utf8()]
+                    .iter()
+                    .map(|x| format!("%{x:02X}"))
+                    .collect()
+            }
+        })
+        .collect()
+}
+
 /// 生成 X-Msh-Device-Id（随机 32 hex；无 uuid crate，用 rand）。
 fn kimi_device_id() -> String {
     use rand::RngCore;
@@ -577,4 +931,107 @@ mod tests {
         let d = b64url_nopad(&Sha256::digest(v.as_bytes()));
         assert_eq!(d.len(), 43, "S256 challenge 应为 43 字符 urlsafe");
     }
+
+    #[test]
+    fn pkce_pair_shape() {
+        let (v, c) = pkce_pair();
+        assert!(v.len() >= 43 && v.len() <= 128);
+        assert_eq!(c.len(), 43, "S256 challenge base64url 43 字符");
+        // 验证 challenge = SHA256(verifier) base64url 无填充
+        let expect = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(v.as_bytes()));
+        assert_eq!(c, expect);
+        assert_eq!(oauth_state().len(), 32);
+    }
+}
+
+/// ══════════════════════════════════════════════════════════════
+/// OAuth 本地回调捕获（Codex 1455 / Claude 54545）
+/// ══════════════════════════════════════════════════════════════
+
+/// 回调队列：(state, code)。面板监听端口收到回调即入队；poll 匹配 state 换 token。
+/// 服务器场景用户粘贴回调 URL 也走此队列。
+pub static AUTH_CALLBACKS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// 启动 OAuth 本地回调监听（127.0.0.1:1455=Codex、127.0.0.1:54545=Claude）。
+/// 绑定失败仅告警（登录可用「粘贴回调 URL」兜底）。
+pub fn start_callback_listeners() {
+    for port in [1455u16, 54545u16] {
+        let bind = format!("127.0.0.1:{port}");
+        tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind(&bind).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("OAuth 回调监听 {bind} 绑定失败：{e}（登录可用粘贴回调 URL 兜底）");
+                    return;
+                }
+            };
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 4096];
+                    let n = match sock.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or("/");
+                    let query = match path.split_once('?') {
+                        Some((_, q)) => q,
+                        None => "",
+                    };
+                    let mut code = String::new();
+                    let mut state = String::new();
+                    for kv in query.split('&') {
+                        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+                        match k {
+                            "code" => code = v.to_string(),
+                            "state" => state = v.to_string(),
+                            _ => {}
+                        }
+                    }
+                    if !code.is_empty() && !state.is_empty() {
+                        AUTH_CALLBACKS.lock().unwrap().push((state, code));
+                    }
+                    let body = "<html><body style=\"font-family:sans-serif;padding:40px\"><h2>授权成功 ✓</h2><p>可以关闭此页，返回面板查看账号状态。</p></body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+    }
+}
+
+/// 用户粘贴回调 URL（服务器场景）→ 提取 code/state 入队。
+pub fn submit_callback_url(url: &str) -> Result<(), String> {
+    let raw = url.trim();
+    if raw.is_empty() {
+        return Err("回调地址为空".into());
+    }
+    let (_, query) = match raw.split_once('?') {
+        Some((_, q)) => (raw, q),
+        None => return Err("回调地址缺少 ?code=&state= 参数".into()),
+    };
+    let mut code = String::new();
+    let mut state = String::new();
+    for kv in query.split('&') {
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        match k {
+            "code" => code = v.to_string(),
+            "state" => state = v.to_string(),
+            _ => {}
+        }
+    }
+    if code.is_empty() || state.is_empty() {
+        return Err("回调地址缺少 code 或 state 参数".into());
+    }
+    AUTH_CALLBACKS.lock().unwrap().push((state, code));
+    Ok(())
 }
