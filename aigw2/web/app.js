@@ -233,7 +233,8 @@ function srcDrawer(p) {
   const isMinimax = p.id === 'minimax';
   const isKimi = p.id === 'sub-kimi' || p.id === 'sub-kimi-ai' || p.id === 'sub-grok';
   const isCline = p.id === 'cline';
-  const isPkce = p.id === 'sub-codex' || p.id === 'sub-claude';
+  const isMeta = p.id === 'sub-meta';
+  const isPkce = p.id === 'sub-codex' || p.id === 'sub-claude' || p.id === 'sub-antigravity' || p.id === 'sub-devin';
   const isLobster = p.id === 'lobster';
   const isKey = p.auth === 'api_key';
   const isAnon = p.auth === 'anon';
@@ -242,15 +243,20 @@ function srcDrawer(p) {
   if (isAnon) {
     body = `<div class="note">免密平台：无需凭据，直接可用。点下面的「测试连通」看是否可转发。</div>
       <button class="btn pri" onclick="testAnon('${esc(p.id)}')">测试连通</button>`;
-  } else if (isWb || isMinimax || isKimi || isCline) {
-    body = `<div class="note">${isCline ? 'Cline 设备码（WorkOS OAuth）：' : isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : isMinimax ? 'MiniMax 设备码：' : isKimi && p.id === 'sub-grok' ? 'Grok 设备码（RFC 8628，需代理访问）：' : 'Kimi Code 设备码（RFC 8628）：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
+  } else if (isWb || isMinimax || isKimi || isCline || isMeta) {
+    body = `<div class="note">${isCline ? 'Cline 设备码（WorkOS OAuth）：' : isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : isMinimax ? 'MiniMax 设备码：' : isMeta ? 'Meta Muse 设备码（登录后自动铸造 API Key）：' : isKimi && p.id === 'sub-grok' ? 'Grok 设备码（RFC 8628，需代理访问）：' : 'Kimi Code 设备码（RFC 8628）：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
       <div class="row">
         <button class="btn pri" onclick="authStart('${esc(p.id)}')">开始登录</button>
         <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>
       </div>
       <div id="authBox"></div>`;
   } else if (isPkce) {
-    body = `<div class="note">${p.id === 'sub-codex' ? 'Codex 跳转登录（PKCE + 本地 1455 回调）' : 'Claude Code 跳转登录（PKCE + 本地 54545 回调）'}：点「打开授权页」在浏览器完成登录（跳转登录，非扫码）。面板自动捕获回调换 token；若部署在服务器，把浏览器跳转后地址栏的完整 URL 粘贴到下方输入框。</div>
+    const pkceHint = p.id === 'sub-antigravity'
+      ? 'Antigravity 跳转登录（Google 账号 + 本地 51121 回调）'
+      : p.id === 'sub-devin'
+      ? 'Devin 跳转登录（headless PKCE，官方 CLI 无回调端口；服务器部署直接把地址栏 URL 粘回来）'
+      : p.id === 'sub-codex' ? 'Codex 跳转登录（PKCE + 本地 1455 回调）' : 'Claude Code 跳转登录（PKCE + 本地 54545 回调）';
+    body = `<div class="note">${pkceHint}：点「打开授权页」在浏览器完成登录（跳转登录，非扫码）。面板自动捕获回调换 token；若部署在服务器，把浏览器跳转后地址栏的完整 URL 粘贴到下方输入框。</div>
       <div class="row">
         <button class="btn pri" onclick="authStart('${esc(p.id)}')">打开授权页</button>
         <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>

@@ -55,6 +55,28 @@ const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_REDIRECT: &str = "http://localhost:54545/callback";
 const CLAUDE_SCOPE: &str = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
+/// Antigravity/Google OAuth（cliproxy-src internal/auth/antigravity/constants.go 一手）：
+/// Google 授权码 PKCE + 本地 51121 回调。
+const ANTI_CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const ANTI_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const ANTI_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const ANTI_REDIRECT: &str = "http://localhost:51121/callback";
+const ANTI_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs";
+// 上游 API 端点（Antigravity 转发用）：https://cloudcode-pa.googleapis.com（daily- 域 daily-cloudcode-pa.googleapis.com）
+
+/// Meta Muse 设备码（cliproxy-src internal/auth/meta/meta.go 一手）：RFC 8628 + mint API Key。
+const META_CLIENT_ID: &str = "1031625952748946";
+const META_DEVICE_URL: &str = "https://auth.meta.com/oidc/device/authorization/";
+const META_TOKEN_URL: &str = "https://auth.meta.com/oidc/device/token/";
+const META_MINT_URL: &str = "https://api.meta.ai/muse-code/key";
+const META_DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+const META_UA: &str = "muse-code/1.0.2";
+
+/// Devin headless PKCE（cliproxy-src internal/auth/devin/devin_auth.go 一手）：
+/// 官方 CLI 无 redirect_uri + cli_pkce_marker=1（服务器场景直接粘贴地址栏 URL）。
+const DEVIN_APP_BASE: &str = "https://app.devin.ai";
+const DEVIN_API_BASE: &str = "https://api.devin.ai";
+
 /// 网易 Lobster AI（有道龙虾）OAuth（本地 LobsterAI2API/ 源码一手来源）：
 /// 本地随机端口回调 → 门户授权 → exchange 换码（跳转登录，非扫码）。
 const LOBSTER_UPSTREAM: &str = "https://lobsterai-server.youdao.com";
@@ -262,6 +284,46 @@ impl LoginEngine {
                     sess.message = format!("Lobster 授权 URL 生成失败：{e}");
                 }
             }
+        } else if platform == "sub-antigravity" {
+            // Antigravity/Google：PKCE 授权码 + 本地 51121 回调（跳转登录，非扫码）
+            match antigravity_start().await {
+                Ok((url, verifier, state)) => {
+                    sess.state = format!("antigravity:{verifier}:{state}");
+                    sess.login_url = url.clone();
+                    sess.message = "Antigravity 跳转登录（Google 账号）：点「打开授权页」在浏览器完成登录，面板自动捕获回调换 token 入库；若面板部署在服务器，把浏览器跳转后地址栏的 URL 粘贴到下方输入框。".into();
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Antigravity 授权 URL 生成失败：{e}");
+                }
+            }
+        } else if platform == "sub-devin" {
+            // Devin headless PKCE：官方 CLI 无 redirect_uri（服务器场景直接粘地址栏 URL）
+            match devin_start().await {
+                Ok((url, verifier, state)) => {
+                    sess.state = format!("devin:{verifier}:{state}");
+                    sess.login_url = url.clone();
+                    sess.message = "Devin 跳转登录（headless PKCE）：点「打开授权页」在浏览器完成登录后，把跳转后地址栏的完整 URL（带 code=...&state=...）粘贴到下方输入框并点「提交回调」；本机自动捕获回调。".into();
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Devin 授权 URL 生成失败：{e}");
+                }
+            }
+        } else if platform == "sub-meta" {
+            // Meta Muse：RFC 8628 设备码 + mint API Key
+            match meta_start(&auth_http()).await {
+                Ok((device_code, interval, user_code, verify_url)) => {
+                    sess.state = format!("meta:{device_code}:{interval}");
+                    sess.user_code = user_code.clone();
+                    sess.login_url = verify_url.clone();
+                    sess.message = "Meta Muse 设备码：打开验证页完成登录后，面板自动轮询换 token 并铸造 API Key 入库。".into();
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Meta 设备码申请失败：{e}");
+                }
+            }
         } else if let Some(spec) = specs.iter().find(|s| s.id == platform && !s.login_url.is_empty()) {
             // 跳转登录：用户自己浏览器打开登录页，登录后手动粘贴 Cookie/凭据入库。
             sess.login_url = spec.login_url.clone();
@@ -339,7 +401,16 @@ impl LoginEngine {
                 Some((d, t)) => xai_poll(&auth_http(), t, d).await,
                 None => Err("Grok 设备码会话不完整".to_string()),
             }
-        } else if sess.state.starts_with("codex:") || sess.state.starts_with("claude:") {
+        } else if sess.state.starts_with("meta:") {
+            // meta:{device_code}:{interval} → 三态轮询 → mint API Key
+            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+            if parts.len() < 3 {
+                Err("Meta 设备码会话不完整".to_string())
+            } else {
+                meta_poll(&auth_http(), parts[1], parts[2]).await
+            }
+        } else if sess.state.starts_with("codex:") || sess.state.starts_with("claude:")
+            || sess.state.starts_with("antigravity:") || sess.state.starts_with("devin:") {
             // {prefix}:{verifier}:{state} → 从回调队列取 code → 换 token
             let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
             if parts.len() < 3 {
@@ -355,10 +426,11 @@ impl LoginEngine {
             match code {
                 Some(code) => {
                     AUTH_CALLBACKS.lock().unwrap().retain(|(s, _)| s != state);
-                    if kind == "codex" {
-                        codex_exchange(&auth_http(), &code, verifier).await
-                    } else {
-                        claude_exchange(&auth_http(), &code, verifier, state).await
+                    match kind {
+                        "codex" => codex_exchange(&auth_http(), &code, verifier).await,
+                        "claude" => claude_exchange(&auth_http(), &code, verifier, state).await,
+                        "antigravity" => antigravity_exchange(&auth_http(), &code, verifier).await,
+                        _ => devin_exchange(&auth_http(), &code, verifier).await,
                     }
                 }
                 None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
@@ -1418,7 +1490,7 @@ pub static AUTH_CALLBACKS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new())
 /// 启动 OAuth 本地回调监听（127.0.0.1:1455=Codex、127.0.0.1:54545=Claude）。
 /// 绑定失败仅告警（登录可用「粘贴回调 URL」兜底）。
 pub fn start_callback_listeners() {
-    for port in [1455u16, 54545u16] {
+    for port in [1455u16, 54545u16, 51121u16] {
         let bind = format!("127.0.0.1:{port}");
         tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(&bind).await {
@@ -1497,4 +1569,219 @@ pub fn submit_callback_url(url: &str) -> Result<(), String> {
     }
     AUTH_CALLBACKS.lock().unwrap().push((state, code));
     Ok(())
+}
+
+/// ══════════════════════════════════════════════════════════════
+/// Antigravity/Google PKCE（cliproxy-src internal/auth/antigravity 一手）
+/// ══════════════════════════════════════════════════════════════
+
+async fn antigravity_start() -> Result<(String, String, String), String> {
+    let (verifier, challenge) = pkce_pair();
+    let state = oauth_state();
+    let url = format!(
+        "{ANTI_AUTH_URL}?client_id={ANTI_CLIENT_ID}&redirect_uri={}&response_type=code&scope={}&state={state}&code_challenge={challenge}&code_challenge_method=S256&prompt=consent&access_type=offline",
+        urlencode(ANTI_REDIRECT),
+        urlencode(ANTI_SCOPE)
+    );
+    Ok((url, verifier, state))
+}
+
+/// 用授权码换 Antigravity/Google token。
+async fn antigravity_exchange(
+    http: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+) -> Result<String, String> {
+    let resp = http
+        .post(ANTI_TOKEN_URL)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=authorization_code&client_id={ANTI_CLIENT_ID}&code={code}&redirect_uri={}&code_verifier={verifier}",
+            urlencode(ANTI_REDIRECT)
+        ))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "HTTP {status}：{}",
+            v.to_string().chars().take(150).collect::<String>()
+        ));
+    }
+    let tok = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if tok.is_empty() {
+        return Err("响应无 access_token".into());
+    }
+    Ok(tok)
+}
+
+/// ══════════════════════════════════════════════════════════════
+/// Meta Muse 设备码 + mint API Key（cliproxy-src internal/auth/meta 一手）
+/// ══════════════════════════════════════════════════════════════
+
+async fn meta_start(
+    http: &reqwest::Client,
+) -> Result<(String, String, String, String), String> {
+    let resp = http
+        .post(META_DEVICE_URL)
+        .timeout(std::time::Duration::from_secs(15))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .header("User-Agent", META_UA)
+        .body(format!("client_id={META_CLIENT_ID}"))
+        .send()
+        .await
+        .map_err(|e| format!("网络失败：{e}"))?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "HTTP {status}：{}",
+            v.to_string().chars().take(150).collect::<String>()
+        ));
+    }
+    let device_code = v.get("device_code").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let user_code = v.get("user_code").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let verify = v
+        .get("verification_uri_complete")
+        .or_else(|| v.get("verification_uri"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("https://auth.meta.com/activate")
+        .to_string();
+    let interval = v.get("interval").and_then(|x| x.as_i64()).unwrap_or(5).to_string();
+    if device_code.is_empty() || user_code.is_empty() {
+        return Err("Meta 设备码响应缺少 device_code/user_code".into());
+    }
+    Ok((device_code, interval, user_code, verify))
+}
+
+/// Meta 轮询 → dca_token → mint API Key（usable credential = api_key）。
+async fn meta_poll(
+    http: &reqwest::Client,
+    device_code: &str,
+    interval: &str,
+) -> Result<String, String> {
+    let interval_s = interval.parse::<u64>().unwrap_or(5).max(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err("Meta 设备码授权超时（15 分钟）".into());
+        }
+        let resp = http
+            .post(META_TOKEN_URL)
+            .timeout(std::time::Duration::from_secs(15))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Accept", "application/json")
+            .header("User-Agent", META_UA)
+            .body(format!(
+                "grant_type={META_DEVICE_GRANT}&device_code={device_code}&client_id={META_CLIENT_ID}"
+            ))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        let v: Value = resp.json().await.unwrap_or(Value::Null);
+        if status == 200 {
+            let dca = v.get("access_token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if dca.is_empty() {
+                return Err("Meta 响应无 access_token".into());
+            }
+            return meta_mint(http, &dca).await;
+        }
+        let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
+        match err {
+            "authorization_pending" => {
+                tokio::time::sleep(std::time::Duration::from_secs(interval_s)).await;
+            }
+            "slow_down" => {
+                tokio::time::sleep(std::time::Duration::from_secs(interval_s + 5)).await;
+            }
+            "access_denied" => return Err("用户拒绝了授权".into()),
+            "expired_token" => return Err("设备码已过期，请重新开始登录".into()),
+            "" => {
+                tokio::time::sleep(std::time::Duration::from_secs(interval_s)).await;
+            }
+            _ => return Err(format!("Meta 授权服务器错误：{err}")),
+        }
+    }
+}
+
+/// 用 dca_token 铸造 Meta API Key。
+async fn meta_mint(http: &reqwest::Client, dca: &str) -> Result<String, String> {
+    let resp = http
+        .post(META_MINT_URL)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Authorization", format!("Bearer {dca}"))
+        .header("User-Agent", META_UA)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .body(json!({"dca_token": dca}).to_string())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "mint HTTP {status}：{}",
+            v.to_string().chars().take(150).collect::<String>()
+        ));
+    }
+    let api_key = v.get("api_key").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if api_key.is_empty() {
+        return Err("Meta mint 响应无 api_key".into());
+    }
+    Ok(api_key)
+}
+
+/// ══════════════════════════════════════════════════════════════
+/// Devin headless PKCE（cliproxy-src internal/auth/devin 一手）
+/// 官方 CLI 无 redirect_uri + cli_pkce_marker=1；服务器场景粘贴地址栏 URL。
+/// ══════════════════════════════════════════════════════════════
+
+async fn devin_start() -> Result<(String, String, String), String> {
+    let (verifier, challenge) = pkce_pair();
+    let state = oauth_state();
+    let url = format!(
+        "{DEVIN_APP_BASE}/auth/cli/continue?prompt=select_account&code_challenge={challenge}&code_challenge_method=S256&cli_pkce_marker=1&state={state}"
+    );
+    Ok((url, verifier, state))
+}
+
+/// 用授权码换 Devin session token。
+async fn devin_exchange(
+    http: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+) -> Result<String, String> {
+    let resp = http
+        .post(format!("{DEVIN_API_BASE}/auth/cli/token"))
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .body(json!({"code": code, "code_verifier": verifier}).to_string())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "HTTP {status}：{}",
+            v.to_string().chars().take(150).collect::<String>()
+        ));
+    }
+    let tok = v.get("token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if tok.is_empty() {
+        return Err("响应无 token".into());
+    }
+    Ok(tok)
 }
