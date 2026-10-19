@@ -992,6 +992,16 @@ async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
                     false,
                     &spec.base_url,
                 );
+                // Cline WorkOS 401 → 刷新双通道自愈 → 重试一次（22 cline2api 自愈链）
+                if spec.id == "cline" && e.status == 401 && secret.matches(':').count() >= 2 {
+                    if let Some(resp) = cline_retry_after_refresh(
+                        &st, &spec, &account, &secret, &body, is_stream, started, &model,
+                    )
+                    .await
+                    {
+                        return resp;
+                    }
+                }
                 openai_error(if e.status == 0 { 502 } else { e.status }, &e.body)
             }
         }
@@ -1031,7 +1041,131 @@ async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
                     waf_fp,
                     &spec.base_url,
                 );
+                // Cline WorkOS 401 → 刷新双通道自愈 → 重试一次（22 cline2api 自愈链）
+                if spec.id == "cline" && e.status == 401 && secret.matches(':').count() >= 2 {
+                    if let Some(resp) = cline_retry_after_refresh(
+                        &st, &spec, &account, &secret, &body, is_stream, started, &model,
+                    )
+                    .await
+                    {
+                        return resp;
+                    }
+                }
                 openai_error(if e.status == 0 { 502 } else { e.status }, &e.body)
+            }
+        }
+    }
+}
+
+/// Cline WorkOS 401 自愈重试：刷新双通道（/auth/refresh → WorkOS 直刷 → register 换皮）→
+/// 更新账号 secret → 重试一次转发。刷新失败/仍 401 返回 None（上层保留原错误）。
+async fn cline_retry_after_refresh(
+    st: &AppState,
+    spec: &ProviderSpec,
+    account: &str,
+    secret: &str,
+    body: &Bytes,
+    is_stream: bool,
+    started: Instant,
+    model: &str,
+) -> Option<Response> {
+    let http = aigw_relay::auth_login::auth_http();
+    let new_secret = aigw_relay::auth_login::cline_refresh(&http, secret).await.ok()?;
+    st.accounts.update_secret(account, &new_secret);
+    tracing::info!("cline 账号 {account} 401 自愈刷新成功，重试一次转发");
+    let spec2 = spec.clone();
+    let body2 = body.clone();
+    if is_stream {
+        match st.client.forward_stream(&spec2, &new_secret, &body2).await {
+            Ok((stream, stat_rx)) => {
+                let store = st.store.clone();
+                let pool = st.pool.clone();
+                let spec_id = spec.id.clone();
+                let spec_url = spec.base_url.clone();
+                let model2 = model.to_string();
+                let account2 = account.to_string();
+                tokio::spawn(async move {
+                    if let Ok(stat) = stat_rx.recv() {
+                        let ok = stat.error.is_none();
+                        record(
+                            &store,
+                            &pool,
+                            &spec_id,
+                            &account2,
+                            &model2,
+                            started,
+                            ok,
+                            stat.tokens_in,
+                            stat.tokens_out,
+                            stat.error,
+                            false,
+                            &spec_url,
+                        );
+                    }
+                });
+                Some(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .header(header::CACHE_CONTROL, "no-cache")
+                        .body(Body::from_stream(stream))
+                        .unwrap(),
+                )
+            }
+            Err(e2) => {
+                record(
+                    &st.store,
+                    &st.pool,
+                    &spec.id,
+                    &account,
+                    &model,
+                    started,
+                    false,
+                    0,
+                    0,
+                    Some(e2.class),
+                    false,
+                    &spec.base_url,
+                );
+                Some(openai_error(if e2.status == 0 { 502 } else { e2.status }, &e2.body))
+            }
+        }
+    } else {
+        match st.client.forward_nonstream(&spec2, &new_secret, &body2).await {
+            Ok(v) => {
+                let (tin, tout) = extract_usage(&v);
+                record(
+                    &st.store,
+                    &st.pool,
+                    &spec.id,
+                    &account,
+                    &model,
+                    started,
+                    true,
+                    tin,
+                    tout,
+                    None,
+                    false,
+                    &spec.base_url,
+                );
+                Some(Json(v).into_response())
+            }
+            Err(e2) => {
+                record(
+                    &st.store,
+                    &st.pool,
+                    &spec.id,
+                    &account,
+                    &model,
+                    started,
+                    false,
+                    0,
+                    0,
+                    Some(e2.class),
+                    false,
+                    &spec.base_url,
+                );
+                Some(openai_error(if e2.status == 0 { 502 } else { e2.status }, &e2.body))
             }
         }
     }

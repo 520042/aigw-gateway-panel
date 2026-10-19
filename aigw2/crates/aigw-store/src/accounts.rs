@@ -134,6 +134,20 @@ impl AccountStore {
         a
     }
 
+    /// 按账号 id 更新 secret（Cline WorkOS 刷新后写回）并持久化。
+    /// 返回是否命中并更新。
+    pub fn update_secret(&self, id: &str, secret: &str) -> bool {
+        let mut accs = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = accs.iter_mut().find(|a| a.id == id) {
+            existing.secret = secret.to_string();
+            existing.status = "active".into();
+            self.save_locked(&accs);
+            true
+        } else {
+            false
+        }
+    }
+
     /// 平台的启用账号 `(id, secret)` 列表（明文，仅供中继）。
     pub fn secrets_for(&self, platform: &str) -> Vec<(String, String)> {
         self.inner

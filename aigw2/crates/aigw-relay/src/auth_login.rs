@@ -916,6 +916,135 @@ async fn cline_start(http: &reqwest::Client) -> Result<(String, String, String, 
     Ok((device_code, user_code, verify, interval))
 }
 
+/// Cline register 换皮（auth.go:263-267 注释：refresh token 本质即 WorkOS refresh token）。
+/// 返回 (cline_access_token, cline_refresh_token)。
+async fn cline_register(
+    http: &reqwest::Client,
+    wos_at: &str,
+    wos_rt: &str,
+) -> Result<(String, String), String> {
+    let rr = http
+        .post(format!("{CLINE_API_BASE}/auth/register"))
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .body(format!(
+            r#"{{"accessToken":"{wos_at}","refreshToken":"{wos_rt}"}}"#
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("register 请求失败：{e}"))?;
+    let rstatus = rr.status().as_u16();
+    let rv: Value = rr.json().await.map_err(|e| e.to_string())?;
+    if !(200..300).contains(&rstatus) {
+        return Err(format!(
+            "register HTTP {rstatus}：{}",
+            rv.to_string().chars().take(200).collect::<String>()
+        ));
+    }
+    let cat = rv
+        .get("accessToken")
+        .or_else(|| rv.get("access_token"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let crt = rv
+        .get("refreshToken")
+        .or_else(|| rv.get("refresh_token"))
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| wos_rt.to_string());
+    if cat.is_empty() {
+        return Err(format!(
+            "register 响应缺 accessToken：{}",
+            rv.to_string().chars().take(200).collect::<String>()
+        ));
+    }
+    Ok((cat, crt))
+}
+
+/// Cline 刷新双通道自愈（22 cline2api pool.go:358-388 一手）：
+/// 先 `POST /auth/refresh`；400/401/403 才算拒绝（网络/5xx 只算 transient），
+/// 拒绝后走 `refreshViaWorkOS`（authenticate grant_type=refresh_token）→ 再 register 换皮。
+/// 输入/输出 secret = `workos:{at}:{rt}`；双通道全拒 → Err（需重新 OAuth）。
+pub async fn cline_refresh(http: &reqwest::Client, secret: &str) -> Result<String, String> {
+    let parts: Vec<&str> = secret.split(':').collect();
+    if parts.len() < 3 {
+        return Err("secret 无 refresh_token（需重新登录）".into());
+    }
+    let rt = parts[2].to_string();
+    // 1) Cline /auth/refresh
+    let rr = http
+        .post(format!("{CLINE_API_BASE}/auth/refresh"))
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .body(format!(
+            r#"{{"refreshToken":"{rt}","grantType":"refresh_token"}}"#
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("refresh 请求失败：{e}"))?;
+    let rstatus = rr.status().as_u16();
+    let rv: Value = rr.json().await.unwrap_or(Value::Null);
+    if (200..300).contains(&rstatus) {
+        let at = rv
+            .get("accessToken")
+            .or_else(|| rv.get("access_token"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if !at.is_empty() {
+            let new_rt = rv
+                .get("refreshToken")
+                .or_else(|| rv.get("refresh_token"))
+                .and_then(|x| x.as_str())
+                .unwrap_or(&rt);
+            return Ok(format!("workos:{at}:{new_rt}"));
+        }
+    }
+    // 2) 被拒（400/401/403）→ WorkOS 直刷；网络/5xx 算 transient 不误判 expired
+    if rstatus == 400 || rstatus == 401 || rstatus == 403 {
+        let w = http
+            .post(WORKOS_AUTH_URL)
+            .timeout(std::time::Duration::from_secs(20))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!(
+                "grant_type=refresh_token&client_id={WORKOS_CLIENT_ID}&refresh_token={rt}"
+            ))
+            .send()
+            .await
+            .map_err(|e| format!("WorkOS 刷新请求失败：{e}"))?;
+        let wstatus = w.status().as_u16();
+        let wv: Value = w.json().await.unwrap_or(Value::Null);
+        if !(200..300).contains(&wstatus) {
+            return Err(format!(
+                "WorkOS 刷新被拒（HTTP {wstatus}）：{}——请重新发起登录",
+                wv.to_string().chars().take(150).collect::<String>()
+            ));
+        }
+        let wos_at = wv
+            .get("access_token")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let wos_rt = wv
+            .get("refresh_token")
+            .and_then(|x| x.as_str())
+            .unwrap_or(&rt)
+            .to_string();
+        if wos_at.is_empty() {
+            return Err("WorkOS 刷新响应缺 access_token".into());
+        }
+        // 3) 回 register 换正式 Cline 令牌
+        let (cat, crt) = cline_register(http, &wos_at, &wos_rt).await?;
+        return Ok(format!("workos:{cat}:{crt}"));
+    }
+    Err(format!(
+        "Cline refresh 上游异常（HTTP {rstatus}，transient，稍后自动重试）"
+    ))
+}
+
 /// Cline WorkOS 轮询 + register 换皮（22 cline2api auth.go:263-267, pool.go:358-388 一手）。
 /// 返回账号 secret = `workos:{cline_at}:{cline_rt}`（relay 转发取 `workos:{at}` 作 Bearer）。
 async fn cline_poll(
@@ -961,45 +1090,8 @@ async fn cline_poll(
     if wos_at.is_empty() || wos_rt.is_empty() {
         return Err("WorkOS 响应缺 token".into());
     }
-    // 2) Cline register 换皮：refresh token 本质即 WorkOS refresh token（auth.go:263-267 注释）
-    let rr = http
-        .post(format!("{CLINE_API_BASE}/auth/register"))
-        .timeout(std::time::Duration::from_secs(20))
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
-        .body(format!(
-            r#"{{"accessToken":"{wos_at}","refreshToken":"{wos_rt}"}}"#
-        ))
-        .send()
-        .await
-        .map_err(|e| format!("register 请求失败：{e}"))?;
-    let rstatus = rr.status().as_u16();
-    let rv: Value = rr.json().await.map_err(|e| e.to_string())?;
-    if !(200..300).contains(&rstatus) {
-        return Err(format!(
-            "register HTTP {rstatus}：{}",
-            rv.to_string().chars().take(200).collect::<String>()
-        ));
-    }
-    let cat = rv
-        .get("accessToken")
-        .or_else(|| rv.get("access_token"))
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let crt = rv
-        .get("refreshToken")
-        .or_else(|| rv.get("refresh_token"))
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or(wos_rt)
-        .to_string();
-    if cat.is_empty() {
-        return Err(format!(
-            "register 响应缺 accessToken：{}",
-            rv.to_string().chars().take(200).collect::<String>()
-        ));
-    }
+    // 2) Cline register 换皮（复用 cline_register）
+    let (cat, crt) = cline_register(http, &wos_at, &wos_rt).await?;
     Ok(format!("workos:{cat}:{crt}"))
 }
 
