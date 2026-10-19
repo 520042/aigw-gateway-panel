@@ -11,6 +11,7 @@
 pub mod glm;
 pub mod auth_login;
 pub mod proxy;
+pub mod wb;
 
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;

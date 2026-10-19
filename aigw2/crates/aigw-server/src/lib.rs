@@ -183,6 +183,7 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/accounts", get(accounts))
         .route("/api/pool", get(pool_snapshot))
         .route("/api/auth", post(auth_action))
+        .route("/api/checkin", get(checkin_status_all).post(checkin_claim_all))
         .route("/api/backup", get(backup_export).post(backup_restore))
         .route("/api/update-check", get(update_check))
         .route("/v1/models", get(models))
@@ -529,6 +530,39 @@ async fn accounts(State(st): State<AppState>) -> Json<Value> {
 
 async fn pool_snapshot(State(st): State<AppState>) -> Json<Value> {
     Json(st.pool.snapshot())
+}
+
+/// wb 族每日签到：GET /api/checkin（查全部 wb 账号状态）/ POST /api/checkin（全部领取）。
+/// 一手：workbuddy2api-master admin/backend.py:338-368（Buddy 加油站每日 100 积分）。
+async fn checkin_status_all(State(st): State<AppState>) -> Json<Value> {
+    Json(checkin_all(&st, false).await)
+}
+
+async fn checkin_claim_all(State(st): State<AppState>) -> Json<Value> {
+    Json(checkin_all(&st, true).await)
+}
+
+async fn checkin_all(st: &AppState, claim: bool) -> Value {
+    let http = aigw_relay::auth_login::auth_http();
+    let mut results: Vec<Value> = Vec::new();
+    for platform in ["wb-gateway", "codebuddy"] {
+        let Some(base) = aigw_relay::wb::wb_checkin_base(platform) else { continue };
+        for (acc_id, secret) in st.accounts.secrets_for(platform) {
+            let r = if claim {
+                aigw_relay::wb::claim_daily_checkin(&http, base, &secret).await
+            } else {
+                aigw_relay::wb::checkin_status(&http, base, &secret).await
+            };
+            results.push(json!({
+                "platform": platform,
+                "account": acc_id,
+                "action": if claim { "claim" } else { "status" },
+                "ok": r.is_ok(),
+                "data": r.unwrap_or_else(|e| json!({"error": e})),
+            }));
+        }
+    }
+    json!({"ok": true, "claim": claim, "results": results, "count": results.len()})
 }
 
 /// 备份导出（M5 交付链，对齐 cline2api tmp+rename 数据纪律）：GET /api/backup

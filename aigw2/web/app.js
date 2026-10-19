@@ -486,7 +486,13 @@ async function viewOverview(el) {
 
 async function viewAccounts(el) {
   const ac = await api('/api/accounts');
+  const wbN = ac.rows.filter((a) => a.platform === 'wb-gateway' || a.platform === 'codebuddy').length;
   el.innerHTML = `<section class="card glass">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <b>账号凭据</b>
+      ${wbN > 0 ? `<button class="btn sm" onclick="wbCheckin()">wb 每日签到（${wbN} 账号）</button>` : ''}
+      <span class="faint" style="margin-left:auto">Buddy 加油站每日 100 积分 · 仅 wb 族账号可签到</span>
+    </div>
     <table><thead><tr><th>名称</th><th>平台</th><th>类型</th><th>凭据</th><th>状态</th></tr></thead>
     <tbody>${ac.rows.map((a) => `<tr>
       <td><b>${esc(a.name || a.id)}</b><br><span class="faint mono">${esc(a.id)}</span></td>
@@ -495,6 +501,51 @@ async function viewAccounts(el) {
       <td>${a.enabled ? pill('ok', '启用') : pill('mut', '停用')}</td>
     </tr>`).join('')}</tbody></table>
   </section>`;
+}
+
+// wb 每日签到：GET=/api/checkin 查状态，POST=/api/checkin 领取。
+async function wbCheckin() {
+  const mk = `<div class="modal-mask" onclick="if(event.target===this)this.remove()"><div class="modal">
+    <div class="modal-hd">wb 每日签到（Buddy 加油站 100 积分）<b class="x" onclick="this.closest('.modal-mask').remove()">✕</b></div>
+    <div class="modal-bd">
+      <div class="faint">先查各 wb 账号签到状态，再一键领取。仅 wb-gateway / codebuddy（CN）账号可签到。</div>
+      <div class="modal-foot" style="margin-top:14px">
+        <button class="btn" onclick="wbCheckinRun('status', this)">仅查状态</button>
+        <button class="btn pri" onclick="wbCheckinRun('claim', this)">全部领取</button>
+        <button class="btn" onclick="this.closest('.modal-mask').remove()">取消</button>
+      </div>
+      <div id="wbCheckinOut" style="margin-top:12px"></div>
+    </div>
+  </div></div>`;
+  document.body.insertAdjacentHTML('beforeend', mk);
+}
+
+async function wbCheckinRun(action, btn) {
+  btn.disabled = true;
+  const out = document.getElementById('wbCheckinOut');
+  out.innerHTML = '<div class="faint">执行中…</div>';
+  try {
+    const r = await api('/api/checkin', { method: action === 'claim' ? 'POST' : 'GET' });
+    out.innerHTML = fmtCheckin(r);
+  } catch (e) {
+    out.innerHTML = `<div class="err">失败：${esc(e)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function fmtCheckin(r) {
+  if (!r || !r.results || !r.results.length) return '<div class="empty">无 wb 账号（账号页先接入 wb-gateway / codebuddy）</div>';
+  return `<table style="width:100%"><thead><tr><th>平台</th><th>账号</th><th>动作</th><th>结果</th></tr></thead><tbody>` +
+    r.results.map((x) => {
+      const d = x.data || {};
+      let txt;
+      if (!x.ok) txt = `<span class="err">${esc(d.error || '请求失败')}</span>`;
+      else if (d.ok === true) txt = `✅ 成功 +${d.credit} 积分，连续 ${d.streak_days} 天`;
+      else if (d.ok === false) txt = `⛔ ${esc(d.status || '业务拒绝')}（code=${d.code}）`;
+      else txt = esc(JSON.stringify(d).slice(0, 150));
+      return `<tr><td>${esc(x.platform)}</td><td class="mono">${esc(x.account)}</td><td>${x.action === 'claim' ? '领取' : '查状态'}</td><td>${txt}</td></tr>`;
+    }).join('') + `</tbody></table><div class="faint" style="margin-top:8px">共 ${r.count} 个账号</div>`;
 }
 
 // ── M4 可视化（对齐 sub2api TokenUsageTrend/donut + dsh Σtoken 口径）──
