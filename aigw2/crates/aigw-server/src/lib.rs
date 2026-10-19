@@ -15,7 +15,7 @@ use aigw_pool::Pool;
 use aigw_relay::auth_login::LoginEngine;
 use aigw_relay::{OutClient, StreamStat};
 use aigw_registry::{AuthKind, ProviderSpec};
-use aigw_store::{AccountStore, CustomStore, Store, UsageEvent};
+use aigw_store::{AccountStore, CustomStore, FreeStore, Store, UsageEvent};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{header, StatusCode, Uri};
@@ -42,6 +42,8 @@ pub struct AppState {
     pub accounts: Arc<AccountStore>,
     /// 自定义 API 存储（接入源页「自定义 API」动态并入 specs）。
     pub custom: Arc<CustomStore>,
+    /// 公益站聚合存储（接入源页「公益站」，手动/每日刷新）。
+    pub free: Arc<FreeStore>,
     /// 登录引擎（批2：设备授权/扫码 → token 自动落池）
     pub login: Arc<LoginEngine>,
     /// live 模型缓存：(时间, (spec_id, model) 索引, 响应体)
@@ -57,6 +59,7 @@ impl AppState {
         client: Arc<OutClient>,
         accounts: Arc<AccountStore>,
         custom: Arc<CustomStore>,
+        free: Arc<FreeStore>,
     ) -> AppState {
         AppState {
             specs,
@@ -65,16 +68,20 @@ impl AppState {
             client,
             accounts,
             custom,
+            free,
             login: Arc::new(LoginEngine::new()),
             models_cache: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// 全量平台 = 文件 spec + 自定义 API（动态并进）。
+    /// 全量平台 = 文件 spec + 自定义 API + 公益站（动态并进）。
     pub fn all_specs(&self) -> Vec<ProviderSpec> {
         let mut v = self.specs.clone();
         for c in self.custom.rows() {
             v.push(custom_to_spec(&c));
+        }
+        for s in self.free.rows() {
+            v.push(free_to_spec(&s));
         }
         v
     }
@@ -135,6 +142,32 @@ fn custom_to_spec(c: &aigw_store::CustomApi) -> ProviderSpec {
     }
 }
 
+/// 公益站 → 声明式 ProviderSpec（auth=api_key；openai 兼容 /v1）。
+fn free_to_spec(s: &aigw_store::FreeSite) -> ProviderSpec {
+    let base = s.base_url.trim_end_matches('/').to_string();
+    ProviderSpec {
+        id: s.id.clone(),
+        name: s.name.clone(),
+        enabled: s.enabled,
+        auth: AuthKind::ApiKey,
+        base_url: format!("{base}/v1"),
+        format: "openai".into(),
+        models: Vec::new(),
+        models_policy: aigw_registry::ModelsPolicy::Live,
+        stream_dialect: aigw_registry::StreamDialect::SseDelta,
+        headers: Default::default(),
+        chat_path: String::new(),
+        models_path: String::new(),
+        models_filter: String::new(),
+        upstream_kind: "openai".into(),
+        signer: String::new(),
+        biz_err: Vec::new(),
+        hosts: Vec::new(),
+        login_url: s.url.clone(),
+        notes: s.desc.clone(),
+    }
+}
+
 pub fn build_app(st: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
@@ -142,6 +175,7 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/requests", get(requests))
         .route("/api/platforms", get(platforms))
         .route("/api/custom", get(custom_list).post(custom_action))
+        .route("/api/free", get(free_list).post(free_action))
         .route("/api/proxy", get(proxy_get).post(proxy_set))
         .route("/api/accounts", get(accounts))
         .route("/api/pool", get(pool_snapshot))
@@ -261,6 +295,189 @@ async fn custom_action(State(st): State<AppState>, body: Bytes) -> Response {
                 Ok(()) => Json(json!({"ok": true, "message": "模型清单已同步"})).into_response(),
                 Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": e}))).into_response(),
             }
+        }
+        _ => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("未知 action：{action}")}))).into_response(),
+    }
+}
+
+// ---- 公益站聚合（手动刷新 + 每日自动） ----
+
+/// 聚合源（GitHub Pages 静态导航，页面内嵌 JSON-LD itemListElement：name+url）。
+const GONGYI_SOURCES: &[&str] = &["https://bubblevv.github.io/ai-api-gongyi-nav/"];
+
+/// JSON-LD ListItem（聚合页内嵌）。
+#[derive(serde::Deserialize)]
+struct GongyiItem {
+    name: String,
+    #[serde(default)]
+    url: String,
+}
+
+/// 从 host 提取 id 用 slug（去 www.，非法字符转 -）。
+fn slug_of(host: &str) -> String {
+    let h = host.trim_start_matches("www.");
+    let mut s = String::new();
+    for ch in h.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            s.push(ch);
+        } else {
+            s.push('-');
+        }
+    }
+    s.trim_matches('-').to_string()
+}
+
+/// 从 URL 提取 host（https://host/path?a=b → host）。
+fn host_of(u: &str) -> Option<String> {
+    let rest = u.split("://").nth(1)?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_string())
+}
+
+/// 抓取聚合源并解析出站点列表（按 host 去重，首个保留）。
+pub async fn fetch_gongyi_sites(client: &aigw_relay::OutClient) -> Result<Vec<aigw_store::FreeSite>, String> {
+    let url = GONGYI_SOURCES[0];
+    let resp = client.http()
+        .get(url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("抓取聚合源失败：{e}"))?;
+    let html = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取聚合源响应失败：{e}"))?;
+
+    // 提取 "itemListElement": [ ... ]（括号配对，兼容内部 JSON 结构）
+    let start = html
+        .find("\"itemListElement\"")
+        .ok_or("聚合页未找到 itemListElement")?;
+    let rest = &html[start + "\"itemListElement\"".len()..];
+    let colon = rest.find(':').ok_or("itemListElement 缺冒号")?;
+    let arr = &rest[colon + 1..];
+    let arr = arr.trim_start();
+    if !arr.starts_with('[') {
+        return Err("itemListElement 不是数组".into());
+    }
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut end = 0usize;
+    for (i, ch) in arr.char_indices() {
+        if esc {
+            esc = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_str => esc = true,
+            '"' => in_str = !in_str,
+            '[' => {
+                if !in_str {
+                    depth += 1
+                }
+            }
+            ']' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if end == 0 {
+        return Err("itemListElement 数组未闭合".into());
+    }
+    let items: Vec<GongyiItem> = serde_json::from_str(&arr[..end])
+        .map_err(|e| format!("解析站点列表失败：{e}"))?;
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<aigw_store::FreeSite> = Vec::new();
+    for it in items {
+        let u = it.url.trim().to_string();
+        if u.is_empty() {
+            continue;
+        }
+        let Some(host) = host_of(&u) else { continue };
+        if seen.contains(&host) {
+            continue;
+        }
+        seen.push(host.clone());
+        let slug = slug_of(&host);
+        if slug.is_empty() {
+            continue;
+        }
+        out.push(aigw_store::FreeSite {
+            id: format!("free-{slug}"),
+            name: it.name.trim().to_string(),
+            base_url: format!("https://{host}"),
+            url: u,
+            desc: String::new(),
+            enabled: true,
+        });
+    }
+    Ok(out)
+}
+
+/// 刷新公益站聚合：抓取 → 解析 → 合并（已存在保留）。
+/// 返回 (聚合总数, 新增数, 保留数)。
+pub async fn refresh_free_sites(
+    client: &aigw_relay::OutClient,
+    free: &aigw_store::FreeStore,
+) -> Result<(usize, usize, usize), String> {
+    let sites = fetch_gongyi_sites(client).await?;
+    let (added, kept) = free.upsert_batch(sites.clone());
+    Ok((sites.len(), added, kept))
+}
+
+/// GET /api/free → 公益站条目列表。
+async fn free_list(State(st): State<AppState>) -> Json<Value> {
+    let rows = st.free.rows();
+    let list: Vec<Value> = rows
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id, "name": s.name, "base_url": s.base_url,
+                "url": s.url, "desc": s.desc, "enabled": s.enabled,
+            })
+        })
+        .collect();
+    Json(json!({"total": list.len(), "rows": list}))
+}
+
+/// POST /api/free：
+///   {"action":"refresh"}            手动刷新聚合源
+///   {"action":"remove","id":"free-…"} 删除站点
+async fn free_action(State(st): State<AppState>, body: Bytes) -> Response {
+    let v: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
+        }
+    };
+    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+    match action {
+        "refresh" => {
+            match refresh_free_sites(&st.client, &st.free).await {
+                Ok((total, added, kept)) => Json(json!({
+                    "ok": true, "total": total, "added": added, "kept": kept,
+                    "message": format!("刷新完成：共 {total} 站，新增 {added}，保留 {kept}（已添加的不会丢失）"),
+                }))
+                .into_response(),
+                Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"ok": false, "message": e}))).into_response(),
+            }
+        }
+        "remove" => {
+            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            if id.is_empty() {
+                return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 id"}))).into_response();
+            }
+            let removed = st.free.remove(id);
+            Json(json!({"ok": removed, "message": if removed { "已删除" } else { "条目不存在" }})).into_response()
         }
         _ => (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("未知 action：{action}")}))).into_response(),
     }
@@ -678,6 +895,7 @@ mod tests {
             Arc::new(OutClient::new()),
             Arc::new(AccountStore::empty()),
             Arc::new(CustomStore::empty()),
+            Arc::new(FreeStore::empty()),
         )
     }
 
@@ -690,6 +908,7 @@ mod tests {
             Arc::new(OutClient::new()),
             Arc::new(accounts),
             Arc::new(CustomStore::empty()),
+            Arc::new(FreeStore::empty()),
         )
     }
 
@@ -781,6 +1000,7 @@ stream_dialect = "sse_delta"
             Arc::new(OutClient::new()),
             Arc::new(AccountStore::empty()),
             Arc::new(CustomStore::empty()),
+            Arc::new(FreeStore::empty()),
         );
         let app = build_app(st);
         let res = app.oneshot(req("/api/usage")).await.unwrap();
@@ -859,6 +1079,7 @@ stream_dialect = "sse_delta"
             Arc::new(OutClient::new()),
             Arc::new(AccountStore::empty()),
             Arc::new(CustomStore::empty()),
+            Arc::new(FreeStore::empty()),
         ));
         let res = app
             .oneshot(

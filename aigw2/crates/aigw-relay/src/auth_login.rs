@@ -23,7 +23,7 @@ const CLI_UA: &str = "CLI/2.63.2 CodeBuddy/2.63.2";
 
 /// 登录专用 HTTP Client：每次按当前代理配置动态构建（热更新即时生效）。
 /// 有代理（global/bypass_cn）则注入，否则直连。
-fn auth_http() -> reqwest::Client {
+pub fn auth_http() -> reqwest::Client {
     let mut b = reqwest::Client::builder();
     if let Some(p) = crate::proxy::proxy_for_current() {
         b = b.proxy(p);
@@ -54,6 +54,11 @@ const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_REDIRECT: &str = "http://localhost:54545/callback";
 const CLAUDE_SCOPE: &str = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+
+/// 网易 Lobster AI（有道龙虾）OAuth（本地 LobsterAI2API/ 源码一手来源）：
+/// 本地随机端口回调 → 门户授权 → exchange 换码（跳转登录，非扫码）。
+const LOBSTER_UPSTREAM: &str = "https://lobsterai-server.youdao.com";
+const LOBSTER_LOGIN: &str = "https://lobsterai.youdao.com";
 
 #[derive(Debug, Clone)]
 struct Session {
@@ -221,6 +226,19 @@ impl LoginEngine {
                     sess.message = format!("Claude 授权 URL 生成失败：{e}");
                 }
             }
+        } else if platform == "lobster" {
+            // 网易 Lobster AI（有道龙虾）：本地随机端口回调 + exchange 换码（跳转登录，非扫码）
+            match lobster_start().await {
+                Ok((url, state, uuid, first_kf)) => {
+                    sess.state = format!("lobster:{state}:{uuid}:{first_kf}");
+                    sess.login_url = url.clone();
+                    sess.message = "Lobster 跳转登录：点「打开授权页」在浏览器完成登录，面板自动捕获回调换 token 入库；若面板部署在服务器，把浏览器跳转后地址栏的 URL 粘贴到下方输入框。".into();
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Lobster 授权 URL 生成失败：{e}");
+                }
+            }
         } else if let Some(spec) = specs.iter().find(|s| s.id == platform && !s.login_url.is_empty()) {
             // 跳转登录：用户自己浏览器打开登录页，登录后手动粘贴 Cookie/凭据入库。
             sess.login_url = spec.login_url.clone();
@@ -314,6 +332,27 @@ impl LoginEngine {
                 }
                 None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
             }
+            }
+        } else if sess.state.starts_with("lobster:") {
+            // lobster:{state}:{uuid}:{firstKF} → 回调队列取 code → exchange
+            let parts: Vec<&str> = sess.state.splitn(4, ':').collect();
+            if parts.len() < 4 {
+                Err("Lobster 会话不完整".to_string())
+            } else {
+                let state = parts[1];
+                let code = AUTH_CALLBACKS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(s, _)| s == state)
+                    .map(|(_, c)| c.clone());
+                match code {
+                    Some(code) => {
+                        AUTH_CALLBACKS.lock().unwrap().retain(|(s, _)| s != state);
+                        lobster_exchange(&auth_http(), &code, parts[2], parts[3]).await
+                    }
+                    None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
+                }
             }
         } else {
             Err("跳转登录会话：请粘贴 Cookie/凭据后走 save 动作入库（不自动轮询）".to_string())
@@ -941,6 +980,171 @@ mod tests {
         let expect = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(v.as_bytes()));
         assert_eq!(c, expect);
         assert_eq!(oauth_state().len(), 32);
+    }
+}
+
+/// ══════════════════════════════════════════════════════════════
+/// 网易 Lobster AI（有道龙虾）OAuth：本地随机端口回调 + exchange 换码
+/// ══════════════════════════════════════════════════════════════
+
+/// 发起 Lobster 登录：动态绑定随机端口监听回调，返回 (登录URL, state, uuid, firstKeyfrom)。
+async fn lobster_start() -> Result<(String, String, String, String), String> {
+    let state = oauth_state();
+    let uuid = new_uuid();
+    let first_kf = now_millis();
+    let port = spawn_lobster_callback().await?;
+    let redirect = format!("http://127.0.0.1:{port}/auth/callback");
+    let login = format!(
+        "{}/portal#/login?source=electron&redirect_uri={}&state={}",
+        LOBSTER_LOGIN,
+        urlencode(&redirect),
+        state
+    );
+    Ok((login, state, uuid, first_kf))
+}
+
+/// 动态回调监听：绑定 127.0.0.1:0 随机端口，解析 ?code=&state= 入队，返回端口。
+async fn spawn_lobster_callback() -> Result<u16, String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("回调端口绑定失败：{e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("取端口失败：{e}"))?
+        .port();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 4096];
+                let n = match sock.read(&mut buf).await {
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("/");
+                let query = match path.split_once('?') {
+                    Some((_, q)) => q,
+                    None => "",
+                };
+                let mut code = String::new();
+                let mut state = String::new();
+                for kv in query.split('&') {
+                    let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+                    match k {
+                        "code" => code = v.to_string(),
+                        "state" => state = v.to_string(),
+                        _ => {}
+                    }
+                }
+                if !code.is_empty() && !state.is_empty() {
+                    AUTH_CALLBACKS.lock().unwrap().push((state, code));
+                }
+                let body = "<html><body style=\"font-family:sans-serif;padding:40px\"><h2>授权成功 ✓</h2><p>可以关闭此页，返回面板查看账号状态。</p></body></html>";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    Ok(port)
+}
+
+/// 用 authCode 换 token（POST {upstream}/api/auth/exchange，authCode/uuid/keyfrom/version）。
+async fn lobster_exchange(
+    http: &reqwest::Client,
+    code: &str,
+    uuid: &str,
+    first_kf: &str,
+) -> Result<String, String> {
+    let body = serde_json::json!({
+        "authCode": code,
+        "firstKeyfrom": first_kf,
+        "latestKeyfrom": now_millis(),
+        "uuid": uuid,
+        "version": "0.1.0",
+    });
+    let resp = http
+        .post(format!("{LOBSTER_UPSTREAM}/api/auth/exchange"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("User-Agent", "LobsterAI/0.1.0")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("exchange 请求失败：{e}"))?;
+    let st = resp.status();
+    let raw = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败：{e}"))?;
+    if !st.is_success() {
+        return Err(format!("upstream {st}: {}", truncate(&raw, 160)));
+    }
+    let v: Value = serde_json::from_str(&raw).map_err(|_| format!("响应解析失败：{}", truncate(&raw, 160)))?;
+    if v.get("code").and_then(|c| c.as_i64()) != Some(0) && v.get("accessToken").is_none() {
+        let m = v
+            .get("message")
+            .or_else(|| v.get("msg"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("未知错误");
+        return Err(format!("exchange code={}: {m}", v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1)));
+    }
+    // token 可能在 data 里，也可能直接在顶层（两种都兼容）
+    let tok = v
+        .get("accessToken")
+        .and_then(|x| x.as_str())
+        .or_else(|| {
+            v.get("data")
+                .and_then(|d| d.get("accessToken"))
+                .and_then(|x| x.as_str())
+        })
+        .map(|s| s.to_string());
+    match tok {
+        Some(t) if !t.is_empty() => Ok(t),
+        _ => Err(format!("响应中无 accessToken：{}", truncate(&raw, 160))),
+    }
+}
+
+fn new_uuid() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    )
+}
+
+fn now_millis() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "0".into())
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut t = String::new();
+        for ch in s.chars() {
+            if t.chars().count() >= n {
+                break;
+            }
+            t.push(ch);
+        }
+        format!("{t}…")
     }
 }
 

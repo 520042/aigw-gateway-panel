@@ -5,7 +5,14 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261019e';
+const BUILD = 'v20261019g';
+
+// 刷新公益站聚合（拉聚合导航 → 合并；已接入的保留）
+async function refreshFree() {
+  const r = await post('/api/free', { action: 'refresh' }).catch((e) => ({ ok: false, message: e.message }));
+  alert(r.ok ? r.message : ('刷新失败：' + (r.message || '网络错误')));
+  if (r.ok) { SRC_OPEN['free'] = true; srcRerender(); }
+}
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -184,6 +191,7 @@ async function viewSources(el) {
         <span class="faint">${esc(meta.desc)}</span>
         <span class="pill mut">${onN}/${items.length} 接入</span>
         ${g === 'custom' ? '<button class="btn sm pri" style="margin-left:auto" onclick="event.stopPropagation();openCustomApi()">＋ 新建自定义 API</button>' : ''}
+        ${g === 'free' ? '<button class="btn sm" style="margin-left:auto" onclick="event.stopPropagation();refreshFree()">⟳ 刷新公益站</button>' : ''}
       </div>
       ${open ? `<div class="srcgrid">${items.map((p) => srcCard(p)).join('') || '<div class="empty">该分组暂无平台</div>'}</div>` : ''}
     </section>`;
@@ -224,6 +232,7 @@ function srcDrawer(p) {
   const isMinimax = p.id === 'minimax';
   const isKimi = p.id === 'sub-kimi' || p.id === 'sub-kimi-ai' || p.id === 'sub-grok';
   const isPkce = p.id === 'sub-codex' || p.id === 'sub-claude';
+  const isLobster = p.id === 'lobster';
   const isKey = p.auth === 'api_key';
   const isAnon = p.auth === 'anon';
   const loginUrl = p.login_url || '';
@@ -240,6 +249,17 @@ function srcDrawer(p) {
       <div id="authBox"></div>`;
   } else if (isPkce) {
     body = `<div class="note">${p.id === 'sub-codex' ? 'Codex 跳转登录（PKCE + 本地 1455 回调）' : 'Claude Code 跳转登录（PKCE + 本地 54545 回调）'}：点「打开授权页」在浏览器完成登录（跳转登录，非扫码）。面板自动捕获回调换 token；若部署在服务器，把浏览器跳转后地址栏的完整 URL 粘贴到下方输入框。</div>
+      <div class="row">
+        <button class="btn pri" onclick="authStart('${esc(p.id)}')">打开授权页</button>
+        <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>
+      </div>
+      <div class="row">
+        <input class="q mono" id="cbUrl" placeholder="粘贴回调地址（含 ?code= 与 &state=）…">
+        <button class="btn" onclick="authCallback('${esc(p.id)}')">提交回调</button>
+      </div>
+      <div id="authBox"></div>`;
+  } else if (isLobster) {
+    body = `<div class="note">Lobster 跳转登录（有道龙虾授权页 → 本地随机端口回调换码）：点「打开授权页」在浏览器完成登录（跳转登录，非扫码）。面板自动捕获回调换 token 入库；若部署在服务器，把浏览器跳转后地址栏的完整 URL 粘贴到下方输入框。</div>
       <div class="row">
         <button class="btn pri" onclick="authStart('${esc(p.id)}')">打开授权页</button>
         <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>

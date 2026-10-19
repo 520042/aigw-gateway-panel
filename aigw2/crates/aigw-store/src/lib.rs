@@ -12,6 +12,9 @@ pub use accounts::{Account, AccountStore};
 pub mod custom;
 pub use custom::{CustomApi, CustomStore};
 
+pub mod free;
+pub use free::{FreeSite, FreeStore};
+
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::json;

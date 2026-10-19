@@ -1,0 +1,19 @@
+# 网易 Lobster AI（有道龙虾）—— 原生 OAuth 跳转登录（task#25）
+# 一手来源：本地 LobsterAI2API/ 源码（OAuth 回调流 + exchange 换码）
+# - 登录：lobsterai.youdao.com/portal#/login?source=electron&redirect_uri=本地回调&state=…（跳转登录）
+# - 换码：POST lobsterai-server.youdao.com/api/auth/exchange（authCode/uuid/keyfrom）→ accessToken
+# - 中继：Bearer accessToken → /api/proxy/v1/chat/completions
+id = "lobster"
+name = "网易 Lobster AI（有道龙虾）"
+enabled = true
+
+auth = "api_key"
+base_url = "https://lobsterai-server.youdao.com/api/proxy/v1"
+format = "openai"
+
+models = ["DeepSeek-V4.1-Flash", "DeepSeek-V4-Pro", "glm-5.3", "kimi-k2.7-code", "qwen3.8-max"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+login_url = "https://lobsterai.youdao.com/portal#/login"
+notes = "OAuth 跳转登录：点「开始登录」打开有道龙虾授权页，完成授权后面板自动换 token 入库；无需本地反代客户端。"

@@ -169,10 +169,28 @@ async fn main() {
     ));
     // 自定义 API 存储（data/custom.json）
     let custom = Arc::new(aigw_store::CustomStore::open(&dd));
+    // 公益站聚合存储（data/free_sites.json）
+    let free = Arc::new(aigw_store::FreeStore::open(&dd));
     // OAuth 本地回调监听（Codex 1455 / Claude 54545）——跳转登录自动捕获
     aigw_relay::auth_login::start_callback_listeners();
+    // 公益站每日自动刷新（每 24 小时一次；失败静默，不阻塞服务）
+    {
+        let free2 = free.clone();
+        let client2 = client.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            tick.tick().await; // 首个周期直接跳过（启动不立即刷）
+            loop {
+                tick.tick().await;
+                match aigw_server::refresh_free_sites(&client2, &free2).await {
+                    Ok((t, a, k)) => tracing::info!("公益站每日刷新：共 {t} 站，新增 {a}，保留 {k}"),
+                    Err(e) => tracing::warn!("公益站每日刷新失败：{e}"),
+                }
+            }
+        });
+    }
     let app = aigw_server::build_app(aigw_server::AppState::new(
-        specs, store, pool, client, accounts, custom,
+        specs, store, pool, client, accounts, custom, free,
     ));
 
     let addr = format!("{}:{}", cli.host, cli.port);

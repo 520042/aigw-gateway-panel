@@ -42,6 +42,11 @@ pub struct OutClient {
 }
 
 impl OutClient {
+    /// 暴露内部 HTTP 客户端（供 aigw-server 拉聚合源等使用）。
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     pub fn new() -> Self {
         let mut b = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
