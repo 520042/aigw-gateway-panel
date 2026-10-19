@@ -495,10 +495,72 @@ async function viewAccounts(el) {
   </section>`;
 }
 
+// ── M4 可视化（对齐 sub2api TokenUsageTrend/donut + dsh Σtoken 口径）──
+// 零依赖纯 SVG：donut（平台输出占比）+ 面积图（token 趋势）+ 平台榜。
+
+function donutSVG(items, size = 250, stroke = 30) {
+  const total = items.reduce((s, d) => s + d.value, 0);
+  if (!total) return '<div class="empty">暂无数据</div>';
+  const pal = ['#4f9cf9', '#34d399', '#fbbf24', '#f472b6', '#a78bfa', '#38bdf8', '#94a3b8'];
+  const R = (size - stroke) / 2, C = 2 * Math.PI * R, cx = size / 2;
+  let acc = 0; const segs = [];
+  items.forEach((d, i) => {
+    const frac = d.value / total, len = frac * C;
+    segs.push(`<circle cx="${cx}" cy="${cx}" r="${R}" fill="none" stroke="${pal[i % pal.length]}"
+      stroke-width="${stroke}" stroke-dasharray="${len.toFixed(1)} ${(C - len).toFixed(1)}"
+      stroke-dashoffset="${(-acc * C).toFixed(1)}" transform="rotate(-90 ${cx} ${cx})"/>`);
+    acc += frac;
+  });
+  const top = items.slice(0, 3).map((d) => `${esc(d.label)} ${nfmt(d.value)}`).join(' · ');
+  return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" style="max-width:260px">${segs.join('')}
+    <text x="50%" y="47%" text-anchor="middle" class="donut-total">${nfmt(total)}</text>
+    <text x="50%" y="58%" text-anchor="middle" class="donut-cap">输出 tokens</text></svg>
+    <div class="faint" style="margin-top:8px">${top}</div>`;
+}
+
+function trendSVG(recent, w = 780, h = 190) {
+  // recent 按分钟分桶聚合 tokensOut → 面积图
+  const buckets = new Map();
+  for (const e of recent) {
+    const k = Math.floor((e.ts || 0) / 60); // 分钟桶
+    const b = buckets.get(k) || { t: k * 60, v: 0 };
+    b.v += (e.tout || 0);
+    buckets.set(k, b);
+  }
+  const pts = [...buckets.values()].sort((a, b) => a.t - b.t);
+  if (pts.length < 2) return '<div class="empty">数据不足，暂无趋势</div>';
+  const max = Math.max(...pts.map((p) => p.v), 1);
+  const X = (i) => (i / (pts.length - 1)) * w;
+  const Y = (v) => h - 14 - (v / max) * (h - 30);
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)} ${Y(p.v).toFixed(1)}`).join(' ');
+  const area = `${line} L${w} ${h} L0 ${h} Z`;
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none">
+    <defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4f9cf9" stop-opacity="0.45"/><stop offset="100%" stop-color="#4f9cf9" stop-opacity="0.02"/>
+    </linearGradient></defs>
+    <path d="${area}" fill="url(#ag)"/><path d="${line}" fill="none" stroke="#4f9cf9" stroke-width="2" stroke-linejoin="round"/>
+    <text x="${w - 8}" y="14" text-anchor="end" class="faint">峰值 ${nfmt(max)} tok/分</text></svg>`;
+}
+
+function topBars(plats, n = 8) {
+  const top = plats.slice(0, n);
+  if (!top.length) return '<div class="empty">暂无调用</div>';
+  const max = Math.max(...top.map(([, d]) => d.tokensOut || 0), 1);
+  return top.map(([p, d]) => {
+    const w = Math.max(2, ((d.tokensOut || 0) / max) * 100);
+    return `<div class="bar-row"><span class="bar-lb" title="${esc(p)}">${esc(p)}</span>
+      <div class="bar-tr"><div class="bar-fill" style="width:${w.toFixed(1)}%"></div></div>
+      <span class="bar-v mono">${nfmt(d.tokensOut || 0)}</span></div>`;
+  }).join('');
+}
+
 async function viewUsage(el) {
   const [us, hist] = await Promise.all([api('/api/usage'), api('/api/requests')]);
   const rate = us.requests ? Math.round((us.success / us.requests) * 100) : 100;
-  const plats = Object.entries(hist.by_platform || {});
+  const plats = Object.entries(hist.by_platform || {}).sort((a, b) => (b[1].tokensOut || 0) - (a[1].tokensOut || 0));
+  const donut = donutSVG(plats.slice(0, 7).map(([p, d]) => ({ label: p, value: d.tokensOut || 0 })));
+  const trend = trendSVG(hist.recent || []);
+  const bars = topBars(plats);
   const rows = (hist.recent || [])
     .map((e) => `<tr>
       <td class="mono">${new Date((e.ts || 0) * 1000).toLocaleTimeString('zh-CN')}</td>
@@ -513,6 +575,11 @@ async function viewUsage(el) {
       <div class="card glass kpi"><div class="lb">失败</div><div class="vl" style="background:none;-webkit-text-fill-color:currentColor;color:var(--err)">${nfmt(us.failed)}</div></div>
       <div class="card glass kpi"><div class="lb">成功率</div><div class="vl">${rate}%</div></div>
     </div>
+    <div class="grid g2">
+      <section class="card glass"><h3>输出 tokens 分布（donut）</h3>${donut}</section>
+      <section class="card glass"><h3>输出 tokens 趋势（近 60 条）</h3>${trend}</section>
+    </div>
+    <section class="card glass"><h3>平台输出榜</h3>${bars}</section>
     <section class="card glass"><h3>平台归因</h3>
       ${plats.length ? `<table><thead><tr><th>平台</th><th>调用</th><th>成功/失败</th><th>tokens in/out</th></tr></thead>
       <tbody>${plats.map(([p, d]) => `<tr><td>${esc(p)}</td><td>${d.requests}</td>

@@ -46,6 +46,8 @@ pub struct AppState {
     pub free: Arc<FreeStore>,
     /// 登录引擎（批2：设备授权/扫码 → token 自动落池）
     pub login: Arc<LoginEngine>,
+    /// 会话粘性路由（对齐 workbuddy2api StickyRouter + loomy「最后一条 user」修正）
+    pub sticky: Arc<aigw_pool::StickyRouter>,
     /// live 模型缓存：(时间, (spec_id, model) 索引, 响应体)
     pub models_cache: Arc<Mutex<Option<(Instant, Vec<(String, String)>, Value)>>>,
 }
@@ -70,6 +72,7 @@ impl AppState {
             custom,
             free,
             login: Arc::new(LoginEngine::new()),
+            sticky: Arc::new(aigw_pool::StickyRouter::new()),
             models_cache: Arc::new(Mutex::new(None)),
         }
     }
@@ -587,6 +590,53 @@ async fn usage(State(st): State<AppState>) -> Json<Value> {
     Json(st.store.usage_totals())
 }
 
+/// FNV-1a 64 位（std 实现，零新增依赖；仅作稳定压缩，不需加密强度）。
+fn fnv1a(b: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &x in b {
+        h ^= x as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// 会话粘性键（对齐 workbuddy2api 键优先级 + loomy2api「最后一条 user」修正）：
+/// ① `metadata.conversation_id` / `conversationId` / `conversation_id` /
+///    `prompt_cache_key`（02 号五键优先级）；
+/// ② 都没有 → **最后一条** `role=user` 消息内容 FNV-1a。
+///    为什么取最后一条：通用客户端重发全历史时首条 user 恒定，以首条为键会让
+///    整个会话永久钉在同一账号（单号霸占、其余饿死）；最后一条随对话推进变化。
+fn session_key(v: &Value) -> String {
+    if let Some(md) = v.get("metadata").and_then(|m| m.as_object()) {
+        for k in ["conversation_id", "conversationId", "conversation_id", "prompt_cache_key"] {
+            if let Some(s) = md.get(k).and_then(|x| x.as_str()) {
+                if !s.is_empty() {
+                    return s.to_string();
+                }
+            }
+        }
+    }
+    for k in ["conversation_id", "conversationId"] {
+        if let Some(s) = v.get(k).and_then(|x| x.as_str()) {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+    if let Some(msgs) = v.get("messages").and_then(|m| m.as_array()) {
+        for m in msgs.iter().rev() {
+            if m.get("role").and_then(|r| r.as_str()) == Some("user") {
+                let text = m
+                    .get("content")
+                    .map(|c| c.to_string())
+                    .unwrap_or_default();
+                return format!("u{:016x}", fnv1a(text.as_bytes()));
+            }
+        }
+    }
+    "anon".to_string()
+}
+
 /// M6 请求历史：最近 60 条 + 按平台聚合（成本归因雏形）。
 async fn requests(State(st): State<AppState>) -> Json<Value> {
     let recent = st
@@ -712,9 +762,16 @@ async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
         return openai_error(401, &format!("平台 {} 无可用账号，请先接入", spec.id));
     }
     let ids: Vec<String> = pool_accounts.iter().map(|(id, _)| id.clone()).collect();
-    let account = st.pool.pick(&spec.id, &ids, &model).unwrap_or_else(|| {
-        tracing::warn!("pool 全挡，半开已放行；仍取首个候选硬走");
-        ids[0].clone()
+    // 会话粘性优先：命中且账号在候选 → 复用；否则正常选号并绑定。
+    // 键 = conversation_id 系列 → 兜底最后一条 user 哈希（loomy 修正，防单号霸占）。
+    let skey = session_key(&v);
+    let account = st.sticky.route(&skey, &ids).unwrap_or_else(|| {
+        let a = st.pool.pick(&spec.id, &ids, &model).unwrap_or_else(|| {
+            tracing::warn!("pool 全挡，半开已放行；仍取首个候选硬走");
+            ids[0].clone()
+        });
+        st.sticky.bind(&skey, &a);
+        a
     });
     let secret = pool_accounts
         .iter()

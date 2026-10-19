@@ -265,6 +265,73 @@ impl Pool {
     }
 }
 
+/// 会话粘性路由（对齐 workbuddy2api `StickyRouter` + loomy2api「粘性键取最后一条
+/// user」修正）：会话键 → 账号映射，TTL 滚动续期。
+///
+/// 为什么取「最后一条 user」而不是首条：通用客户端（Cline/Roo/Codex）重发全历史时
+/// 首条 user 消息恒定不变，若以首条做键会令整个会话永远钉在同一个账号上
+/// （单号霸占、其余号饿死）；最后一条 user 随对话推进变化，粘性与负载均衡兼顾。
+const STICKY_TTL: Duration = Duration::from_secs(1800);
+
+pub struct StickyRouter {
+    map: Mutex<HashMap<String, (String, Instant)>>,
+}
+
+impl StickyRouter {
+    pub fn new() -> StickyRouter {
+        StickyRouter {
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 命中且账号仍在候选列表 → 复用该账号（滚动 TTL）；否则 None，调用方走正常
+    /// 选号后 [`Self::bind`]。
+    pub fn route(&self, key: &str, accounts: &[String]) -> Option<String> {
+        let now = Instant::now();
+        let mut g = self.map.lock().ok()?;
+        g.retain(|_, (_, t)| now.duration_since(*t) < STICKY_TTL);
+        let hit: Option<(String, Instant)> = g.get(key).cloned();
+        if let Some((acc, t)) = hit {
+            if now.duration_since(t) < STICKY_TTL && accounts.iter().any(|a| *a == acc) {
+                g.insert(key.to_string(), (acc.clone(), now));
+                return Some(acc);
+            }
+        }
+        None
+    }
+
+    /// 绑定/重绑（滚动 TTL）。选号成功后调用。
+    pub fn bind(&self, key: &str, account: &str) {
+        if let Ok(mut g) = self.map.lock() {
+            g.insert(key.to_string(), (account.to_string(), Instant::now()));
+        }
+    }
+
+    /// 会话结束 / 账号被禁用时解绑。
+    pub fn unbind(&self, key: &str) {
+        if let Ok(mut g) = self.map.lock() {
+            g.remove(key);
+        }
+    }
+
+    /// 快照（调试/前端）。
+    pub fn snapshot(&self) -> serde_json::Value {
+        let now = Instant::now();
+        let g = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let entries: Vec<_> = g
+            .iter()
+            .filter(|(_, (_, t))| now.duration_since(*t) < STICKY_TTL)
+            .map(|(k, (acc, t))| {
+                json!({
+                    "key": k, "account": acc,
+                    "left_s": STICKY_TTL.as_secs_f64() - now.duration_since(*t).as_secs_f64(),
+                })
+            })
+            .collect();
+        json!({ "ttl_s": STICKY_TTL.as_secs(), "entries": entries })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +443,41 @@ mod tests {
         let pool = Pool::new();
         pool.report("p", "a", "m", false, ErrorClass::Transient, false);
         assert_eq!(pool.pick("p", &["a".to_string()], "other").as_deref(), Some("a"));
+    }
+
+    // ── StickyRouter ──────────────────────────────────────────
+
+    #[test]
+    fn sticky_route_hits_in_candidates() {
+        let r = StickyRouter::new();
+        r.bind("sess-1", "acc-1");
+        let accs = vec!["acc-0".to_string(), "acc-1".to_string()];
+        assert_eq!(r.route("sess-1", &accs).as_deref(), Some("acc-1"));
+    }
+
+    #[test]
+    fn sticky_route_misses_when_account_gone() {
+        let r = StickyRouter::new();
+        r.bind("sess-1", "acc-9");
+        let accs = vec!["acc-0".to_string(), "acc-1".to_string()];
+        assert_eq!(r.route("sess-1", &accs), None, "绑定的号不在候选应让位");
+        // 未命中不自动绑定
+        assert_eq!(r.snapshot()["entries"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sticky_unbind_clears() {
+        let r = StickyRouter::new();
+        r.bind("s", "a");
+        r.unbind("s");
+        assert_eq!(r.route("s", &["a".to_string()]), None);
+    }
+
+    #[test]
+    fn sticky_rebind_moves_to_new_account() {
+        let r = StickyRouter::new();
+        r.bind("s", "a0");
+        r.bind("s", "a1"); // 成功重绑到实际成功的号
+        assert_eq!(r.route("s", &["a0".to_string(), "a1".to_string()]).as_deref(), Some("a1"));
     }
 }
