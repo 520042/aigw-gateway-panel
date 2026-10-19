@@ -132,15 +132,17 @@ let SRC_HELP = false;
 let SRC_OPEN = {};   // 分组收起状态：group → bool（默认收起 false）
 let SRC_EXPAND = null; // 展开的平台卡片 id
 
-// 分组规则（用户拍板）：
+// 分组规则（用户拍板 + 参考项目登录方式核对）：
 //   custom-*        → 自定义 API（最前，默认展开）
-//   api-* / minimax / codearts → 开放平台 API（填 Key 即用，默认收起）
+//   api-* / apk-coze / kimi-code / codex → 开放平台 API（填官方 Key，默认收起）
+//     （扣子 Coze、Kimi 开放平台、Codex 官方 Key 均为官方 API Key 直连）
 //   sub-*           → 订阅反代（OAuth/跳转，默认收起）
 //   free-*          → 公益站（填 Key 即用，默认收起）
-//   其余（apk-*/web-*/wb-*/anon-*/kilo/pollinations/codex/kimi-code）→ 客户端反代（默认收起）
+//   其余（apk-*/web-*/wb-*/anon-*/kilo/pollinations + minimax + codearts）→ 客户端反代
+//     （minimax=MiniMax Code 设备码、codearts=华为云账号跳转登录+AK/SK，均非单纯 Key）
 function srcGroupOf(p) {
   if (p.id.startsWith('custom-')) return 'custom';
-  if (p.id.startsWith('api-') || p.id === 'minimax' || p.id === 'codearts') return 'official';
+  if (p.id.startsWith('api-') || p.id === 'apk-coze' || p.id === 'kimi-code' || p.id === 'codex') return 'official';
   if (p.id.startsWith('sub-')) return 'sub';
   if (p.id.startsWith('free-')) return 'free';
   return 'client';
@@ -211,7 +213,19 @@ async function viewSources(el) {
 
 // 平台卡片（精简：名称 + 状态 + 接入按钮，无长介绍）
 function srcCard(p) {
-  const authTxt = { api_key: '填 Key', cookie: 'Cookie', anon: '免密', token: 'Token' }[p.auth] || p.auth;
+  // 徽章按「实际登录方式」显示（参考项目一手核对），不按 toml auth 字段一刀切
+  const AUTH_LABEL = {
+    minimax: '设备码', codearts: '跳转/AK-SK',
+    lobster: 'OAuth', 'web-lobster': 'OAuth',
+    'wb-gateway': '设备授权', 'wb-gateway-intl': '设备授权', cline: '设备码',
+    'apk-qoder': '设备码', 'web-qoder': '设备码',
+    'apk-trae': '跳转回调', 'web-trae': '跳转回调',
+    'apk-loomy': '粘贴Session', 'web-deepseek': '粘贴Token',
+    'sub-antigravity': '跳转登录', 'sub-devin': '跳转登录', 'sub-meta': '设备码',
+    'sub-codex': '跳转登录', 'sub-claude': '跳转登录', 'sub-grok': '设备码',
+    'sub-kimi': '设备码', 'sub-kimi-ai': '设备码',
+  };
+  const authTxt = AUTH_LABEL[p.id] || { api_key: '填 Key', cookie: 'Cookie', anon: '免密', token: 'Token' }[p.auth] || p.auth;
   // 自定义 API：已配置 = 有 key 掩码
   const configured = p.custom ? (p.key_mask ? true : false) : p.accounts_n > 0;
   return `<div class="srccard glass ${p.enabled ? '' : 'off'}" data-id="${esc(p.id)}">
@@ -227,7 +241,7 @@ function srcCard(p) {
   </div>`;
 }
 
-// 登录抽屉：跳转登录 + 手动粘贴凭据（不扫码）；wb/minimax/kimi/grok 走设备码，codex/claude 走 PKCE 回调
+// 登录抽屉：跳转登录 + 手动粘贴凭据（不扫码）；wb/minimax/kimi/grok/cline/qoder 走设备码，codex/claude/antigravity/devin/trae/codearts 走跳转回调
 function srcDrawer(p) {
   const isWb = p.id === 'wb-gateway' || p.id === 'wb-gateway-intl' || p.id === 'codebuddy';
   const isMinimax = p.id === 'minimax';
@@ -235,7 +249,11 @@ function srcDrawer(p) {
   const isCline = p.id === 'cline';
   const isMeta = p.id === 'sub-meta';
   const isPkce = p.id === 'sub-codex' || p.id === 'sub-claude' || p.id === 'sub-antigravity' || p.id === 'sub-devin';
-  const isLobster = p.id === 'lobster';
+  const isQoder = p.id === 'apk-qoder' || p.id === 'web-qoder';
+  const isTrae = p.id === 'apk-trae' || p.id === 'web-trae';
+  const isCodearts = p.id === 'codearts';
+  const isLobster = p.id === 'lobster' || p.id === 'web-lobster';
+  const isPasteToken = p.id === 'apk-loomy' || p.id === 'web-deepseek';
   const isKey = p.auth === 'api_key';
   const isAnon = p.auth === 'anon';
   const loginUrl = p.login_url || '';
@@ -243,26 +261,30 @@ function srcDrawer(p) {
   if (isAnon) {
     body = `<div class="note">免密平台：无需凭据，直接可用。点下面的「测试连通」看是否可转发。</div>
       <button class="btn pri" onclick="testAnon('${esc(p.id)}')">测试连通</button>`;
-  } else if (isWb || isMinimax || isKimi || isCline || isMeta) {
-    body = `<div class="note">${isCline ? 'Cline 设备码（WorkOS OAuth）：' : isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : isMinimax ? 'MiniMax 设备码：' : isMeta ? 'Meta Muse 设备码（登录后自动铸造 API Key）：' : isKimi && p.id === 'sub-grok' ? 'Grok 设备码（RFC 8628，需代理访问）：' : 'Kimi Code 设备码（RFC 8628）：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
+  } else if (isWb || isMinimax || isKimi || isCline || isMeta || isQoder) {
+    body = `<div class="note">${isCline ? 'Cline 设备码（WorkOS OAuth）：' : isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : isMinimax ? 'MiniMax Code 设备码（客户端订阅，非开放平台 Key）：' : isMeta ? 'Meta Muse 设备码（登录后自动铸造 API Key）：' : isQoder ? 'Qoder 设备授权（免客户端，登录后自动拿 dt- Token）：' : isKimi && p.id === 'sub-grok' ? 'Grok 设备码（RFC 8628，需代理访问）：' : 'Kimi Code 设备码（RFC 8628）：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
       <div class="row">
         <button class="btn pri" onclick="authStart('${esc(p.id)}')">开始登录</button>
         <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>
       </div>
       <div id="authBox"></div>`;
-  } else if (isPkce) {
-    const pkceHint = p.id === 'sub-antigravity'
+  } else if (isPkce || isTrae || isCodearts) {
+    const hint = isTrae
+      ? 'Trae 跳转登录（字节 Trae 账号，本地 18080 收 refreshToken；服务器部署直接把地址栏 URL 粘回来）'
+      : isCodearts
+      ? '华为云 CodeArts 跳转登录（华为云账号授权 → 自动换临时 AK/SK 入库；服务器部署把地址栏 URL 粘回来）'
+      : p.id === 'sub-antigravity'
       ? 'Antigravity 跳转登录（Google 账号 + 本地 51121 回调）'
       : p.id === 'sub-devin'
       ? 'Devin 跳转登录（headless PKCE，官方 CLI 无回调端口；服务器部署直接把地址栏 URL 粘回来）'
       : p.id === 'sub-codex' ? 'Codex 跳转登录（PKCE + 本地 1455 回调）' : 'Claude Code 跳转登录（PKCE + 本地 54545 回调）';
-    body = `<div class="note">${pkceHint}：点「打开授权页」在浏览器完成登录（跳转登录，非扫码）。面板自动捕获回调换 token；若部署在服务器，把浏览器跳转后地址栏的完整 URL 粘贴到下方输入框。</div>
+    body = `<div class="note">${hint}：点「打开授权页」在浏览器完成登录（跳转登录，非扫码）。面板自动捕获回调换 token；若部署在服务器，把浏览器跳转后地址栏的完整 URL 粘贴到下方输入框。</div>
       <div class="row">
         <button class="btn pri" onclick="authStart('${esc(p.id)}')">打开授权页</button>
         <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>
       </div>
       <div class="row">
-        <input class="q mono" id="cbUrl" placeholder="粘贴回调地址（含 ?code= 与 &state=）…">
+        <input class="q mono" id="cbUrl" placeholder="${isTrae ? '粘贴回调地址（含 ?refreshToken=…）' : isCodearts ? '粘贴回调地址（含 ?secret=…）' : '粘贴回调地址（含 ?code= 与 &state=）'}…">
         <button class="btn" onclick="authCallback('${esc(p.id)}')">提交回调</button>
       </div>
       <div id="authBox"></div>`;
@@ -277,8 +299,15 @@ function srcDrawer(p) {
         <button class="btn" onclick="authCallback('${esc(p.id)}')">提交回调</button>
       </div>
       <div id="authBox"></div>`;
+  } else if (isPasteToken) {
+    body = `<div class="note">${p.id === 'apk-loomy' ? 'Loomy 是讯飞客户端登录态（参考 loomy2api：手机号登录/微信扫码/粘贴 Session），面板不支持扫码：请在本机客户端登录后把 Session/Token 粘贴下面入库。' : 'DeepSeek 网页版登录态（deepseek-free-api 逆向）：在 chat.deepseek.com 登录后，把网页请求的 Authorization Bearer Token 粘贴下面入库。'}</div>
+      <div class="row">
+        <input class="q mono" id="keyInput" placeholder="粘贴 Session / Token…">
+        <button class="btn pri" onclick="authSave('${esc(p.id)}')">保存凭据</button>
+      </div>
+      <div id="authBox"></div>`;
   } else if (isKey) {
-    body = `<div class="note">${p.id.startsWith('sub-') ? '订阅平台：' : '填 API Key：'}把 Key 粘贴到下面，保存即入库（自动作为 Bearer 头转发）。${loginUrl ? `<br>还没有 Key？<a href="${esc(loginUrl)}" target="_blank" rel="noopener">去官网申请/登录 →</a>` : ''}</div>
+    body = `<div class="note">${p.id.startsWith('sub-') ? '订阅平台：' : '填官方 API Key：'}把 Key 粘贴到下面，保存即入库（自动作为 Bearer 头转发）。${loginUrl ? `<br>还没有 Key？<a href="${esc(loginUrl)}" target="_blank" rel="noopener">去官网申请/登录 →</a>` : ''}</div>
       <div class="row">
         <input class="q mono" id="keyInput" placeholder="粘贴 API Key / token 或 Cookie…">
         <button class="btn pri" onclick="authSave('${esc(p.id)}')">保存凭据</button>

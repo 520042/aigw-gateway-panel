@@ -72,6 +72,28 @@ const META_MINT_URL: &str = "https://api.meta.ai/muse-code/key";
 const META_DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const META_UA: &str = "muse-code/1.0.2";
 
+// ═════════ 华为云 CodeArts（01 DSH login.ts 一手：ticket 流程，免 DPoP/PKCE） ═════════
+const CODEARTS_LOGIN_BASE: &str = "https://devcloud.cn-north-4.huaweicloud.com/doer/redirect";
+const HUAWEI_AUTH_BASE: &str = "https://auth.huaweicloud.com/authui/login.html";
+const CODEARTS_CRED_ENDPOINT: &str =
+    "https://snap-access.cn-north-4.myhuaweicloud.com/snap-manager/v1/login/ticket";
+const CODEARTS_CALLBACK: &str = "http://127.0.0.1:51122/authentication";
+const CODEARTS_PLUGIN: &str = "snap_jetbrains";
+const CODEARTS_PLUGIN_VER: &str = "26.3.3";
+
+// ═════════ Qoder 阿里（16 qoder2api-hub 一手：设备授权 + PKCE，国际版） ═════════
+const QODER_WEBSITE: &str = "https://qoder.com";
+const QODER_OPENAPI: &str = "https://openapi.qoder.sh";
+const QODER_CLIENT_ID: &str = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
+
+// ═════════ Trae 字节（19 trae2api 一手：跳转回调 18080 + ExchangeToken） ═════════
+const TRAE_CONSOLE: &str = "https://www.trae.cn";
+const TRAE_OAUTH_HOST: &str = "https://api.trae.com.cn";
+const TRAE_CLIENT_ID: &str = "en1oxy7wnw8j9n";
+const TRAE_APP_ID: &str = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8";
+const TRAE_CALLBACK: &str = "http://127.0.0.1:18080/authorize";
+const TRAE_IDE_VERSION: &str = "0.1.52";
+
 /// Devin headless PKCE（cliproxy-src internal/auth/devin/devin_auth.go 一手）：
 /// 官方 CLI 无 redirect_uri + cli_pkce_marker=1（服务器场景直接粘贴地址栏 URL）。
 const DEVIN_APP_BASE: &str = "https://app.devin.ai";
@@ -324,6 +346,45 @@ impl LoginEngine {
                     sess.message = format!("Meta 设备码申请失败：{e}");
                 }
             }
+        } else if platform == "codearts" {
+            // 华为云 CodeArts：华为云账号跳转登录（ticket 流程）→ 临时 AK/SK 入库
+            match codearts_start().await {
+                Ok((url, ticket_id, secret)) => {
+                    sess.state = format!("codearts:{ticket_id}:{secret}");
+                    sess.login_url = url.clone();
+                    sess.message = "CodeArts 跳转登录（华为云账号）：点「打开授权页」在浏览器完成华为云登录，面板自动轮询换取临时 AK/SK 入库（AK:SK 格式，转发时 SDK-HMAC-SHA256 签名）。服务器部署：授权完成后把浏览器地址栏 URL（含 secret=...）粘贴到下方输入框并点「提交回调」。".into();
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("CodeArts 授权 URL 生成失败：{e}");
+                }
+            }
+        } else if platform == "apk-qoder" || platform == "web-qoder" {
+            // Qoder 阿里：设备授权 + PKCE（国际版 qoder.com，参考 qoder2api-hub）
+            match qoder_start().await {
+                Ok((url, verifier, nonce)) => {
+                    sess.state = format!("qoder:{verifier}:{nonce}");
+                    sess.login_url = url.clone();
+                    sess.message = "Qoder 设备授权（免客户端）：点「打开授权页」在浏览器登录 Qoder 账号，面板自动轮询 deviceToken 入库（dt- 前缀 token，Bearer 转发）。".into();
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Qoder 授权 URL 生成失败：{e}");
+                }
+            }
+        } else if platform == "apk-trae" || platform == "web-trae" {
+            // Trae 字节：跳转回调（www.trae.cn/authorization + 本地 18080 收 refreshToken + ExchangeToken）
+            match trae_start().await {
+                Ok((url, trace_id)) => {
+                    sess.state = format!("trae:{trace_id}");
+                    sess.login_url = url.clone();
+                    sess.message = "Trae 跳转登录：点「打开授权页」在浏览器完成 Trae 登录，面板自动捕获 18080 回调换 token 入库；服务器部署：授权完成后把浏览器地址栏 URL（含 refreshToken=...）粘贴到下方输入框并点「提交回调」。".into();
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("Trae 授权 URL 生成失败：{e}");
+                }
+            }
         } else if let Some(spec) = specs.iter().find(|s| s.id == platform && !s.login_url.is_empty()) {
             // 跳转登录：用户自己浏览器打开登录页，登录后手动粘贴 Cookie/凭据入库。
             sess.login_url = spec.login_url.clone();
@@ -408,6 +469,38 @@ impl LoginEngine {
                 Err("Meta 设备码会话不完整".to_string())
             } else {
                 meta_poll(&auth_http(), parts[1], parts[2]).await
+            }
+        } else if sess.state.starts_with("codearts:") {
+            // codearts:{ticket_id}:{secret} → 轮询 ticket 端点 → AK:SK
+            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+            if parts.len() < 3 {
+                Err("CodeArts 会话不完整".to_string())
+            } else {
+                codearts_poll(&auth_http(), parts[1], parts[2]).await
+            }
+        } else if sess.state.starts_with("qoder:") {
+            // qoder:{verifier}:{nonce} → 轮询 deviceToken/poll
+            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+            if parts.len() < 3 {
+                Err("Qoder 会话不完整".to_string())
+            } else {
+                qoder_poll(&auth_http(), parts[1], parts[2]).await
+            }
+        } else if sess.state.starts_with("trae:") {
+            // trae:{trace_id} → 回调队列取 refreshToken → ExchangeToken
+            let trace = sess.state.trim_start_matches("trae:").to_string();
+            let code = AUTH_CALLBACKS
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(s, _)| *s == trace || s.is_empty())
+                .map(|(_, c)| c.clone());
+            match code {
+                Some(rt) => {
+                    AUTH_CALLBACKS.lock().unwrap().retain(|(s, _)| *s != trace);
+                    trae_exchange(&auth_http(), &rt).await
+                }
+                None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
             }
         } else if sess.state.starts_with("codex:") || sess.state.starts_with("claude:")
             || sess.state.starts_with("antigravity:") || sess.state.starts_with("devin:") {
@@ -1487,10 +1580,13 @@ fn truncate(s: &str, n: usize) -> String {
 /// 服务器场景用户粘贴回调 URL 也走此队列。
 pub static AUTH_CALLBACKS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-/// 启动 OAuth 本地回调监听（127.0.0.1:1455=Codex、127.0.0.1:54545=Claude）。
+/// 启动 OAuth 本地回调监听：
+/// - 1455=Codex、54545=Claude、51121=Antigravity（PKCE code+state）
+/// - 18080=Trae（/authorize?refreshToken=..&loginTraceID=..，token 直传回调）
+/// - 51122=CodeArts（/authentication?secret=..&ticket_id=..，ticket 流程回调）
 /// 绑定失败仅告警（登录可用「粘贴回调 URL」兜底）。
 pub fn start_callback_listeners() {
-    for port in [1455u16, 54545u16, 51121u16] {
+    for port in [1455u16, 54545u16, 51121u16, 18080u16, 51122u16] {
         let bind = format!("127.0.0.1:{port}");
         tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(&bind).await {
@@ -1525,10 +1621,26 @@ pub fn start_callback_listeners() {
                         match k {
                             "code" => code = v.to_string(),
                             "state" => state = v.to_string(),
+                            "refresh_token" | "refreshToken" => code = v.to_string(),
+                            "access_token" | "accessToken" | "token" | "authCode" => {
+                                if code.is_empty() {
+                                    code = v.to_string();
+                                }
+                            }
+                            "secret" => {
+                                if code.is_empty() {
+                                    code = v.to_string();
+                                }
+                            }
+                            "loginTraceID" | "login_trace_id" | "ticket_id" => {
+                                if state.is_empty() {
+                                    state = v.to_string();
+                                }
+                            }
                             _ => {}
                         }
                     }
-                    if !code.is_empty() && !state.is_empty() {
+                    if !code.is_empty() {
                         AUTH_CALLBACKS.lock().unwrap().push((state, code));
                     }
                     let body = "<html><body style=\"font-family:sans-serif;padding:40px\"><h2>授权成功 ✓</h2><p>可以关闭此页，返回面板查看账号状态。</p></body></html>";
@@ -1561,11 +1673,27 @@ pub fn submit_callback_url(url: &str) -> Result<(), String> {
         match k {
             "code" => code = v.to_string(),
             "state" => state = v.to_string(),
+            "refresh_token" | "refreshToken" => code = v.to_string(),
+            "access_token" | "accessToken" | "token" | "authCode" => {
+                if code.is_empty() {
+                    code = v.to_string();
+                }
+            }
+            "secret" => {
+                if code.is_empty() {
+                    code = v.to_string();
+                }
+            }
+            "loginTraceID" | "login_trace_id" | "ticket_id" => {
+                if state.is_empty() {
+                    state = v.to_string();
+                }
+            }
             _ => {}
         }
     }
-    if code.is_empty() || state.is_empty() {
-        return Err("回调地址缺少 code 或 state 参数".into());
+    if code.is_empty() {
+        return Err("回调地址缺少 code/secret/refreshToken 参数".into());
     }
     AUTH_CALLBACKS.lock().unwrap().push((state, code));
     Ok(())
@@ -1782,6 +1910,201 @@ async fn devin_exchange(
     let tok = v.get("token").and_then(|x| x.as_str()).unwrap_or("").to_string();
     if tok.is_empty() {
         return Err("响应无 token".into());
+    }
+    Ok(tok)
+}
+
+/// ══════════════════════════════════════════════════════════════
+/// 华为云 CodeArts 跳转登录（01 DSH login.ts ticket 流程一手，免 DPoP）
+/// ══════════════════════════════════════════════════════════════
+
+fn rand_hex(bytes: usize) -> String {
+    use rand::RngCore;
+    let mut b = vec![0u8; bytes];
+    rand::thread_rng().fill_bytes(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// 生成登录 URL + ticket_id + secret（回调 51122/authentication）。
+async fn codearts_start() -> Result<(String, String, String), String> {
+    let ticket_id = rand_hex(16); // uuid hex
+    let secret = rand_hex(32); // 64 字符（login.ts generateRandomSecret）
+    let redirect = format!(
+        "{CODEARTS_LOGIN_BASE}?IdeaType=jetbrains&auth_callback_url={}&plugin-name={CODEARTS_PLUGIN}&plugin-version={CODEARTS_PLUGIN_VER}&ticket_id={}",
+        urlencode(CODEARTS_CALLBACK),
+        urlencode(&ticket_id)
+    );
+    let login_url = format!(
+        "{HUAWEI_AUTH_BASE}?service={}",
+        urlencode(&redirect)
+    );
+    Ok((login_url, ticket_id, secret))
+}
+
+/// 轮询 ticket 端点直到返回临时 AK/SK（AK:SK 入库，供 SDK-HMAC-SHA256 签名）。
+async fn codearts_poll(
+    http: &reqwest::Client,
+    ticket_id: &str,
+    secret: &str,
+) -> Result<String, String> {
+    let url = format!(
+        "{CODEARTS_CRED_ENDPOINT}?ticket_id={}&secret={}",
+        urlencode(ticket_id),
+        urlencode(secret)
+    );
+    for i in 0..120 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        let resp = match http
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .header("Content-Type", "application/json;charset=UTF-8")
+            .header("plugin-name", CODEARTS_PLUGIN)
+            .header("plugin-version", CODEARTS_PLUGIN_VER)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let v: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let cred = v.get("credential").or_else(|| v.get("result"));
+        if let Some(c) = cred {
+            let ak = c.get("access").or_else(|| c.get("accessKeyId")).and_then(|x| x.as_str()).unwrap_or("");
+            let sk = c.get("secret").or_else(|| c.get("secretAccessKey")).and_then(|x| x.as_str()).unwrap_or("");
+            if !ak.is_empty() && !sk.is_empty() {
+                return Ok(format!("{ak}:{sk}"));
+            }
+        }
+    }
+    Err("CodeArts 登录超时（120s）：请确认已在华为云页面完成登录后重试".into())
+}
+
+/// ══════════════════════════════════════════════════════════════
+/// Qoder 设备授权 + PKCE（16 qoder2api-hub 一手，国际版 qoder.com）
+/// ══════════════════════════════════════════════════════════════
+
+async fn qoder_start() -> Result<(String, String, String), String> {
+    let (verifier, challenge) = pkce_pair();
+    let nonce = rand_hex(16); // uuid4().hex 无横线
+    let url = format!(
+        "{QODER_WEBSITE}/device/selectAccounts?challenge={challenge}&challenge_method=S256&nonce={nonce}"
+    );
+    Ok((url, verifier, nonce))
+}
+
+/// 轮询 deviceToken/poll（200 返回 dt- access token；404/202=继续等）。
+async fn qoder_poll(
+    http: &reqwest::Client,
+    verifier: &str,
+    nonce: &str,
+) -> Result<String, String> {
+    let url = format!(
+        "{QODER_OPENAPI}/api/v1/deviceToken/poll?nonce={nonce}&verifier={}&challenge_method=S256",
+        urlencode(verifier)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err("Qoder 设备授权超时（10 分钟）".into());
+        }
+        let resp = http
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        match status {
+            200 => {
+                let v: Value = resp.json().await.unwrap_or(Value::Null);
+                let tok = v
+                    .get("access_token")
+                    .or_else(|| v.get("token"))
+                    .or_else(|| v.get("data").and_then(|d| d.get("access_token")))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !tok.is_empty() {
+                    return Ok(tok);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            404 | 202 => {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            401 | 403 => return Err(format!("Qoder 授权失败（HTTP {status}）")),
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+/// ══════════════════════════════════════════════════════════════
+/// Trae 跳转回调（19 trae2api 一手：www.trae.cn/authorization + 18080 回调 + ExchangeToken）
+/// ══════════════════════════════════════════════════════════════
+
+async fn trae_start() -> Result<(String, String), String> {
+    let trace_id = rand_hex(8); // login_trace_id hex16
+    let machine_id = rand_hex(16); // hex32
+    let mut device_id = String::new();
+    {
+        use rand::RngCore;
+        let mut b = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut b);
+        for x in b {
+            device_id.push(char::from(b'0' + (x % 10)));
+        }
+    }
+    let url = format!(
+        "{TRAE_CONSOLE}/authorization?login_version=1&auth_from=solo&login_channel=native_ide&plugin_version=2.3.62834&auth_type=local&client_id={TRAE_CLIENT_ID}&redirect=0&login_trace_id={trace_id}&auth_callback_url={}&machine_id={machine_id}&device_id={device_id}&x_device_id={device_id}&x_machine_id={machine_id}&x_device_brand=PC&x_device_type=PC&x_os_version=1.0&x_app_version={TRAE_IDE_VERSION}&x_app_type=stable",
+        urlencode(TRAE_CALLBACK)
+    );
+    Ok((url, trace_id))
+}
+
+/// 用回调 refreshToken 换 Trae token（ExchangeToken）。
+async fn trae_exchange(http: &reqwest::Client, refresh_token: &str) -> Result<String, String> {
+    let resp = http
+        .post(format!("{TRAE_OAUTH_HOST}/cloudide/api/v3/trae/oauth/ExchangeToken"))
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .body(json!({
+            "ClientID": TRAE_CLIENT_ID,
+            "RefreshToken": refresh_token,
+            "ClientSecret": "-",
+            "UserID": "",
+        }).to_string())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "Trae HTTP {status}：{}",
+            v.to_string().chars().take(150).collect::<String>()
+        ));
+    }
+    let tok = v
+        .get("token")
+        .or_else(|| v.get("access_token"))
+        .or_else(|| v.get("accessToken"))
+        .or_else(|| v.get("data").and_then(|d| d.get("token")))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if tok.is_empty() {
+        return Err("Trae 响应无 token".into());
     }
     Ok(tok)
 }
