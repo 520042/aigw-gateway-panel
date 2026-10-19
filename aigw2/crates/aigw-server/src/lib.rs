@@ -183,6 +183,8 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/accounts", get(accounts))
         .route("/api/pool", get(pool_snapshot))
         .route("/api/auth", post(auth_action))
+        .route("/api/backup", get(backup_export).post(backup_restore))
+        .route("/api/update-check", get(update_check))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .fallback(web_file)
@@ -527,6 +529,161 @@ async fn accounts(State(st): State<AppState>) -> Json<Value> {
 
 async fn pool_snapshot(State(st): State<AppState>) -> Json<Value> {
     Json(st.pool.snapshot())
+}
+
+/// 备份导出（M5 交付链，对齐 cline2api tmp+rename 数据纪律）：GET /api/backup
+/// 扫描 data 目录全部运行态文件（*.json + panel.db），打包为 JSON 数组供前端下载/保存。
+async fn backup_export() -> Json<Value> {
+    let dd = aigw_relay::proxy::default_data_dir();
+    let mut files: Vec<Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dd) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let ok_ext = name.ends_with(".json") || name == "panel.db";
+            if !ok_ext {
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&p) {
+                files.push(json!({"name": name, "bytes": base64_encode(&bytes), "size": bytes.len()}));
+            }
+        }
+    }
+    files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Json(json!({
+        "ok": true,
+        "ts": now_ms(),
+        "dir": dd.to_string_lossy(),
+        "files": files,
+        "count": files.len(),
+    }))
+}
+
+/// 备份恢复（先写 .bak-<ts> 旧文件再覆盖，损坏不静默）：POST /api/backup
+///   {"files":[{"name":"accounts.json","bytes":"<b64>"}]}
+async fn backup_restore(_st: State<AppState>, body: Bytes) -> Response {
+    let v: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
+        }
+    };
+    let Some(files) = v.get("files").and_then(|x| x.as_array()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 files 数组"}))).into_response();
+    };
+    let dd = aigw_relay::proxy::default_data_dir();
+    let ts = now_ms();
+    let mut restored = 0usize;
+    let mut skipped = Vec::new();
+    for f in files {
+        let Some(name) = f.get("name").and_then(|x| x.as_str()) else { continue };
+        // 只允许受控文件名，防路径穿越
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            skipped.push(format!("{name}（非法名跳过）"));
+            continue;
+        }
+        let Some(b64) = f.get("bytes").and_then(|x| x.as_str()) else { continue };
+        let bytes = match base64_decode(b64) {
+            Some(b) => b,
+            None => {
+                skipped.push(format!("{name}（b64 解码失败跳过）"));
+                continue;
+            }
+        };
+        let target = dd.join(name);
+        if target.exists() {
+            let _ = std::fs::rename(&target, dd.join(format!(".bak-{ts}-{name}")));
+        }
+        if std::fs::write(&target, &bytes).is_ok() {
+            restored += 1;
+        }
+    }
+    // 恢复后重启服务即全量生效（custom/free/accounts 均以 data 目录文件为源）
+    Json(json!({
+        "ok": true,
+        "restored": restored,
+        "skipped": skipped,
+        "dir": dd.to_string_lossy(),
+        "note": "已恢复文件；重启服务后全量生效。旧文件保留为 .bak-<ts>-* 以便回滚。",
+    }))
+    .into_response()
+}
+
+/// 在线更新检查（对齐 21 号 dsh /v1/status 版本自证纪律）：GET /api/update-check
+/// 本地 = 编译版本 + 部署目录时间；远端 = GitHub 仓库最新 main commit。
+async fn update_check() -> Json<Value> {
+    let dd = aigw_relay::proxy::default_data_dir();
+    let exe_ts = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.metadata().ok())
+        .map(|m| {
+            m.modified()
+                .ok()
+                .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    // 远端最新 commit（GitHub API，8s 超时；失败返回 offline 标记不阻断）
+    let remote: Value = std::thread::spawn(|| {
+        let url = "https://api.github.com/repos/520042/aigw-gateway-panel/commits/main";
+        let resp = std::process::Command::new("curl")
+            .args(["-s", "--max-time", "8", "-H", "User-Agent: aigw-panel", url])
+            .output();
+        match resp {
+            Ok(o) if o.status.success() => {
+                serde_json::from_slice::<Value>(&o.stdout).unwrap_or(Value::Null)
+            }
+            _ => Value::Null,
+        }
+    })
+    .join()
+    .unwrap_or(Value::Null);
+    let remote_sha = remote.get("sha").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let remote_date = remote
+        .get("commit")
+        .and_then(|c| c.get("committer"))
+        .and_then(|c| c.get("date"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    Json(json!({
+        "ok": true,
+        "local": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "milestone": "v2-final",
+            "exe_built_ts": exe_ts,
+            "data_dir": dd.to_string_lossy(),
+        },
+        "remote": {
+            "sha": remote_sha,
+            "date": remote_date,
+            "reachable": !remote_sha.is_empty(),
+        },
+        "note": "本地 Rust 工程更新：git pull 后 cargo build + 拷贝 aigw.exe 与 providers/ 覆盖部署目录。",
+    }))
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn base64_encode(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(b)
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
 
 /// 登录会话（批2）：POST /api/auth

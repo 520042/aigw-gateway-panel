@@ -83,7 +83,14 @@ impl OutClient {
                 }
                 _ => {
                     if !spec.headers.contains_key("Authorization") {
-                        rb = rb.header("Authorization", format!("Bearer {secret}"));
+                        // Cline WorkOS 账号：secret=`workos:{at}:{rt}` → 只取 `workos:{at}` 作 Bearer
+                        // （cline2api pool.go:380 一手：上游 Authorization: Bearer workos:<accessToken>）
+                        if spec.id == "cline" && secret.starts_with("workos:") {
+                            let at = secret.split(':').take(2).collect::<Vec<_>>().join(":");
+                            rb = rb.header("Authorization", format!("Bearer {at}"));
+                        } else {
+                            rb = rb.header("Authorization", format!("Bearer {secret}"));
+                        }
                     }
                 }
             }

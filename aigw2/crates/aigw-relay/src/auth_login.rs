@@ -60,6 +60,12 @@ const CLAUDE_SCOPE: &str = "user:profile user:inference user:sessions:claude_cod
 const LOBSTER_UPSTREAM: &str = "https://lobsterai-server.youdao.com";
 const LOBSTER_LOGIN: &str = "https://lobsterai.youdao.com";
 
+// ── Cline WorkOS 设备码（一手：cline2api auth.go:16-21，_refs\luawei1-cline2api）──
+const WORKOS_CLIENT_ID: &str = "client_01K3A541FN8TA3EPPHTD2325AR";
+const WORKOS_DEVICE_URL: &str = "https://api.workos.com/user_management/authorize/device";
+const WORKOS_AUTH_URL: &str = "https://api.workos.com/user_management/authenticate";
+const CLINE_API_BASE: &str = "https://api.cline.bot/api/v1";
+
 #[derive(Debug, Clone)]
 struct Session {
     id: String,
@@ -164,6 +170,23 @@ impl LoginEngine {
                 Err(e) => {
                     sess.status = "error".into();
                     sess.message = format!("设备码申请失败：{e}");
+                }
+            }
+        } else if platform == "cline" {
+            // Cline WorkOS 设备码（22 cline2api auth.go 一手）
+            match cline_start(&auth_http()).await {
+                Ok((device_code, user_code, verify_url, interval)) => {
+                    sess.state = format!("cline:{device_code}:{interval}");
+                    sess.login_url = verify_url.clone();
+                    sess.user_code = user_code.clone();
+                    sess.message = format!(
+                        "Cline 设备码：打开验证页（{}）输入 {} 完成授权，面板自动换发 token 入库。",
+                        verify_url, user_code
+                    );
+                }
+                Err(e) => {
+                    sess.status = "error".into();
+                    sess.message = format!("WorkOS 设备码申请失败：{e}");
                 }
             }
         } else if let Some(oauth_host) = kimi_oauth_host(platform) {
@@ -300,6 +323,14 @@ impl LoginEngine {
             match kimi_oauth_host(&sess.platform) {
                 Some(host) => kimi_poll(&auth_http(), host, &device_code).await,
                 None => Err("Kimi 平台映射缺失".to_string()),
+            }
+        } else if sess.state.starts_with("cline:") {
+            // cline:{device_code}:{interval} → WorkOS 三态轮询 → register 换皮
+            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+            if parts.len() < 3 {
+                Err("Cline 会话不完整".to_string())
+            } else {
+                cline_poll(&auth_http(), parts[1], parts[2]).await
             }
         } else if sess.state.starts_with("xai:") {
             // xai:{device_code}:{token_endpoint}
@@ -834,6 +865,142 @@ fn kimi_headers(device_id: &str) -> Vec<(&'static str, String)> {
         ("X-Msh-Device-Model", model),
         ("X-Msh-Device-Id", device_id.to_string()),
     ]
+}
+
+/// Cline WorkOS 设备码申请（22 cline2api auth.go:352-414 一手）。
+async fn cline_start(http: &reqwest::Client) -> Result<(String, String, String, u64), String> {
+    let resp = http
+        .post(WORKOS_DEVICE_URL)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("client_id={WORKOS_CLIENT_ID}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.map_err(|e| format!("解析失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "HTTP {status}：{}",
+            v.to_string().chars().take(150).collect::<String>()
+        ));
+    }
+    let device_code = v
+        .get("device_code")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let user_code = v
+        .get("user_code")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let verify = v
+        .get("verification_uri_complete")
+        .or_else(|| v.get("verification_uri"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let interval = v
+        .get("interval")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(5)
+        .max(5); // 最小 5s（cline2api auth.go 注释）
+    if device_code.is_empty() || user_code.is_empty() {
+        return Err(format!(
+            "响应缺 device_code/user_code：{}",
+            v.to_string().chars().take(200).collect::<String>()
+        ));
+    }
+    Ok((device_code, user_code, verify, interval))
+}
+
+/// Cline WorkOS 轮询 + register 换皮（22 cline2api auth.go:263-267, pool.go:358-388 一手）。
+/// 返回账号 secret = `workos:{cline_at}:{cline_rt}`（relay 转发取 `workos:{at}` 作 Bearer）。
+async fn cline_poll(
+    http: &reqwest::Client,
+    device_code: &str,
+    interval: &str,
+) -> Result<String, String> {
+    // 1) WorkOS 设备码轮询
+    let resp = http
+        .post(WORKOS_AUTH_URL)
+        .timeout(std::time::Duration::from_secs(15))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={device_code}&client_id={WORKOS_CLIENT_ID}"
+        ))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    if let Some(err) = v.get("error").and_then(|x| x.as_str()) {
+        match err {
+            "authorization_pending" | "slow_down" => {
+                return Err(format!(
+                    "等待授权中（间隔 {interval}s 轮询，打开验证页输入用户码，面板自动换发 token）"
+                ))
+            }
+            "expired_token" => return Err("设备码已过期，请重新发起登录".into()),
+            "access_denied" => return Err("授权被拒绝".into()),
+            _ => return Err(format!("WorkOS 错误：{err}")),
+        }
+    }
+    let wos_at = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let wos_rt = v
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if wos_at.is_empty() || wos_rt.is_empty() {
+        return Err("WorkOS 响应缺 token".into());
+    }
+    // 2) Cline register 换皮：refresh token 本质即 WorkOS refresh token（auth.go:263-267 注释）
+    let rr = http
+        .post(format!("{CLINE_API_BASE}/auth/register"))
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .body(format!(
+            r#"{{"accessToken":"{wos_at}","refreshToken":"{wos_rt}"}}"#
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("register 请求失败：{e}"))?;
+    let rstatus = rr.status().as_u16();
+    let rv: Value = rr.json().await.map_err(|e| e.to_string())?;
+    if !(200..300).contains(&rstatus) {
+        return Err(format!(
+            "register HTTP {rstatus}：{}",
+            rv.to_string().chars().take(200).collect::<String>()
+        ));
+    }
+    let cat = rv
+        .get("accessToken")
+        .or_else(|| rv.get("access_token"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let crt = rv
+        .get("refreshToken")
+        .or_else(|| rv.get("refresh_token"))
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or(wos_rt)
+        .to_string();
+    if cat.is_empty() {
+        return Err(format!(
+            "register 响应缺 accessToken：{}",
+            rv.to_string().chars().take(200).collect::<String>()
+        ));
+    }
+    Ok(format!("workos:{cat}:{crt}"))
 }
 
 /// 发起 Kimi 设备码流程 → (device_code, user_code, verification_uri)。

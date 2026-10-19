@@ -42,6 +42,7 @@ const VIEWS = {
   sources:  { t: '接入源', s: '官方 API · 订阅反代 · 客户端 · 公益站 · 自定义', f: viewSources },
   accounts: { t: '账号', s: '凭据掩码展示，secret 仅后台使用', f: viewAccounts },
   usage:    { t: '用量', s: 'SQLite(WAL) 用量台账', f: viewUsage },
+  about:    { t: '关于', s: '版本 · 在线更新 · 备份恢复 · 使用说明 · 免责声明', f: viewAbout },
 };
 
 // ─────────────────────────────────────────────
@@ -231,6 +232,7 @@ function srcDrawer(p) {
   const isWb = p.id === 'wb-gateway' || p.id === 'wb-gateway-intl' || p.id === 'codebuddy';
   const isMinimax = p.id === 'minimax';
   const isKimi = p.id === 'sub-kimi' || p.id === 'sub-kimi-ai' || p.id === 'sub-grok';
+  const isCline = p.id === 'cline';
   const isPkce = p.id === 'sub-codex' || p.id === 'sub-claude';
   const isLobster = p.id === 'lobster';
   const isKey = p.auth === 'api_key';
@@ -240,8 +242,8 @@ function srcDrawer(p) {
   if (isAnon) {
     body = `<div class="note">免密平台：无需凭据，直接可用。点下面的「测试连通」看是否可转发。</div>
       <button class="btn pri" onclick="testAnon('${esc(p.id)}')">测试连通</button>`;
-  } else if (isWb || isMinimax || isKimi) {
-    body = `<div class="note">${isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : isMinimax ? 'MiniMax 设备码：' : isKimi && p.id === 'sub-grok' ? 'Grok 设备码（RFC 8628，需代理访问）：' : 'Kimi Code 设备码（RFC 8628）：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
+  } else if (isWb || isMinimax || isKimi || isCline) {
+    body = `<div class="note">${isCline ? 'Cline 设备码（WorkOS OAuth）：' : isWb ? 'WorkBuddy/CodeBuddy 设备授权：' : isMinimax ? 'MiniMax 设备码：' : isKimi && p.id === 'sub-grok' ? 'Grok 设备码（RFC 8628，需代理访问）：' : 'Kimi Code 设备码（RFC 8628）：'}点「开始登录」生成授权链接，在浏览器完成授权后面板自动拿 token 入库。</div>
       <div class="row">
         <button class="btn pri" onclick="authStart('${esc(p.id)}')">开始登录</button>
         <button class="btn" onclick="authPoll('${esc(p.id)}')">查询授权状态</button>
@@ -592,6 +594,121 @@ async function viewUsage(el) {
       <tbody>${rows}</tbody></table>` : '<div class="empty">暂无历史</div>'}
       <p class="faint" style="margin-bottom:0">存储：${us.db ? 'SQLite（WAL，90 天 / 5000 条 prune）' : 'JSON 降级'} · 旧版数据已幂等导入</p>
     </section>`;
+}
+
+// ─────────────────────────────────────────────
+// 关于页：版本 / 在线更新 / 备份恢复 / 使用说明 / 免责声明
+// ─────────────────────────────────────────────
+async function viewAbout(el) {
+  el.innerHTML = `<div class="card glass empty">加载中…</div>`;
+  let up = { ok: false };
+  try { up = await api('/api/update-check'); } catch (_) { up = { ok: false, note: '更新检查失败' }; }
+  const L = up.local || {};
+  const R = up.remote || {};
+  const localV = `${L.version || '0.1.0'} · ${L.milestone || ''}`;
+  const remoteTxt = R.reachable
+    ? `${R.sha ? R.sha.slice(0, 8) : '—'}（${R.date || ''}）`
+    : '远端不可达（离线）';
+  el.innerHTML = `
+  <section class="card glass">
+    <div class="card-t"><b>aigw v2</b> 免费 AI 额度 → 本地 OpenAI 兼容端点（一包多程）</div>
+    <div class="kv">
+      <div><span>本地版本</span><b>${esc(localV)}</b></div>
+      <div><span>远端最新 commit</span><b>${esc(remoteTxt)}</b></div>
+      <div><span>数据目录</span><code class="mono">${esc(L.data_dir || '—')}</code></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn" onclick="checkUpdate()">⟳ 检查更新</button>
+      <button class="btn pri" onclick="backupNow()">⬇ 备份数据</button>
+      <button class="btn" onclick="restorePick()">⬆ 恢复备份</button>
+    </div>
+    <div id="upBox"></div>
+    <div class="faint small" style="margin-top:8px">${esc(up.note || '')}</div>
+  </section>
+
+  <section class="card glass">
+    <div class="card-t"><b>使用说明</b></div>
+    <ol class="docs">
+      <li><b>接入源</b>：按分组接入——开放平台 API（填 Key）、订阅反代（OAuth 跳转/设备码）、客户端反代（网页凭据）、公益站（聚合中转）、自定义 API（自填协议/URL/Key 自动同步模型）。</li>
+      <li><b>转发调用</b>：本地端点 <code class="mono">http://127.0.0.1:8800/v1</code>，OpenAI 兼容 <code class="mono">/v1/chat/completions</code>、<code class="mono">/v1/models</code>；任意 OpenAI SDK 填 BaseURL 即可。</li>
+      <li><b>账号</b>：设备码/跳转登录自动入库；手动粘贴 Cookie/Key 走「保存凭据」。secret 仅面板后台使用，账号页只显示掩码。</li>
+      <li><b>代理</b>：顶部「⇅ 代理设置」切换 全部直连 / 全局代理 / 绕过大陆，所有流程（登录、上游、模型同步）即时生效，无需重启。</li>
+      <li><b>用量</b>：SQLite(WAL) 台账，总览页含调用趋势/平台占比图表。</li>
+      <li><b>会话粘性</b>：同一对话优先复用同一账号（conversation_id 系列 → 最后一条用户消息指纹），降低额度碎片。</li>
+    </ol>
+  </section>
+
+  <section class="card glass">
+    <div class="card-t"><b>免责声明</b></div>
+    <div class="docs">
+      <p>1. 本面板仅用于<u>个人学习与技术研究</u>，聚合接入的各平台额度/账号均为各平台官方授权的个人使用权；请遵守各平台服务条款，勿用于商业售卖、批量滥用或任何违法违规用途。</p>
+      <p>2. 各「客户端反代」「公益站」接入涉及网页版逆向/中转行为，平台可能随时调整接口或风控，导致某一路径失效——面板不保证长期可用性，失效请及时切换接入源。</p>
+      <p>3. 面板为本地/自托管服务，凭据（Cookie / Token / API Key）仅存储在本机 <code class="mono">%LOCALAPPDATA%\\aigw2\\data</code>，不会上传第三方；请自行保管好数据目录，避免泄露给他人。</p>
+      <p>4. 使用本面板产生的任何后果（账号风控、额度损失、法律风险）由使用者自行承担，项目作者不对因使用本面板造成的任何直接或间接损失负责。</p>
+      <p>5. 请勿将本面板部署到公网并暴露管理界面；如需远程使用，请置于可信内网并自行加鉴权。</p>
+    </div>
+  </section>
+
+  <section class="card glass">
+    <div class="card-t"><b>在线更新</b></div>
+    <div class="docs small">
+      <p>本地为 Rust 工程（aigw2 workspace）。更新流程：<code class="mono">git pull</code> → <code class="mono">cargo build</code> → 用新 <code class="mono">aigw.exe</code> 与 <code class="mono">providers/</code> 覆盖部署目录 <code class="mono">%LOCALAPPDATA%\\aigw2</code> → 重启计划任务 Aigw2Service。更新前建议先「⬇ 备份数据」。</p>
+    </div>
+  </section>`;
+}
+
+async function checkUpdate() {
+  const box = $('#upBox');
+  if (box) box.innerHTML = '<div class="faint">检查中…</div>';
+  try {
+    const r = await api('/api/update-check');
+    const R = r.remote || {};
+    const rtxt = R.reachable ? `最新 commit <b>${esc(R.sha ? R.sha.slice(0, 8) : '—')}</b>（${esc(R.date || '')}）` : '<b>远端不可达</b>（离线或 GitHub 被墙，可经「代理设置」绕过）';
+    if (box) box.innerHTML = `<div class="note">${rtxt}</div>`;
+  } catch (e) {
+    if (box) box.innerHTML = `<div class="note errnote">${esc(e.message)}</div>`;
+  }
+}
+
+// 备份：GET /api/backup → 下载 JSON 文件
+async function backupNow() {
+  try {
+    const r = await api('/api/backup');
+    const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `aigw2-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    const box = $('#upBox');
+    if (box) box.innerHTML = `<div class="note oknote">已导出 ${r.count || 0} 个数据文件（${esc(r.dir)}）</div>`;
+  } catch (e) {
+    const box = $('#upBox');
+    if (box) box.innerHTML = `<div class="note errnote">备份失败：${esc(e.message)}</div>`;
+  }
+}
+
+// 恢复：选择备份 JSON → POST /api/backup
+async function restorePick() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.json,application/json';
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0];
+    if (!f) return;
+    const box = $('#upBox');
+    if (box) box.innerHTML = '<div class="faint">恢复中…（重启服务后生效）</div>';
+    try {
+      const txt = await f.text();
+      const data = JSON.parse(txt);
+      if (!Array.isArray(data.files)) throw new Error('备份文件格式不对（缺 files 数组）');
+      const r = await post('/api/backup', { files: data.files });
+      if (box) box.innerHTML = `<div class="note oknote">${esc(r.note || '已恢复')}（${r.restored || 0} 个文件）</div>`;
+    } catch (e) {
+      if (box) box.innerHTML = `<div class="note errnote">恢复失败：${esc(e.message)}</div>`;
+    }
+  };
+  inp.click();
 }
 
 // ─────────────────────────────────────────────

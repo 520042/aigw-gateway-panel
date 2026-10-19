@@ -17,6 +17,7 @@ rust-embed = { workspace = true, features = ["interpolate-folder-path"] }
 mime_guess = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
+base64 = "0.22"
 
 [dev-dependencies]
 tower = { workspace = true }

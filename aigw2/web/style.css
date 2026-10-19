@@ -143,6 +143,17 @@ code{font-family:var(--mono);font-size:11.5px;color:var(--accent)}
 select.q{appearance:none;-webkit-appearance:none;background:rgba(255,255,255,.06)}
 h3{margin:2px 0 12px;font-size:14px;font-weight:650}
 
+/* 关于页 */
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:10px}
+.kv div{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:10px 12px}
+.kv span{display:block;font-size:11px;color:var(--faint);margin-bottom:4px}
+.kv b{font-size:13px;word-break:break-all}
+.docs{font-size:12.5px;line-height:1.75;color:var(--fg);margin:6px 0}
+.docs li{margin:7px 0}
+.docs p{margin:8px 0}
+.small{font-size:12px}
+.card-t{font-size:14px;font-weight:650;margin-bottom:4px}
+
 /* M4 可视化 */
 .donut-total{font-size:26px;font-weight:700;fill:var(--fg)}
 .donut-cap{font-size:11px;fill:var(--faint)}

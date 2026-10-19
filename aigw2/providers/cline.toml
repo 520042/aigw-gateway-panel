@@ -1,0 +1,21 @@
+# Cline（VSCode 插件账号 · WorkOS OAuth 设备码）——参考 cline2api 号池
+id = "cline"
+name = "Cline（WorkOS 设备码）"
+base_url = "https://api.cline.bot/api/v1"
+chat_path = "/chat/completions"
+format = "openai"
+auth = "o_auth_device"
+models_policy = "static"
+stream_dialect = "sse_delta"
+# Cline 号池常见模型（实际可用集随账号订阅浮动，可在账号页/此处调整）
+models = [
+    "claude-sonnet-4-5",
+    "claude-opus-4-1",
+    "claude-3-7-sonnet",
+]
+notes = """
+Cline 官方账号（WorkOS OAuth 登录态）聚合为号池对外提供 OpenAI 兼容 /v1 端点。
+· 登录：接入源点「登录」→ WorkOS 设备码流程（打开验证页输 user_code，面板自动换发 Cline token 入库），无需扫码、无需无头浏览器。
+· 凭据：账号 secret 存 `workos:<accessToken>:<refreshToken>`；转发上游时按 cline2api 惯例发 `Authorization: Bearer workos:<accessToken>`。
+· 模型：Cline 订阅实际可用模型以账号侧为准，此静态清单可按需修改。
+"""
