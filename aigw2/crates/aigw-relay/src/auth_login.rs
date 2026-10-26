@@ -310,37 +310,21 @@ fn b64url_nopad(d: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(d)
 }
 
-impl LoginEngine {
-    pub fn new() -> Self {
-        LoginEngine {
-            sessions: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn new_id(&self) -> String {
-        format!(
-            "ls-{:x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        )
-    }
-
-    /// 发起登录会话。优先级：wb 族设备授权 → minimax 设备码 → spec.login_url 非空跳转登录（手动粘贴凭据）。
-    pub async fn start(&self, client: &OutClient, platform: &str, specs: &[ProviderSpec]) -> Value {
-        let id = self.new_id();
-        let mut sess = Session {
-            id: id.clone(),
-            platform: platform.to_string(),
-            qr_image: String::new(),
-            qr_text: String::new(),
-            state: String::new(),
-            status: "pending".into(),
-            message: String::new(),
-            login_url: String::new(),
-            user_code: String::new(),
-        };
+/// 按平台分派登录方式（[`LoginEngine::start`] 的主体）。
+///
+/// 抽出来的理由：这是 19 个分支、244 行的 if/else 链，每次加一个平台都要在这条链上
+/// 找位置；而它和「构造会话 → 写入会话表」这两步没有逻辑关系。拆开后 `start()` 只剩
+/// 「建会话 → 调本函数 → 入库」三步，加平台只改这一段。
+///
+/// 约定：只负责把结果写进 `sess`，**不返回错误** —— 每个分支失败时就地
+/// `sess.fail(...)`，因为「这个平台不支持 / 这把凭据拿不到」都要原样呈现给面板，
+/// 而不是抛出去丢掉会话对象。
+async fn start_dispatch(
+    client: &OutClient,
+    platform: &str,
+    specs: &[ProviderSpec],
+    sess: &mut Session,
+) {
         if let Some((base, origin, plat_param)) = wb_base(platform) {
             match wb_start(client, &base, &origin, plat_param).await {
                 Ok((state, auth_url)) => {
@@ -585,6 +569,41 @@ impl LoginEngine {
         } else {
             sess.fail(format!("平台 {platform} 暂不支持自动登录（手动粘贴凭据到账号池）"));
         }
+}
+
+impl LoginEngine {
+    pub fn new() -> Self {
+        LoginEngine {
+            sessions: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn new_id(&self) -> String {
+        format!(
+            "ls-{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        )
+    }
+
+    /// 发起登录会话。优先级：wb 族设备授权 → minimax 设备码 → spec.login_url 非空跳转登录（手动粘贴凭据）。
+
+    pub async fn start(&self, client: &OutClient, platform: &str, specs: &[ProviderSpec]) -> Value {
+        let id = self.new_id();
+        let mut sess = Session {
+            id: id.clone(),
+            platform: platform.to_string(),
+            qr_image: String::new(),
+            qr_text: String::new(),
+            state: String::new(),
+            status: "pending".into(),
+            message: String::new(),
+            login_url: String::new(),
+            user_code: String::new(),
+        };
+        start_dispatch(client, platform, specs, &mut sess).await;
         let out = json!({
             "id": sess.id, "platform": sess.platform, "status": sess.status,
             "message": sess.message, "login_url": sess.login_url,
