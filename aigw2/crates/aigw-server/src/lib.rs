@@ -9703,6 +9703,7 @@ stream_dialect = "sse_delta"
             tin: 1,
             tout: 2,
             ms: 3,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -9853,6 +9854,7 @@ stream_dialect = "sse_delta"
             tin: 3,
             tout: 5,
             ms: 9,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -9887,6 +9889,7 @@ stream_dialect = "sse_delta"
             tin: 1,
             tout: 1,
             ms: 1,
+            ttfb: 0,
             ok,
             cancelled,
             upstream: "u".into(),
@@ -9946,6 +9949,7 @@ stream_dialect = "sse_delta"
             tin: 1,
             tout: 1,
             ms: 1,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -9959,6 +9963,7 @@ stream_dialect = "sse_delta"
             tin: 2,
             tout: 2,
             ms: 2,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -10009,6 +10014,7 @@ stream_dialect = "sse_delta"
             tin: 1,
             tout: 1,
             ms: 1,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -10070,6 +10076,7 @@ stream_dialect = "sse_delta"
             tin,
             tout: 1,
             ms: 1,
+            ttfb: 0,
             ok,
             upstream: "u".into(),
             cancelled: false,
@@ -10127,6 +10134,7 @@ stream_dialect = "sse_delta"
                 tin: 0,
                 tout: 0,
                 ms: 0,
+                ttfb: 0,
                 ok: true,
                 upstream: "u".into(),
                 cancelled: false,
@@ -10169,6 +10177,7 @@ stream_dialect = "sse_delta"
                 tin: 0,
                 tout: 0,
                 ms: 0,
+                ttfb: 0,
                 ok: true,
                 upstream: "u".into(),
                 cancelled: false,
@@ -10223,6 +10232,7 @@ stream_dialect = "sse_delta"
             tin: 0,
             tout: 0,
             ms: 0,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -10265,6 +10275,7 @@ stream_dialect = "sse_delta"
             tin: 0,
             tout: 0,
             ms: 0,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -10314,6 +10325,7 @@ stream_dialect = "sse_delta"
                 tin: 1,
                 tout: 1,
                 ms: 1,
+                ttfb: 0,
                 ok: true,
                 upstream: "u".into(),
                 cancelled: false,
@@ -10387,6 +10399,7 @@ stream_dialect = "sse_delta"
                 tin: 0,
                 tout: 0,
                 ms: 0,
+                ttfb: 0,
                 ok: true,
                 upstream: "u".into(),
                 cancelled: false,
@@ -10413,6 +10426,7 @@ stream_dialect = "sse_delta"
             tin: 0,
             tout: 0,
             ms: 0,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -10461,6 +10475,7 @@ stream_dialect = "sse_delta"
             tin: 1,
             tout: 1,
             ms: 1,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -10474,6 +10489,7 @@ stream_dialect = "sse_delta"
             tin: 2,
             tout: 2,
             ms: 2,
+            ttfb: 0,
             ok: true,
             upstream: "u".into(),
             cancelled: false,
@@ -10517,6 +10533,7 @@ stream_dialect = "sse_delta"
                 tin: 1,
                 tout: 1,
                 ms: 1,
+                ttfb: 0,
                 ok: i % 2 == 0,
                 upstream: "u".into(),
                 cancelled: false,
@@ -12687,12 +12704,14 @@ stream_dialect = "sse_delta"
     }
 
     #[tokio::test]
-    async fn anthropic_custom_api_is_501_not_upstream_404() {
-        // 转发层只有 OpenAI 透传：anthropic 自定义 API 必须明确 501，
-        // 不能带着 /chat/completions 去打 Anthropic 端点（那只会得到上游 404）。
+    async fn anthropic_custom_api_is_supported_not_501() {
+        // ★ 2026-10-26（P2 修复①）：anthropic 自定义 API 已支持真实转发（以前明确 501）。
+        // 现在 /v1/chat/completions 对 anthropic 平台做 OpenAI→Anthropic 转换后打上游
+        // /v1/messages；/v1/messages 端则原生透传。
+        // 用一个不可达上游验证「不再是 501」——关键是请求真的走进了转发层。
         let custom = CustomStore::empty();
         let c = custom
-            .add("克劳德", "anthropic", "https://api.anthropic.com", "sk-ant-test")
+            .add("克劳德", "anthropic", "http://127.0.0.1:1", "sk-ant-test")
             .unwrap();
         custom.set_models(&c.id, vec!["claude-x".into()]).unwrap();
         let app = build_app(state_with_custom(custom, AccountStore::empty()));
@@ -12706,9 +12725,11 @@ stream_dialect = "sse_delta"
             )
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);
-        let body = body_string(res).await;
-        assert!(body.contains("anthropic"), "body={body}");
+        assert_ne!(
+            res.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "anthropic 已支持转发，不该再回 501"
+        );
     }
 
     #[tokio::test]
@@ -12813,6 +12834,7 @@ stream_dialect = "sse_delta"
             tin: 0,
             tout: 0,
             ms: 10,
+            ttfb: 0,
             ok,
             upstream: String::new(),
             cancelled: false,
@@ -14635,14 +14657,16 @@ stream_dialect = "sse_delta"
     /// 地址是占位符，三者要用户改的地方完全不同。
     #[tokio::test]
     async fn models_platform_filter_names_the_real_blocker() {
-        // 有凭据（anon 平台不需要 Key）+ 已启用，但协议是 anthropic → 转发层不支持
+        // 有凭据（anon 平台不需要 Key）+ 已启用，但协议是 responses（本面板不支持）
+        // ★ 2026-10-26：原先这里用 anthropic——它现在已支持转发，改用真正不支持的
+        //   responses 协议来守住同一条契约（协议不支持 ≠ 没凭据）。
         let bad_fmt = spec_toml(r#"
 id = "plat-anth"
 name = "plat-anth"
 enabled = true
 auth = "anon"
 base_url = "http://127.0.0.1:9"
-format = "anthropic"
+format = "responses"
 models = ["anth-1"]
 models_policy = "static"
 stream_dialect = "sse_delta"
@@ -14652,7 +14676,7 @@ stream_dialect = "sse_delta"
         let v: Value = serde_json::from_str(&out).unwrap();
         let msg = v["platform"]["message"].as_str().unwrap_or("");
         assert_eq!(v["platform"]["routable"], json!(true), "它是有凭据的：{out}");
-        assert!(msg.contains("anthropic"), "要说清是协议的问题:「{msg}」");
+        assert!(msg.contains("responses"), "要说清是协议的问题:「{msg}」");
         assert!(
             !msg.contains("没有可用凭据"),
             "有凭据的平台被说成没凭据，用户会去填 Key 然后还是不通：「{msg}」"

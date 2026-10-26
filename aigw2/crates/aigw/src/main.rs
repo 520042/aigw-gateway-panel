@@ -305,7 +305,9 @@ async fn main() {
         }
     }
 
-    let pool = aigw_pool::Pool::new();
+    // ★ 2026-10-26（P3）：带持久化的号池——冷却/健康/积分快照重启后恢复。
+    // 否则每次重启都把「哪些账号被上游限流」归零，一上来就再吃一轮 429/402。
+    let pool = aigw_pool::Pool::open(&data_dir());
     // 出站代理：启动时加载 data/proxy.json 到全局（OutClient 构造即生效；/api/proxy 可热更新）
     let pcfg = aigw_relay::proxy::load(&data_dir());
     aigw_relay::proxy::apply(&pcfg);
@@ -542,6 +544,18 @@ async fn main() {
                 },
             )
             .await;
+        });
+    }
+    // ★ 2026-10-26（P3）：号池状态定期落盘。冷却/健康/积分快照每 60 秒存一次，
+    // 进程被强杀最多丢 60 秒的治理状态——比「重启全丢」好得多。
+    {
+        let pool = state.pool.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                pool.persist();
+            }
         });
     }
     // ★ 2026-10-26（P0）：wb 族成长任务自动完成（对齐 workbuddy2api 17 任务闭环）。

@@ -111,6 +111,8 @@ pub struct Pool {
     /// ★ 2026-10-26（P3）：单账号在单模型上的最大并发（可热更新，面板 /api/runtime 改）。
     /// 0 = 未注入，用编译期默认 MAX_INFLIGHT。
     max_inflight: std::sync::atomic::AtomicU32,
+    /// ★ 2026-10-26（P3）：状态落盘路径（None = 不持久化，测试用）。
+    state_path: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 /// 并发租约：Drop 自动归还在飞计数。
@@ -133,7 +135,167 @@ impl Pool {
         Arc::new(Pool {
             inner: Mutex::new(Inner::default()),
             max_inflight: std::sync::atomic::AtomicU32::new(0),
+            state_path: std::sync::Mutex::new(None),
         })
+    }
+
+    /// ★ 2026-10-26（P3）：带持久化的构造。冷却/健康/积分快照落盘到
+    /// `{data_dir}/pool-state.json`，重启后恢复。
+    ///
+    /// **为什么重要**：原本这些状态纯内存，重启即清零——所有已冷却的账号立刻被
+    /// 重新尝试（一上来就再吃一轮 429/402），会话粘性全断（同一会话换号，
+    /// 上游 prompt cache 白丢）。运维重启一次面板，等于把账号治理状态归零。
+    ///
+    /// 单调 `Instant` 存不了墙钟，所以落盘换算成「剩余秒数」，加载时再换算回
+    /// `Instant`（已过期的直接丢弃）。跨重启、跨机器都可读。
+    pub fn open(data_dir: &std::path::Path) -> Arc<Pool> {
+        let pool = Pool {
+            inner: Mutex::new(Inner::default()),
+            max_inflight: std::sync::atomic::AtomicU32::new(0),
+            state_path: std::sync::Mutex::new(Some(data_dir.join("pool-state.json"))),
+        };
+        let arc = Arc::new(pool);
+        arc.restore();
+        arc
+    }
+
+    fn restore(&self) {
+        let path = match self.state_path.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            tracing::warn!("pool：状态文件损坏，忽略（{}）", path.display());
+            return;
+        };
+        let now = Instant::now();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n_cool = 0;
+        let mut n_health = 0;
+        if let Some(arr) = v.get("cooldown").and_then(|x| x.as_array()) {
+            for item in arr {
+                let (Some(acc), Some(model), Some(remain), Some(strikes)) = (
+                    item.get("account").and_then(|x| x.as_str()),
+                    item.get("model").and_then(|x| x.as_str()),
+                    item.get("remain_s").and_then(|x| x.as_f64()),
+                    item.get("strikes").and_then(|x| x.as_u64()),
+                ) else {
+                    continue;
+                };
+                if remain <= 0.0 {
+                    continue;
+                }
+                g.cooldown.insert(
+                    (acc.to_string(), model.to_string()),
+                    CoolState {
+                        until: now + Duration::from_secs_f64(remain),
+                        strikes: strikes as u32,
+                    },
+                );
+                n_cool += 1;
+            }
+        }
+        if let Some(arr) = v.get("health").and_then(|x| x.as_array()) {
+            for item in arr {
+                let (Some(acc), Some(status), Some(age)) = (
+                    item.get("account").and_then(|x| x.as_str()),
+                    item.get("status").and_then(|x| x.as_str()),
+                    item.get("age_s").and_then(|x| x.as_f64()),
+                ) else {
+                    continue;
+                };
+                // 超过 6 小时的结论不恢复：那是上一班岗的判断，展示出来会误导
+                //（面板写着「鉴权失败」，其实早已重登过）。
+                if age > 6.0 * 3600.0 {
+                    continue;
+                }
+                g.health.insert(
+                    acc.to_string(),
+                    HealthState {
+                        status: match status {
+                            "ok" => "ok",
+                            "quota" => "quota",
+                            "rate" => "rate",
+                            _ => "auth",
+                        },
+                        label: item
+                            .get("label")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        at: now - Duration::from_secs_f64(age),
+                    },
+                );
+                n_health += 1;
+            }
+        }
+        if let Some(arr) = v.get("credits").and_then(|x| x.as_array()) {
+            for item in arr {
+                if let (Some(acc), Some(c)) = (
+                    item.get("account").and_then(|x| x.as_str()),
+                    item.get("credit").and_then(|x| x.as_f64()),
+                ) {
+                    g.credits.insert(acc.to_string(), (c, now));
+                }
+            }
+        }
+        if n_cool > 0 || n_health > 0 {
+            tracing::info!(cooldown = n_cool, health = n_health, "pool：已恢复重启前状态");
+        }
+    }
+
+    /// 把冷却 / 健康 / 积分快照落盘（原子写：.tmp + rename）。
+    pub fn persist(&self) {
+        let path = match self.state_path.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let now = Instant::now();
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let cooldown: Vec<serde_json::Value> = g
+            .cooldown
+            .iter()
+            .filter_map(|((acc, model), cs)| {
+                let remain = cs.until.saturating_duration_since(now).as_secs_f64();
+                if remain <= 0.0 {
+                    return None;
+                }
+                Some(serde_json::json!({
+                    "account": acc, "model": model,
+                    "remain_s": remain.round(), "strikes": cs.strikes
+                }))
+            })
+            .collect();
+        let health: Vec<serde_json::Value> = g
+            .health
+            .iter()
+            .map(|(acc, h)| {
+                serde_json::json!({
+                    "account": acc, "status": h.status, "label": h.label,
+                    "age_s": now.duration_since(h.at).as_secs_f64().round()
+                })
+            })
+            .collect();
+        let credits: Vec<serde_json::Value> = g
+            .credits
+            .iter()
+            .map(|(acc, (c, _))| serde_json::json!({"account": acc, "credit": c}))
+            .collect();
+        let v = serde_json::json!({
+            "saved_at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            "cooldown": cooldown, "health": health, "credits": credits,
+        });
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, serde_json::to_string(&v).unwrap_or_default()).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 
     /// 设置单账号单模型最大并发（0 = 回到编译期默认）。面板 /api/runtime 调用。
@@ -1117,5 +1279,66 @@ mod tests {
         assert_eq!(label, "Cookie 已过期");
         p.forget_account("acc2");
         assert!(p.health_of("acc2").is_none(), "删号后不应残留健康结论");
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::*;
+
+    fn tmp_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("aigw-pool-persist-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn cooldown_survives_restart() {
+        let d = tmp_dir("cool");
+        {
+            let p = Pool::open(&d);
+            // 制造一条 402 冷却
+            p.report("test-plat", "acc-1", "m1", false, ErrorClass::Quota, false);
+            p.persist();
+            assert!(p.blocked_of("acc-1").cooling_s > 0.0, "冷却应生效");
+        }
+        // 「重启」：新 Pool 从同一目录加载
+        let p2 = Pool::open(&d);
+        let b = p2.blocked_of("acc-1");
+        assert!(b.cooling_s > 0.0, "冷却应跨重启恢复，实际 cooling_s={}", b.cooling_s);
+    }
+
+    #[test]
+    fn credit_survives_restart() {
+        let d = tmp_dir("credit");
+        {
+            let p = Pool::open(&d);
+            p.record_credit("acc-1", Some(42.0));
+            p.persist();
+        }
+        let p2 = Pool::open(&d);
+        assert_eq!(p2.credit_of("acc-1"), Some(42.0));
+    }
+
+    #[test]
+    fn expired_cooldown_is_dropped() {
+        let d = tmp_dir("expired");
+        // 手写一份「剩余 0 秒」的状态文件
+        std::fs::write(
+            d.join("pool-state.json"),
+            r#"{"cooldown":[{"account":"a","model":"m","remain_s":0,"strikes":1}],"health":[],"credits":[]}"#,
+        )
+        .unwrap();
+        let p = Pool::open(&d);
+        assert_eq!(p.blocked_of("a").cooling_s, 0.0, "过期冷却不该恢复");
+    }
+
+    #[test]
+    fn without_path_persist_is_noop() {
+        let p = Pool::new(); // 无 data_dir
+        p.record_credit("x", Some(1.0));
+        p.persist(); // 不应 panic
+        assert_eq!(p.credit_of("x"), Some(1.0));
     }
 }
