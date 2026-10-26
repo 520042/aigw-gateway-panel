@@ -5,7 +5,7 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261026b';
+const BUILD = 'v20261026c';
 
 // 公益站聚合源状态（/api/free 的 sources + last_refresh）：只在需要时拉一次，
 // 手动刷新后置空，下次渲染重取。
@@ -1105,16 +1105,19 @@ function srcDrawer(p) {
         <div id="authBox"></div>`;
     }
   }
-  return `<div class="modal-mask" onclick="if(event.target===this){SRC_EXPAND=null;render()}"><div class="modal drawer" id="srcDrawer">
-    <div class="modal-hd">${esc(p.name)}<span class="faint mono"> ${esc(p.id)}</span>
-      <b class="x" onclick="SRC_EXPAND=null;render()">✕</b></div>
+  return modalShell(
+    `${esc(p.name)}<span class="faint mono"> ${esc(p.id)}</span>`,
+    `
     <div class="modal-bd">
       ${p.accounts_n > 0 ? `<div class="note oknote">已接入 ${p.accounts_n} 个账号（账号页可查看掩码 / 停用 / 删除）</div>` : ''}
       ${unusableBanner(p)}
       ${srcModelsBlock(p)}
       ${body}
     </div>
-  </div></div>`;
+`,
+    // 抽屉形态：点遮罩或 ✕ 都要清掉 SRC_EXPAND 再重渲染（直接 remove 会留下展开态）
+    { drawer: true, id: 'srcDrawer', onMask: 'SRC_EXPAND=null;render()', close: 'SRC_EXPAND=null;render()' },
+  );
 }
 
 // ── 小浣熊二维码编码器 ──
@@ -1860,9 +1863,8 @@ async function testAnon(platform) {
 
 // 自定义 API 弹窗（CherryStudio 式：填 URL/Key，自动同步模型）
 function openCustomApi(editId) {
-  const mk = `<div class="modal-mask" onclick="if(event.target===this)this.remove()"><div class="modal">
-    <div class="modal-hd">${editId ? '编辑' : '新建'}自定义 API<b class="x" onclick="this.closest('.modal-mask').remove()">✕</b></div>
-    <div class="modal-bd">
+  const mk = modalShell(`${editId ? '编辑' : '新建'}自定义 API`,
+    `
       <label>名称</label>
       <input class="q" id="cName" placeholder="如：我的中转">
       <label>协议</label>
@@ -1878,9 +1880,7 @@ function openCustomApi(editId) {
       <div class="modal-foot">
         <button class="btn pri" onclick="saveCustomApi('${att(editId || '')}')">保存并同步模型</button>
         ${editId ? `<button class="btn" onclick="removeCustomApi('${att(editId)}')">删除</button>` : ''}
-      </div>
-    </div>
-  </div></div>`;
+      </div>`);
   document.body.insertAdjacentHTML('beforeend', mk);
   // 编辑态回填
   if (editId) {
@@ -2261,10 +2261,8 @@ async function wbAutoToggle(on, btn) {
 // ★ 2026-10-26（P0）：成长任务一键完成（17 项：事件链上报 + 领奖）。
 async function wbGrowth() {
   if (!confirm('一键完成成长任务？\n\n会对 wb 族所有账号：读取任务清单 → 接受未完成任务 → 以桌面客户端指纹上报行为事件链 → 逐个领奖。\n全新账号约可拿 +1950 积分（部分任务需真实对话）。\n\n⚠ 这是对上游的主动写操作，请确认账号允许。')) return;
-  const mk = `<div class="modal-mask" onclick="if(event.target===this)this.remove()"><div class="modal">
-    <div class="modal-hd">⚡ 成长任务执行中…<b class="x" onclick="this.closest('.modal-mask').remove()">✕</b></div>
-    <div class="modal-bd" id="growthBox"><div class="faint">正在逐个账号跑 17 项任务（可能需要 30-60 秒）…</div></div>
-  </div></div>`;
+  const mk = modalShell('⚡ 成长任务执行中…',
+    '<div id="growthBox"><div class="faint">正在逐个账号跑 17 项任务（可能需要 30-60 秒）…</div></div>');
   document.body.insertAdjacentHTML('beforeend', mk);
   const box = document.getElementById('growthBox');
   const r = await post('/api/checkin', { action: 'growth', platform: 'wb-gateway' }).catch((e) => ({ ok: false, message: String(e) }));
@@ -2301,18 +2299,15 @@ function fmtCheckinAuto(r) {
 
 // wb 每日签到：GET=/api/checkin 查状态，POST=/api/checkin 领取。
 async function wbCheckin() {
-  const mk = `<div class="modal-mask" onclick="if(event.target===this)this.remove()"><div class="modal">
-    <div class="modal-hd">wb 每日签到（Buddy 加油站 100 积分）<b class="x" onclick="this.closest('.modal-mask').remove()">✕</b></div>
-    <div class="modal-bd">
+  const mk = modalShell('wb 每日签到（Buddy 加油站 100 积分）',
+    `
       <div class="faint">先查各 wb 账号签到状态，再一键领取。仅 wb-gateway / codebuddy（CN）账号可签到。</div>
       <div class="modal-foot" style="margin-top:14px">
         <button class="btn" onclick="wbCheckinRun('status', this)">仅查状态</button>
         <button class="btn pri" onclick="wbCheckinRun('claim', this)">全部领取</button>
         <button class="btn" onclick="this.closest('.modal-mask').remove()">取消</button>
       </div>
-      <div id="wbCheckinOut" style="margin-top:12px"></div>
-    </div>
-  </div></div>`;
+      <div id="wbCheckinOut" style="margin-top:12px"></div>`);
   document.body.insertAdjacentHTML('beforeend', mk);
 }
 
