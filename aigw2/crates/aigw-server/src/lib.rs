@@ -7198,7 +7198,6 @@ stream_dialect = "sse_delta"
     fn candidate_accounts_covers_anon_custom_and_metaso_fallback() {
         let custom = CustomStore::empty();
         let accounts = AccountStore::empty();
-        let st = state(vec![]);
 
         // ① anon 平台：单条免密账号，凭据为空串
         let anon = spec_toml(
