@@ -83,7 +83,20 @@ impl FlagStore {
         }
     }
 
-    fn save_locked(&self, f: &Flags) {
+    /// 在写闸门内取快照并落盘（各写方法的统一出口）。
+    ///
+    /// ★ 旧实现是「持内存锁落盘」防并发丢更新 —— 排序是对的，但面板轮询
+    ///   `disabled_models()` / `is_model_disabled()`（每次路由都要问）会陪着等磁盘。
+    ///   现在内存锁只改内存，闸门负责磁盘写序，两边都拿到。
+    fn persist_now(&self) {
+        crate::atomic::with_save_gate(|| {
+            let snapshot = self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            self.write_snapshot(&snapshot);
+        });
+    }
+
+    /// 纯写入（调用方负责串行）。
+    fn write_snapshot(&self, f: &Flags) {
         if let Some(p) = &self.path {
             if let Err(e) = crate::atomic::write_json_atomic(p, &f) {
                 tracing::warn!("flags 落盘失败（{}）：{e}", p.display());
@@ -145,10 +158,11 @@ impl FlagStore {
             set.insert(platform.to_string());
         }
         g.disabled_platforms = set.into_iter().collect();
-        // ★ 必须在持锁期间落盘：旧实现 clone → drop(g) → save，两个并发 toggle
-        //   （toggle_platform 与 toggle_model 走同一文件）可能以相反顺序覆盖，磁盘丢一次变更，
-        //   重启后「刚关掉的模型又活了」。accounts/custom/free 都是持锁落盘，这里对齐。
-        self.save_locked(&g);
+        // 内存态已改完，放锁后由闸门串行落盘（闸门同时盖住取快照与写盘）
+
+        drop(g);
+
+        self.persist_now();
         enabled
     }
 
@@ -163,7 +177,8 @@ impl FlagStore {
             set.insert(bare);
         }
         g.disabled_models = set.into_iter().collect();
-        self.save_locked(&g); // 同上：持锁落盘，防并发丢更新
+        drop(g);
+        self.persist_now();
         enabled
     }
 
@@ -179,7 +194,8 @@ impl FlagStore {
     pub fn set_daily_checkin(&self, on: bool) -> bool {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.daily_checkin = on;
-        self.save_locked(&g);
+        drop(g);
+        self.persist_now();
         on
     }
 
@@ -194,7 +210,8 @@ impl FlagStore {
     pub fn set_daily_growth(&self, on: bool) -> bool {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.daily_growth = on;
-        self.save_locked(&g);
+        drop(g);
+        self.persist_now();
         on
     }
 }

@@ -194,7 +194,19 @@ impl ComboStore {
         }
     }
 
-    fn save_locked(&self, rows: &[Combo]) -> bool {
+    /// 在写闸门内取快照并落盘（各写方法的统一出口）。
+    ///
+    /// ★ 闸门必须同时盖住「取快照」与「写盘」：只盖写盘时，A 取旧快照后被抢占、
+    ///   B 取新快照先写完，A 再把旧快照写回去 —— 磁盘留下旧数据。
+    fn persist_now(&self) -> bool {
+        crate::atomic::with_save_gate(|| {
+            let snapshot = self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            self.write_snapshot(&snapshot)
+        })
+    }
+
+    /// 纯写入（调用方负责串行）。
+    fn write_snapshot(&self, rows: &[Combo]) -> bool {
         let Some(p) = &self.path else {
             return false;
         };
@@ -271,9 +283,8 @@ impl ComboStore {
             enabled: true,
         };
         rows.push(c.clone());
-        let rows_snapshot = rows.clone();
         drop(rows);
-        let _ = self.save_locked(&rows_snapshot);
+        let _ = self.persist_now();
         Ok(c)
     }
 
@@ -320,9 +331,8 @@ impl ComboStore {
             rows[idx].enabled = e;
         }
         let out = rows[idx].clone();
-        let snapshot = rows.clone();
         drop(rows);
-        let _ = self.save_locked(&snapshot);
+        let _ = self.persist_now();
         Ok(Some(out))
     }
 
@@ -331,10 +341,9 @@ impl ComboStore {
         let before = rows.len();
         rows.retain(|c| c.id != id);
         let changed = rows.len() != before;
-        let snapshot = rows.clone();
         drop(rows);
         if changed {
-            let _ = self.save_locked(&snapshot);
+            let _ = self.persist_now();
         }
         changed
     }

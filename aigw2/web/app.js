@@ -53,6 +53,27 @@ async function refreshFree() {
 }
 
 const $ = (s) => document.querySelector(s);
+// ── 弹窗骨架 ──────────────────────────────────────────────
+// 全站 14 处 modal 都是同一套外壳（遮罩 + 标题栏 + ✕ + 内容区），标题文案与内容不同而已。
+// 抽成两个小函数，避免每加一个弹窗就重抄一遍关闭逻辑（过去就因为某处漏写 or 写错
+// "this.closest('.modal-mask').remove()" 导致点了 ✕ 关不掉）。
+//
+// 点击遮罩关闭：判定 event.target === this，只有点在**遮罩本身**（不是冒泡上来的内容区）
+// 才关 —— 否则在输入框里拖选文本松手都会被当成「点外面」。
+function modalShell(title, bodyHtml, opts) {
+  const o = opts || {};
+  const cls = o.drawer ? 'modal drawer' : 'modal';
+  const id = o.id ? ' id="' + o.id + '"' : '';
+  const onMask = o.onMask || '';
+  const close = o.close || 'this.closest(\'.modal-mask\').remove()';
+  const x = o.closable === false ? '' : '<b class="x" onclick="' + close + '">✕</b>';
+  return '<div class="modal-mask" onclick="if(event.target===this){' + onMask + '}">'
+    + '<div class="' + cls + '"' + id + '>'
+    + '<div class="modal-hd">' + title + x + '</div>'
+    + '<div class="modal-bd">' + bodyHtml + '</div>'
+    + '</div></div>';
+}
+
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // ★ 事件属性（onclick="f('…')"）里的插值必须先 JS 转义再 HTML 转义：
@@ -151,9 +172,7 @@ async function showProxySettings() {
     ['global', '全局代理', '所有流程（登录/上游/模型同步）都走代理'],
     ['bypass_cn', '绕过大陆', '大陆域名（含阿里云/百度云/华为云/讯飞等国内厂商）直连，其余走代理（推荐给 CODEX/Kimi 等海外平台）'],
   ];
-  const mk = `<div class="modal-mask" onclick="if(event.target===this)this.remove()"><div class="modal">
-    <div class="modal-hd">代理设置<b class="x" onclick="this.closest('.modal-mask').remove()">✕</b></div>
-    <div class="modal-bd">
+  const mk = modalShell('代理设置', `
       <div class="radios">
         ${MODES.map(([m, t, d]) => `
           <label class="radio-row ${cur.mode === m ? 'on' : ''}" onclick="document.querySelectorAll('.radio-row').forEach(r=>r.classList.remove('on'));this.classList.add('on');$('#px-mode').value='${m}';$('#px-url').disabled=${m === 'direct' ? 'true' : 'false'}">
@@ -168,9 +187,7 @@ async function showProxySettings() {
       <div class="faint" style="font-size:12px">本机与局域网地址（127.0.0.1 / 192.168.x / localhost / *.local 等）在任何模式下都直连：代理进程连不到你的内网，硬走代理只会得到"连不上"的假故障</div>
       <div class="modal-foot">
         <button class="btn pri" onclick="saveProxy()">保存并应用</button>
-      </div>
-    </div>
-  </div></div>`;
+      </div>`);
   document.body.insertAdjacentHTML('beforeend', mk);
 }
 async function saveProxy() {
@@ -287,9 +304,7 @@ async function showGatewayInfo() {
     }
     limHtml = '<label>限流</label><div class="faint" style="font-size:12px">' + esc(line) + '</div>';
   }
-  const mk = `<div class="modal-mask" onclick="if(event.target===this)this.remove()"><div class="modal">
-    <div class="modal-hd">服务网关信息<b class="x" onclick="this.closest('.modal-mask').remove()">✕</b></div>
-    <div class="modal-bd">
+  const mk = modalShell('服务网关信息', `
       <label>代理地址（base_url）</label>
       <input class="q mono" readonly value="${esc(base)}/v1" onclick="this.select();copyText(this.value)">
       <label>API Key</label>
@@ -306,8 +321,7 @@ async function showGatewayInfo() {
         <button class="btn" onclick="rotatePanelToken('set')">设置令牌</button>
         ${h && h.token_required ? '<button class="btn" onclick="rotatePanelToken(\'clear\')">关闭令牌</button>' : ''}
       </div>
-    </div>
-  </div></div>`;
+`);
   document.body.insertAdjacentHTML('beforeend', mk);
 }
 // 面板令牌轮换：改令牌不再等于重启服务。

@@ -86,7 +86,16 @@ impl FreeStore {
     }
 
     /// 原子落盘（tmp + fsync + rename）。
-    fn save_locked(&self, rows: &[FreeSite]) {
+    /// 在写闸门内取快照并落盘（各写方法的统一出口）。
+    fn persist_now(&self) {
+        crate::atomic::with_save_gate(|| {
+            let snapshot = self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            self.write_snapshot(&snapshot);
+        });
+    }
+
+    /// 纯写入（调用方负责串行）。
+    fn write_snapshot(&self, rows: &[FreeSite]) {
         if let Some(p) = &self.path {
             if let Err(e) = crate::atomic::write_json_atomic(p, &rows) {
                 tracing::warn!("free_sites 落盘失败（{}）：{e}", p.display());
@@ -127,7 +136,8 @@ impl FreeStore {
                 added += 1;
             }
         }
-        self.save_locked(&rows);
+        drop(rows);
+        self.persist_now();
         (added, kept)
     }
 
@@ -136,7 +146,8 @@ impl FreeStore {
         let mut rows = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = rows.iter_mut().find(|r| r.id == id) {
             r.enabled = enabled;
-            self.save_locked(&rows);
+            drop(rows);
+            self.persist_now();
             true
         } else {
             false
@@ -149,8 +160,9 @@ impl FreeStore {
         let before = rows.len();
         rows.retain(|r| r.id != id);
         let changed = rows.len() != before;
+        drop(rows);
         if changed {
-            self.save_locked(&rows);
+            self.persist_now();
         }
         changed
     }
