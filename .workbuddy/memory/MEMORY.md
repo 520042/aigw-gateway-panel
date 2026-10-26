@@ -179,3 +179,11 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
 - **在途已满换号**：`chat_core` 从「死等同一账号 15s」改为「等 1.5s → sticky.unbind + tried.push + 重选」，全平台无别号才退回 15s 预算。★ 换号必须解绑粘性，否则死循环。
 - 测试基线 **352**（core 3 / crypto 21 / pool 33 / registry 13 / relay 153 / server 243 / store 82）。
 - ★ 提交信息必须用 `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))`；Out-File utf8 会带 BOM 把中文打成问号。
+
+## 2026-10-26 第三轮（推理内容 / 并发 / 缓存）
+- **★ 上游 reasoning_content 之前被整体丢弃**（DeepSeek/GLM/Kimi/MiniMax 通用字段）：
+  - Anthropic 侧：新增 thinking 块（`thinking_index`/`thinking_open`），块顺序由 open_text_block 保证「先想再说」；
+  - Responses 侧：新增 `reasoning` item；★ 必须在**第一条正文 delta 之前** flush（`flush_reasoning` 幂等），否则正文已占 output_index 0，再插会让客户端 index 错乱；
+  - 非流式 `openai_to_anthropic`/`openai_to_responses` 同步支持（dialect.rs）。
+- **整表模型缓存改 `Arc<Value>`**：命中路径锁内只做引用计数 +1，过滤/序列化全在锁外（原实现在锁内深拷贝整表）。
+- 测试基线 **354**（core 3 / crypto 21 / pool 33 / registry 13 / relay 153 / server 247 / store 82）。

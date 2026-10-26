@@ -393,6 +393,16 @@ pub fn openai_to_anthropic(v: &Value, model: &str) -> Value {
     let tool_blocks = openai_tool_use_blocks(msg);
     let has_tool = !tool_blocks.is_empty();
     let mut content: Vec<Value> = Vec::new();
+    // 推理块必须是 content 的第一项：Anthropic 的语义是「先 thinking 再 text」，
+    // 顺序反了客户端的渲染会错乱（也会让 thinking 显示在答案下面）。
+    if let Some(r) = msg
+        .and_then(|m| m.get("reasoning_content").or_else(|| m.get("reasoning")))
+        .and_then(|c| c.as_str())
+    {
+        if !r.trim().is_empty() {
+            content.push(json!({"type": "thinking", "thinking": r}));
+        }
+    }
     if !text.is_empty() {
         content.push(json!({"type": "text", "text": text}));
     }
@@ -800,6 +810,49 @@ mod tests {
         // Anthropic 的 input 是**对象**，不是 JSON 字符串
         assert_eq!(tu["input"]["city"], "北京");
         assert_eq!(out["stop_reason"], "tool_use");
+    }
+
+    #[test]
+    fn nonstream_reasoning_becomes_thinking_block_and_reasoning_item() {
+        // 非流式路径与流式必须同口径：上游 message.reasoning_content 不能被丢。
+        let src = json!({
+            "id": "chatcmpl-1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "答案",
+                    "reasoning_content": "先推理"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+        });
+        // Anthropic：thinking 必须是 content 的第一项
+        let anth = openai_to_anthropic(&src, "claude-x");
+        let blocks = anth["content"].as_array().expect("content 必须是数组");
+        assert_eq!(blocks[0]["type"], "thinking", "thinking 必须排第一：{anth}");
+        assert_eq!(blocks[0]["thinking"], "先推理");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "答案");
+
+        // Responses：reasoning item 必须在 message item 之前
+        let resp = openai_to_responses(&src, "gpt-x");
+        let items = resp["output"].as_array().expect("output 必须是数组");
+        assert_eq!(items[0]["type"], "reasoning", "reasoning 必须排第一：{resp}");
+        assert_eq!(items[0]["summary"][0]["text"], "先推理");
+        assert_eq!(items[1]["type"], "message");
+    }
+
+    #[test]
+    fn nonstream_without_reasoning_has_no_thinking_block() {
+        // 没有 reasoning_content 时不能凭空造 thinking / reasoning
+        let src = json!({"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]});
+        let anth = openai_to_anthropic(&src, "m");
+        let blocks = anth["content"].as_array().unwrap();
+        assert!(blocks.iter().all(|b| b["type"] != "thinking"), "{anth}");
+        let resp = openai_to_responses(&src, "m");
+        let items = resp["output"].as_array().unwrap();
+        assert!(items.iter().all(|i| i["type"] != "reasoning"), "{resp}");
     }
 
     #[test]
