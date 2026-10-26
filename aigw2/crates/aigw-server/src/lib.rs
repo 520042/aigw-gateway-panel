@@ -1531,20 +1531,55 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
 ///   {"action":"toggle_platform","id":"web-glm","enabled":false}
 ///   {"action":"toggle_model","model":"glm-4-flash"}（不带 enabled = 取反）
 /// 平台停用记在 flags.json（文件 spec 不就地改写）；模型停用按**裸模型名**记账。
+/// 解析 `{"action": "...", ...}` 请求体。
+///
+/// 10 个 `*_action` 分发器的开头逐字重复同一段：serde 解析 + 失败回 400 + 取 action。
+/// 抽出来的收益不只是少几十行 —— 旧代码里每个分发器的错误文案、状态码、字段名都是
+/// 各写一遍，任何一处想改（比如统一加个 `ok:false` 之外的建议字段）都要改十次。
+///
+/// 返回的 `Err` 已经是可直接返回的 Response。
+fn parse_action_body(body: &[u8]) -> Result<Value, Response> {
+    match serde_json::from_slice::<Value>(body) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(bad_request(&format!("JSON 解析失败：{e}"))),
+    }
+}
+
+/// 400 + 统一错误信封（`{"ok": false, "message": ...}`）。
+fn bad_request(msg: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"ok": false, "message": msg})),
+    )
+        .into_response()
+}
+
+/// 从已解析的 body 里取 action（去空白；缺省空串）。
+fn action_of(v: &Value) -> &str {
+    v.get("action").and_then(|x| x.as_str()).unwrap_or("").trim()
+}
+
+/// 取一个必填的字符串字段；缺失/空白回 400。
+fn required_str<'a>(v: &'a Value, key: &str) -> Result<&'a str, Response> {
+    let s = v.get(key).and_then(|x| x.as_str()).unwrap_or("").trim();
+    if s.is_empty() {
+        return Err(bad_request(&format!("缺 {key}")));
+    }
+    Ok(s)
+}
+
 async fn platform_action(State(st): State<AppState>, body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
-        }
+        Err(r) => return r,
     };
-    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+    let action = action_of(&v);
     match action {
         "toggle_platform" => {
-            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            if id.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 id"}))).into_response();
-            }
+            let id = match required_str(&v, "id") {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             // 不存在的平台 id 直接 404：否则调用方拼错/误传会把垃圾名字永久写进
             // flags.json 的 disabled_platforms，越积越多且无从分辨。
             if !st.all_specs().iter().any(|s| s.id == id) {
@@ -1670,13 +1705,11 @@ async fn sync_custom_models(st: &AppState, c: &aigw_store::CustomApi) -> Result<
 }
 
 async fn custom_action(State(st): State<AppState>, body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
-        }
+        Err(r) => return r,
     };
-    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+    let action = action_of(&v);
     match action {
         "add" => {
             let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
@@ -1718,10 +1751,10 @@ async fn custom_action(State(st): State<AppState>, body: Bytes) -> Response {
             }
         }
         "update" => {
-            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            if id.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 id"}))).into_response();
-            }
+            let id = match required_str(&v, "id") {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
             let format = v.get("format").and_then(|x| x.as_str()).unwrap_or("");
             let base_url = v.get("base_url").and_then(|x| x.as_str()).unwrap_or("");
@@ -1763,10 +1796,10 @@ async fn custom_action(State(st): State<AppState>, body: Bytes) -> Response {
             }
         }
         "toggle" => {
-            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            if id.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 id"}))).into_response();
-            }
+            let id = match required_str(&v, "id") {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             let mut enabled = v.get("enabled").and_then(|x| x.as_bool());
             if enabled.is_none() {
                 enabled = st.custom.rows().iter().find(|c| c.id == id).map(|c| !c.enabled);
@@ -1785,10 +1818,10 @@ async fn custom_action(State(st): State<AppState>, body: Bytes) -> Response {
             Json(json!({"ok": true, "enabled": enabled})).into_response()
         }
         "remove" => {
-            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            if id.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 id"}))).into_response();
-            }
+            let id = match required_str(&v, "id") {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             let removed = st.custom.remove(id);
             if removed {
                 invalidate_models_cache(&st);
@@ -2717,19 +2750,17 @@ async fn free_list(State(st): State<AppState>) -> Json<Value> {
 ///   {"action":"refresh"}            手动刷新聚合源
 ///   {"action":"remove","id":"free-…"} 删除站点
 async fn free_action(State(st): State<AppState>, body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
-        }
+        Err(r) => return r,
     };
-    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+    let action = action_of(&v);
     match action {
         "toggle" => {
-            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            if id.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 id"}))).into_response();
-            }
+            let id = match required_str(&v, "id") {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             let cur = st.free.rows().iter().find(|r| r.id == id).map(|r| r.enabled);
             let Some(cur) = cur else {
                 return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "message": "站点不存在"}))).into_response();
@@ -2792,10 +2823,10 @@ async fn free_action(State(st): State<AppState>, body: Bytes) -> Response {
             }
         }
         "remove" => {
-            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            if id.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 id"}))).into_response();
-            }
+            let id = match required_str(&v, "id") {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             let removed = st.free.remove(id);
             if removed {
                 invalidate_models_cache(&st);
@@ -2875,7 +2906,7 @@ async fn token_action(State(st): State<AppState>, body: Bytes) -> Response {
                 .into_response()
         }
     };
-    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+    let action = action_of(&v);
     let dd = st.data_dir.clone();
     match action {
         "generate" | "set" => {
@@ -3084,13 +3115,11 @@ async fn combos_list(State(st): State<AppState>) -> Json<Value> {
 
 /// 模型链增删改（POST /api/combos）：action = add / update / remove。
 async fn combos_action(State(st): State<AppState>, body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
-        }
+        Err(r) => return r,
     };
-    let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    let action = action_of(&v);
     let models_of = |v: &Value| -> Vec<String> {
         v.get("models")
             .and_then(|m| m.as_array())
@@ -3142,13 +3171,11 @@ async fn combos_action(State(st): State<AppState>, body: Bytes) -> Response {
 }
 
 async fn keys_action(State(st): State<AppState>, body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
-        }
+        Err(r) => return r,
     };
-    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+    let action = action_of(&v);
     // allow_models 缺省 = 不限制；显式给 [] 也等于不限制（与前端的「留空」同一语义）。
     let models_of = |v: &Value| -> Option<Vec<String>> {
         v.get("allow_models").and_then(|m| m.as_array()).map(|a| {
@@ -3302,11 +3329,9 @@ async fn keys_action(State(st): State<AppState>, body: Bytes) -> Response {
     }
 }
 async fn proxy_set(body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
-        }
+        Err(r) => return r,
     };
     let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("");
     if !["direct", "global", "bypass_cn"].contains(&mode) {
@@ -3460,13 +3485,11 @@ async fn accounts(State(st): State<AppState>) -> Json<Value> {
 ///   {"action":"delete","id":"..."} | {"action":"toggle","id":"...","enabled":false}
 /// 删除/停用同时清号池治理状态（否则快照里会挂幽灵账号）。
 async fn accounts_action(State(st): State<AppState>, body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
-        }
+        Err(r) => return r,
     };
-    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+    let action = action_of(&v);
     // 先判 action 再判 id：否则拼错 action 会被误报成「缺 id」，排查时误导。
     if action != "delete"
         && action != "toggle"
@@ -3659,14 +3682,11 @@ async fn pool_snapshot(
 /// 面板既然能显示「还要等 109 秒」，就该让用户在确认好了之后一键放行，
 /// 而不是干等或重启服务。只清冷却/限速，不动 health（历史结论要真实请求来改写）。
 async fn pool_action(State(st): State<AppState>, body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")})))
-                .into_response()
-        }
+        Err(r) => return r,
     };
-    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("").trim();
+    let action = action_of(&v);
     match action {
         "thaw" => {
             let account = v.get("account").and_then(|x| x.as_str()).unwrap_or("").trim();
@@ -4377,13 +4397,11 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 ///   {"action":"save","platform":"apk-yuanbao","secret":"Cookie..."}  ← 跳转登录手动粘贴闭环
 /// 成功 token/cookie 自动落账号池。
 async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
-        }
+        Err(r) => return r,
     };
-    let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("");
+    let action = action_of(&v);
     match action {
         "start" => {
             let platform = v.get("platform").and_then(|x| x.as_str()).unwrap_or("");
@@ -4417,10 +4435,10 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
             Json(out).into_response()
         }
         "poll" => {
-            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            if id.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 id"}))).into_response();
-            }
+            let id = match required_str(&v, "id") {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             let out = st.login.poll(&st.client, id, &st.accounts).await;
             // 又登录了一次（覆盖了同 platform+name 的旧行）→ 清掉旧凭据留下的
             // 号池治理状态与会话粘性，否则新凭据照样被上一次的 401 拉黑挡着。
@@ -7697,11 +7715,9 @@ async fn runtime_get(State(st): State<AppState>) -> Json<Value> {
 /// 改完**立即生效**：正在飞的请求不受影响（它们已取过自己的值），
 /// 下一次请求就用新参数。落盘 data/runtime.json，重启保持。
 async fn runtime_set(State(st): State<AppState>, body: Bytes) -> Response {
-    let v: Value = match serde_json::from_slice(&body) {
+    let v = match parse_action_body(&body) {
         Ok(v) => v,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
-        }
+        Err(r) => return r,
     };
     let patch = v.get("cfg").cloned().unwrap_or(v);
     let (changed, clamped) = st.cfg.apply(&patch);
@@ -9054,6 +9070,39 @@ stream_dialect = "sse_delta"
         assert!(body.contains("models_policy"), "body={body}");
         // 仍然 ok=true：一个写错的平台文件不该让整机健康检查变红。
         assert!(body.contains("\"ok\":true"), "body={body}");
+    }
+
+    #[test]
+    fn parse_action_body_rejects_malformed_json_with_ok_false() {
+        // 10 个分发器共用这条路径：坏 JSON 必须是 400 + ok:false 信封，
+        // 前端只认这个形状（否则解析失败时提示是空白）。
+        let r = parse_action_body(b"{not json").expect_err("坏 JSON 必须报错");
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r2 = parse_action_body(b"").expect_err("空 body 必须报错");
+        assert_eq!(r2.status(), StatusCode::BAD_REQUEST);
+        // 合法 JSON 原样返回
+        let v = parse_action_body(br#"{"action":"toggle","id":"x"}"#).expect("应解析成功");
+        assert_eq!(v["action"], "toggle");
+    }
+
+    #[test]
+    fn action_of_trims_and_defaults_to_empty() {
+        // 不同分发器原本各自写 unwrap_or("") / .trim()，口径不一致会让
+        // 「action 带空格」在一处能过、另一处报「未知 action」。
+        assert_eq!(action_of(&json!({"action":"toggle"})), "toggle");
+        assert_eq!(action_of(&json!({"action":"  toggle  "})), "toggle");
+        assert_eq!(action_of(&json!({})), "");
+        assert_eq!(action_of(&json!({"action": 123})), "");
+    }
+
+    #[test]
+    fn required_str_reports_the_missing_field_by_name() {
+        let v = json!({"id": "abc", "empty": "  "});
+        assert_eq!(required_str(&v, "id").unwrap(), "abc");
+        let e = required_str(&v, "id_missing").expect_err("缺字段必须报错");
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+        // 只有空白等同于缺失（前端表单常提交空串）
+        assert!(required_str(&v, "empty").is_err());
     }
 
     #[test]
