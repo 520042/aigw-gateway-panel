@@ -470,7 +470,33 @@ impl Pool {
         class: ErrorClass,
         waf_fingerprint: bool,
     ) {
+        self.report_with_hint(platform, account, model, ok, class, waf_fingerprint, None)
+    }
+
+    /// 带「上游给的 Retry-After」的 report。
+    ///
+    /// 限流（429）的上游几乎都会明确说「N 秒后再来」。原本一律按本地曲线猜
+    /// （30s×2^n × 抖动[0.5,1.5)），猜短了继续撞墙、还把 strikes 越加越高，最后冻满
+    /// 15 分钟；猜长了则白白错过窗口。_refs/ 里 workbuddy2api / trae2api 都是
+    /// **优先采用上游秒数，拿不到才退避**，这里对齐同一口径。
+    ///
+    /// 安全边界：提示值再过一次 clamp（[1, 900]）。上限取 COOL_CAP_SECS——上游偶尔
+    /// 回 "retry after 86400"，照做等于把这个号冻一整天；下限 1s 防止 0/负数导致
+    /// 「立刻重试」的死循环。提示值不递增 strikes：既然上游给了准确恢复时间，
+    /// 下一次就应该从轻档重新开始，而不是带着历史惩罚。
+    #[allow(clippy::too_many_arguments)]
+    pub fn report_with_hint(
+        &self,
+        platform: &str,
+        account: &str,
+        model: &str,
+        ok: bool,
+        class: ErrorClass,
+        waf_fingerprint: bool,
+        retry_after: Option<f64>,
+    ) {
         let _ = platform;
+        let hint = retry_after.filter(|v| v.is_finite()).map(|v| v.clamp(1.0, COOL_CAP_SECS));
         let now = Instant::now();
         {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -570,15 +596,20 @@ impl Pool {
                 ErrorClass::Rate => {
                     let key = (account.to_string(), model.to_string());
                     let strikes = g.cooldown.get(&key).map(|c| c.strikes).unwrap_or(0);
-                    let exp = COOL_BASE_SECS * 2f64.powi(strikes.min(5) as i32);
-                    let capped = exp.min(COOL_CAP_SECS);
-                    let jitter = rand::thread_rng().gen_range(0.5..1.5);
-                    let secs = capped * jitter;
+                    // 上游说了就照上游：不递增 strikes（它有准确恢复时间，下次该从轻档重新开始）
+                    let (secs, next_strikes) = match hint {
+                        Some(h) => (h, strikes),
+                        None => {
+                            let exp = COOL_BASE_SECS * 2f64.powi(strikes.min(5) as i32);
+                            let jitter = rand::thread_rng().gen_range(0.5..1.5);
+                            (exp.min(COOL_CAP_SECS) * jitter, strikes + 1)
+                        }
+                    };
                     g.cooldown.insert(
                         key,
                         CoolState {
                             until: now + Duration::from_secs_f64(secs),
-                            strikes: strikes + 1,
+                            strikes: next_strikes,
                         },
                     );
                     g.health.insert(
@@ -595,15 +626,19 @@ impl Pool {
                     let _ = other;
                     let key = (account.to_string(), model.to_string());
                     let strikes = g.cooldown.get(&key).map(|c| c.strikes).unwrap_or(0);
-                    let exp = COOL_BASE_SECS * 2f64.powi(strikes.min(5) as i32);
-                    let capped = exp.min(COOL_CAP_SECS);
-                    let jitter = rand::thread_rng().gen_range(0.5..1.5);
-                    let secs = capped * jitter;
+                    let (secs, next_strikes) = match hint {
+                        Some(h) => (h, strikes),
+                        None => {
+                            let exp = COOL_BASE_SECS * 2f64.powi(strikes.min(5) as i32);
+                            let jitter = rand::thread_rng().gen_range(0.5..1.5);
+                            (exp.min(COOL_CAP_SECS) * jitter, strikes + 1)
+                        }
+                    };
                     g.cooldown.insert(
                         key,
                         CoolState {
                             until: now + Duration::from_secs_f64(secs),
-                            strikes: strikes + 1,
+                            strikes: next_strikes,
                         },
                     );
                 }
@@ -1341,4 +1376,49 @@ mod persist_tests {
         p.persist(); // 不应 panic
         assert_eq!(p.credit_of("x"), Some(1.0));
     }
+    #[test]
+    fn retry_after_hint_is_adopted_verbatim() {
+        // 上游说「60 秒后再来」就冻 60s，而不是按本地曲线（30s×抖动）猜
+        let p = Pool::new();
+        p.report_with_hint("pl", "a1", "m", false, ErrorClass::Rate, false, Some(60.0));
+        assert!(!p.available("a1", "m"), "应按上游给的秒数进入冷却");
+        let left = p.blocked_of("a1").cooling_s;
+        assert!(left > 55.0 && left <= 60.5, "冷却时长应≈60s，实际 {left}");
+    }
+
+    #[test]
+    fn retry_after_hint_is_clamped_to_cap() {
+        // 上游偶尔回 "retry after 86400"：照做等于把这个号冻一整天
+        let p = Pool::new();
+        p.report_with_hint("pl", "a1", "m", false, ErrorClass::Rate, false, Some(86_400.0));
+        let left = p.blocked_of("a1").cooling_s;
+        assert!(left <= 901.0, "应夹到 900s 上限，实际 {left}");
+        // 0 / 负数同样不能变成「立刻重试」的死循环
+        let p2 = Pool::new();
+        p2.report_with_hint("pl", "a2", "m", false, ErrorClass::Rate, false, Some(0.0));
+        let left2 = p2.blocked_of("a2").cooling_s;
+        // blocked_of 用的是「到现在还剩多久」，读取时刻已过了几微秒 → 允许亚秒余量
+        assert!(left2 >= 0.9, "下限 1s（允许读取误差），实际 {left2}");
+    }
+
+    #[test]
+    fn retry_after_hint_does_not_raise_strikes() {
+        // 上游给了准确恢复时间 → 下次从轻档重新开始，不该带着历史惩罚
+        let p = Pool::new();
+        for _ in 0..3 {
+            p.report_with_hint("pl", "a1", "m", false, ErrorClass::Rate, false, Some(5.0));
+        }
+        let left = p.blocked_of("a1").cooling_s;
+        assert!(left <= 5.5, "连续有提示时仍是 5s 档而不是指数退避，实际 {left}");
+    }
+
+    #[test]
+    fn report_without_hint_still_uses_local_backoff() {
+        // 老路径（不带提示）必须完全不变：首次约 30s×抖动
+        let p = Pool::new();
+        p.report("pl", "a1", "m", false, ErrorClass::Rate, false);
+        let left = p.blocked_of("a1").cooling_s;
+        assert!(left >= 15.0 && left <= 45.0, "本地退避应约 30s，实际 {left}");
+    }
+
 }

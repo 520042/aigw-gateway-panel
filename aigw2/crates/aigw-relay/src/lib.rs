@@ -122,6 +122,82 @@ impl std::fmt::Display for RelayError {
     }
 }
 
+impl RelayError {
+    /// 从上游响应里读出 `Retry-After`（秒）或 body 里常见的 `retry_after` 字段。
+    ///
+    /// 为什么值得单独做：上游明确说了「X 秒后再来」，而我们按固定 30s 起、指数翻倍的
+    /// 退避去猜，猜短了继续撞墙（每撞一次还会把 strikes 加一层，最后冻满 15 分钟），
+    /// 猜长了则白白浪费窗口。_refs/ 里 workbuddy2api 与 trae2api 都是**优先采用上游
+    /// 给的秒数**，只在拿不到时才回落到本地退避。
+    ///
+    /// 返回值已夹到 [1, 3600]：0 或负数没有意义（立刻重试=立即再撞），
+    /// 过大的值多半是上游 bug，往上限夹比原样照做安全。
+    pub fn retry_after_hint(&self) -> Option<f64> {
+        let body = &self.body;
+        // ① Retry-After 语义的秒数字段（各家写法不一，逐个试）
+        for key in ["retry_after", "retryAfter", "retry_after_seconds", "retry-after"] {
+            if let Some(v) = json_seconds(body, key) {
+                return Some(clamp_retry(v));
+            }
+        }
+        // ② OpenAI 风格的 error.retry_after / error.headers
+        if let Some(v) = json_seconds(body, "error.retry_after") {
+            return Some(clamp_retry(v));
+        }
+        // ③ 文案里的「X 秒后再试」/ "retry after Xs"（中文上游常见）
+        if let Some(v) = text_seconds(body) {
+            return Some(clamp_retry(v));
+        }
+        None
+    }
+}
+
+/// 从 JSON body 里按点分路径取一个秒数（数字或数字字符串）。
+fn json_seconds(body: &str, key: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let mut cur = &v;
+    for seg in key.split('.') {
+        cur = cur.get(seg)?;
+    }
+    if let Some(n) = cur.as_f64() {
+        return Some(n);
+    }
+    // 上游常把数字写成字符串：{"retry_after":"30"}
+    cur.as_str().and_then(|s| s.trim().parse::<f64>().ok())
+}
+
+/// 从纯文本里抠出「N 秒后再试」这类提示。只认明确的秒数，不做模糊猜测。
+fn text_seconds(body: &str) -> Option<f64> {
+    let lower = body.to_lowercase();
+    // retry after 30s / retry-after: 30 / 30 seconds
+    for marker in ["retry after", "retry-after", "try again in", "请等待", "秒后再"] {
+        let Some(pos) = lower.find(marker) else { continue };
+        let tail: String = lower[pos..].chars().take(48).collect();
+        if let Some(n) = first_number(&tail) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// 取字符串里第一段连续数字（可带小数）。
+fn first_number(s: &str) -> Option<f64> {
+    let start = s.find(|c: char| c.is_ascii_digit())?;
+    let rest = &s[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(rest.len());
+    rest[..end].trim_end_matches('.').parse::<f64>().ok()
+}
+
+/// 夹到 [1, 3600]：0/负数无意义，过大值按上限处理。
+fn clamp_retry(v: f64) -> f64 {
+    if !v.is_finite() {
+        return 1.0;
+    }
+    v.clamp(1.0, 3600.0)
+}
+
 pub struct OutClient {
     http: reqwest::Client,
 }
@@ -2179,4 +2255,38 @@ mod wb_ua_realm_tests {
         assert_eq!(brand(true), "WorkBuddy AI");
         assert_eq!(brand(false), "WorkBuddy");
     }
+    use crate::{ErrorClass, RelayError};
+
+    fn err_with_body(body: &str) -> RelayError {
+        RelayError { status: 429, class: ErrorClass::Rate, body: body.to_string() }
+    }
+
+    #[test]
+    fn retry_after_hint_reads_json_and_text_forms() {
+        // JSON 数字
+        assert_eq!(err_with_body(r#"{"retry_after": 30}"#).retry_after_hint(), Some(30.0));
+        // JSON 里的数字字符串
+        assert_eq!(err_with_body(r#"{"retryAfter": "45"}"#).retry_after_hint(), Some(45.0));
+        // OpenAI 风格嵌套
+        assert_eq!(
+            err_with_body(r#"{"error": {"retry_after": 12}}"#).retry_after_hint(),
+            Some(12.0)
+        );
+        // 纯文本（国内上游常见）
+        assert_eq!(err_with_body("rate limited, retry after 60 seconds").retry_after_hint(), Some(60.0));
+        assert_eq!(err_with_body("请求过于频繁，请等待 90 秒后再试").retry_after_hint(), Some(90.0));
+    }
+
+    #[test]
+    fn retry_after_hint_is_bounded_and_optional() {
+        // 没有提示就返回 None（由号池走本地退避），不能凭空编一个数
+        assert_eq!(err_with_body("internal error").retry_after_hint(), None);
+        assert_eq!(err_with_body("{}").retry_after_hint(), None);
+        // 0 / 负数没有意义：0 会变成「立刻重试」的死循环
+        assert_eq!(err_with_body(r#"{"retry_after": 0}"#).retry_after_hint(), Some(1.0));
+        assert_eq!(err_with_body(r#"{"retry_after": -5}"#).retry_after_hint(), Some(1.0));
+        // 过大值夹到 1 小时上限
+        assert_eq!(err_with_body(r#"{"retry_after": 86400}"#).retry_after_hint(), Some(3600.0));
+    }
+
 }

@@ -5691,6 +5691,8 @@ fn record(
     upstream: &str,
     // ★ 2026-10-26（P3）：首字节耗时（流式才有；非流式传 0）
     ttfb_ms: i64,
+    // ★ 上游给出的重试间隔（秒）；None = 没说，按本地退避曲线走
+    retry_after: Option<f64>,
 ) {
     store.usage_record(UsageEvent {
         ts: aigw_store::now_unix(),
@@ -5708,7 +5710,9 @@ fn record(
         kind: "chat".to_string(),
     });
     match class {
-        Some(c) => pool.report(spec_id, account, model, false, c, waf_fp),
+        // ★ 上游明确给了 Retry-After 就照它来（见 Pool::report_with_hint）：
+        //   429 的「稍后」大多是可精确得知的，按本地曲线猜只会继续撞墙。
+        Some(c) => pool.report_with_hint(spec_id, account, model, false, c, waf_fp, retry_after),
         None => pool.report(spec_id, account, model, true, ErrorClass::Transient, false),
     }
 }
@@ -6270,7 +6274,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                         drop(stat_rx);
                         record(
                             &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                            0, 0, Some(class), false, &spec.base_url, 0,
+                            0, 0, Some(class), false, &spec.base_url, 0, None,
                         );
                         let hint = Some(
                             "上游回了 200，但流式内容一开头就是错误帧/直接结束：多半是这把凭据已失效、或该账号在当前模型上被挡。换号重试后仍失败就重新粘贴凭据。"
@@ -6312,7 +6316,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                                         record(
                                             &store, &pool, &spec_id, &account2, &model2, started, ok,
                                             stat.tokens_in, stat.tokens_out, stat.error, false, &spec_url,
-                                            stat.ttfb_ms,
+                                            stat.ttfb_ms, None,
                                         );
                                     }
                                 }
@@ -6324,7 +6328,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                                     );
                                     record(
                                         &store, &pool, &spec_id, &account2, &model2, started, false,
-                                         0, 0, Some(ErrorClass::Transient), false, &spec_url, 0,
+                                         0, 0, Some(ErrorClass::Transient), false, &spec_url, 0, None,
                                     );
                                 }
                             }
@@ -6335,7 +6339,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                 Err(e) => {
                     record(
                         &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                         0, 0, Some(e.class), false, &spec.base_url, 0,
+                         0, 0, Some(e.class), false, &spec.base_url, 0, e.retry_after_hint(),
                     );
                     // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
                     // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
@@ -6378,7 +6382,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                     let (tin, tout) = usage_or_estimate(&v, body.len());
                     record(
                         &st.store, &st.pool, &spec.id, &account, &model, started, true,
-                        tin, tout, None, false, &spec.base_url, 0,
+                        tin, tout, None, false, &spec.base_url, 0, None,
                     );
                     Ok(ChatCoreOut::Json(v))
                 }
@@ -6386,7 +6390,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                     let waf_fp = e.status == 200;
                     record(
                         &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                        0, 0, Some(e.class), waf_fp, &spec.base_url, 0,
+                        0, 0, Some(e.class), waf_fp, &spec.base_url, 0, e.retry_after_hint(),
                     );
                     // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
                     // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
@@ -6822,7 +6826,7 @@ async fn credential_retry_after_refresh(
                                 record(
                                     &store, &pool, &spec_id, &account2, &model2, started,
                                     stat.error.is_none(), stat.tokens_in, stat.tokens_out,
-                                    stat.error, false, &spec_url, stat.ttfb_ms,
+                                    stat.error, false, &spec_url, stat.ttfb_ms, None,
                                 )
                             }
                         }
@@ -6834,7 +6838,7 @@ async fn credential_retry_after_refresh(
                             );
                             record(
                                 &store, &pool, &spec_id, &account2, &model2, started, false,
-                                 0, 0, Some(ErrorClass::Transient), false, &spec_url, 0,
+                                 0, 0, Some(ErrorClass::Transient), false, &spec_url, 0, None,
                             )
                         }
                     }
@@ -6844,7 +6848,7 @@ async fn credential_retry_after_refresh(
             Err(e2) => {
                 record(
                     &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                    0, 0, Some(e2.class), false, &spec.base_url, 0,
+                    0, 0, Some(e2.class), false, &spec.base_url, 0, e2.retry_after_hint(),
                 );
                 let hint = upstream_hint(&spec, e2.status, Some(e2.class), &e2.body);
                 Some(Err(ChatCoreErr::Upstream {
@@ -6861,14 +6865,14 @@ async fn credential_retry_after_refresh(
                 let (tin, tout) = usage_or_estimate(&v, body2.len());
                 record(
                     &st.store, &st.pool, &spec.id, &account, &model, started, true,
-                    tin, tout, None, false, &spec.base_url, 0,
+                    tin, tout, None, false, &spec.base_url, 0, None,
                 );
                 Some(Ok(ChatCoreOut::Json(v)))
             }
             Err(e2) => {
                 record(
                     &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                    0, 0, Some(e2.class), false, &spec.base_url, 0,
+                    0, 0, Some(e2.class), false, &spec.base_url, 0, e2.retry_after_hint(),
                 );
                 let hint = upstream_hint(&spec, e2.status, Some(e2.class), &e2.body);
                 Some(Err(ChatCoreErr::Upstream {
