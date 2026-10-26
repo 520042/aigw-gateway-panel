@@ -108,6 +108,9 @@ impl Blocked {
 /// 号池：并发租约 + 冷却/WAF + 会话粘性的集中治理点（每行一个账号）。
 pub struct Pool {
     inner: Mutex<Inner>,
+    /// ★ 2026-10-26（P3）：单账号在单模型上的最大并发（可热更新，面板 /api/runtime 改）。
+    /// 0 = 未注入，用编译期默认 MAX_INFLIGHT。
+    max_inflight: std::sync::atomic::AtomicU32,
 }
 
 /// 并发租约：Drop 自动归还在飞计数。
@@ -129,7 +132,20 @@ impl Pool {
     pub fn new() -> Arc<Pool> {
         Arc::new(Pool {
             inner: Mutex::new(Inner::default()),
+            max_inflight: std::sync::atomic::AtomicU32::new(0),
         })
+    }
+
+    /// 设置单账号单模型最大并发（0 = 回到编译期默认）。面板 /api/runtime 调用。
+    pub fn set_max_inflight(&self, n: u32) {
+        self.max_inflight
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 当前生效的最大并发。
+    fn max_inflight(&self) -> u32 {
+        let v = self.max_inflight.load(std::sync::atomic::Ordering::Relaxed);
+        if v == 0 { MAX_INFLIGHT } else { v }
     }
 
     fn release_inflight(&self, key: &(String, String, String)) {
@@ -162,7 +178,7 @@ impl Pool {
         // 完全无关的误导。中毒不是数据坏了，继续用里面的数据即可。
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let n = g.inflight.entry(key.clone()).or_insert(0);
-        if *n >= MAX_INFLIGHT {
+        if *n >= self.max_inflight() {
             return None;
         }
         *n += 1;
@@ -204,7 +220,7 @@ impl Pool {
             let inflight_key = (platform.to_string(), a.clone(), model.to_string());
             if g.inflight
                 .get(&inflight_key)
-                .map(|n| *n >= MAX_INFLIGHT)
+                .map(|n| *n >= self.max_inflight())
                 .unwrap_or(false)
             {
                 busy += 1;
@@ -566,7 +582,7 @@ impl Pool {
             "inflight": inflight,
             "cooling": cooldown,
             "waf": waf,
-            "max_inflight": MAX_INFLIGHT,
+            "max_inflight": self.max_inflight(),
         })
     }
 }

@@ -32,6 +32,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// ★ 2026-10-26（P3）：在线配置热更新（对齐 workbuddy2api internal/livecfg）。
+/// 声明在 lib 根部，供 AppState 引用。
+pub mod livecfg;
+
 /// 前端静态资源。`$CARGO_MANIFEST_DIR/../../web` = workspace 根的 `web/`。
 /// debug 构建默认动态读盘（改文件刷新即生效），release 构建内嵌进二进制。
 #[derive(RustEmbed)]
@@ -82,6 +86,8 @@ pub struct AppState {
     pub token: Arc<Mutex<Option<String>>>,
     /// 令牌来源（可变：面板里轮换后变成 "panel"）。
     pub token_source: Arc<Mutex<&'static str>>,
+    /// ★ 2026-10-26（P3）：在线配置（并发/超时/重试/限流），面板改完立即生效。
+    pub cfg: Arc<livecfg::RuntimeCfg>,
     /// Host / Origin 白名单（DNS 重绑定与跨站 CSRF 防线）。
     pub allow_hosts: Arc<Vec<String>>,
     /// 监听通配地址（--host 0.0.0.0 / ::）时置 true：此时任何 **IP 字面量** Host
@@ -210,6 +216,10 @@ impl AppState {
             allow_hosts: Arc::new(loopback_hosts()),
             allow_any_ip_host: Arc::new(false),
             token_source: Arc::new(Mutex::new("")),
+            // 默认从 data_dir 读；测试/未注入时用临时默认（不落盘）
+            cfg: livecfg::RuntimeCfg::load(
+                &std::env::temp_dir().join("aigw-livecfg-default"),
+            ),
             limits: Arc::new(RateLimiter::new(0, 0)),
             tasks: Arc::new(TaskHealth::new()),
             skipped_specs: Arc::new(Vec::new()),
@@ -245,6 +255,9 @@ impl AppState {
 
     /// 注入数据目录（main 用）：`/api/token` 把轮换后的令牌写到这里。
     pub fn with_data_dir(mut self, dir: std::path::PathBuf) -> AppState {
+        // 运行时配置的真源在 data_dir/runtime.json —— 与 data_dir 同时注入，
+        // 否则面板改的参数会写到临时目录、重启就丢。
+        self.cfg = livecfg::RuntimeCfg::load(&dir);
         self.data_dir = Arc::new(Some(dir));
         self
     }
@@ -1688,6 +1701,8 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/combos", get(combos_list).post(combos_action))
         .route("/api/auth", post(auth_action))
         .route("/api/checkin", get(checkin_status_all).post(checkin_claim_all))
+        // ★ 2026-10-26（P3）：运行时配置热更新（并发/超时/重试/限流）。
+        .route("/api/runtime", get(runtime_get).post(runtime_set))
         .route("/api/backup", get(backup_export).post(backup_restore))
         // 完整备份（含凭据）：前端「⬇ 备份数据」用它，否则导出的备份恢复不回来
         .route("/api/backup/export", post(backup_export_full))
@@ -6000,6 +6015,8 @@ fn record(
     class: Option<ErrorClass>,
     waf_fp: bool,
     upstream: &str,
+    // ★ 2026-10-26（P3）：首字节耗时（流式才有；非流式传 0）
+    ttfb_ms: i64,
 ) {
     store.usage_record(UsageEvent {
         ts: aigw_store::now_unix(),
@@ -6009,6 +6026,8 @@ fn record(
         tin,
         tout,
         ms: started.elapsed().as_millis() as i64,
+        // ★ P3：首字节耗时（流式 = 上游开始出字的时刻；非流式 = 0）
+        ttfb: ttfb_ms,
         ok,
         upstream: upstream.to_string(),
         cancelled: false,
@@ -6042,6 +6061,8 @@ fn record_cancelled(
         tin,
         tout,
         ms: started.elapsed().as_millis() as i64,
+        // ★ P3：非流式路径不计 TTFB（首字节即完整响应）
+        ttfb: 0,
         ok: false,
         upstream: upstream.to_string(),
         cancelled: true,
@@ -6145,11 +6166,53 @@ fn sse_response(body: Body) -> Response {
         .unwrap()
 }
 
+/// ★ 2026-10-26（P3）：带 TTFB 计时的 SSE 响应（对齐 workbuddy2api 每请求表格日志）。
+///
+/// TTFB（首字节耗时）是流式体验的核心指标：一个大模型推理 30 秒但 0.8 秒出第一个字，
+/// 用户感知远好于 8 秒才出字——只看总耗时会把这个差距完全抹平。
+///
+/// 实现：包一层流，第一块数据到达时记一次时间，然后打一行结构化日志
+/// `[请求] model=… acct=… ttfb=…ms total=…ms status=…`。
+/// 只在首块记录（`seen` 标志），后续块零开销。
+fn sse_response_timed(
+    body: Body,
+    started: Instant,
+    model: String,
+    account: String,
+    platform: String,
+) -> Response {
+    use futures_util::StreamExt;
+    let stream = body.into_data_stream();
+    let mut seen = false;
+    let wrapped = stream.map(move |chunk| {
+        if !seen {
+            if let Ok(bytes) = &chunk {
+                if !bytes.is_empty() {
+                    seen = true;
+                    let ttfb = started.elapsed().as_millis();
+                    tracing::info!(
+                        target: "aigw::req",
+                        model = %model,
+                        account = %if account.is_empty() { "-" } else { &account },
+                        platform = %platform,
+                        ttfb_ms = ttfb as i64,
+                        "请求首字节"
+                    );
+                }
+            }
+        }
+        chunk
+    });
+    sse_response(Body::from_stream(wrapped))
+}
+
 async fn chat_completions(
     State(st): State<AppState>,
     key: Option<Extension<AccessKeyCtx>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    // ★ P3：TTFB 计时起点（请求进入 handler 的时刻）
+    let started = Instant::now();
     // 访问密钥的模型白名单（没带 key / 没配白名单 = 不限制）。
     let key = key.map(|e| e.0 .0);
     // 超限/读取失败：用 OpenAI 信封回，别让客户端拿到 axum 的纯文本 413。
@@ -6157,12 +6220,20 @@ async fn chat_completions(
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    let req_model = v
+        .get("model")
+        .and_then(|x| x.as_str())
+        .unwrap_or("-")
+        .to_string();
     if let Some(resp) = key_model_denied(&key, &v) {
         return resp;
     }
     match chat_core(&st, v).await {
         Ok(ChatCoreOut::Json(v)) => Json(v).into_response(),
-        Ok(ChatCoreOut::Stream(stream)) => sse_response(Body::from_stream(stream)),
+        Ok(ChatCoreOut::Stream(stream)) => {
+            // ★ P3：流式响应带 TTFB 计时 + 每请求一行结构化日志
+            sse_response_timed(Body::from_stream(stream), started, req_model, String::new(), String::new())
+        }
         Err(ChatCoreErr::Local {
             status,
             message,
@@ -6442,13 +6513,13 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
     // 于是账号池里还有 3 个健康号时，一个 401 死 cookie / 429 限流 / 402 额度耗尽也会
     // 原样透给调用方。换号有代价（会话粘性与上游 prompt cache 都会掉），所以：
     // ① 只在「账号自身」类错误上换号（见 `failover_worthy`）；
-    // ② 一次请求最多试 MAX_ACCOUNT_TRIES 个账号。
-    const MAX_ACCOUNT_TRIES: usize = 3;
+    // ② 一次请求最多试 MAX_ACCOUNT_TRIES 个账号（★ P3：可热更新，见 /api/runtime）。
+    let max_account_tries = st.cfg.max_account_tries();
     let mut tried: Vec<String> = Vec::new();
     let mut last_err: Option<ChatCoreErr> = None;
     loop {
         let remaining: Vec<String> = ids.iter().filter(|i| !tried.contains(i)).cloned().collect();
-        if remaining.is_empty() || tried.len() >= MAX_ACCOUNT_TRIES {
+        if remaining.is_empty() || tried.len() >= max_account_tries {
             // 上一轮的真实错误比「全被挡」更有信息量：用户要看到的是那个 401 的 hint。
             if let Some(e) = last_err {
                 return Err(e);
@@ -6525,7 +6596,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                         drop(stat_rx);
                         record(
                             &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                            0, 0, Some(class), false, &spec.base_url,
+                            0, 0, Some(class), false, &spec.base_url, 0,
                         );
                         let hint = Some(
                             "上游回了 200，但流式内容一开头就是错误帧/直接结束：多半是这把凭据已失效、或该账号在当前模型上被挡。换号重试后仍失败就重新粘贴凭据。"
@@ -6567,6 +6638,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                                         record(
                                             &store, &pool, &spec_id, &account2, &model2, started, ok,
                                             stat.tokens_in, stat.tokens_out, stat.error, false, &spec_url,
+                                            stat.ttfb_ms,
                                         );
                                     }
                                 }
@@ -6578,7 +6650,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                                     );
                                     record(
                                         &store, &pool, &spec_id, &account2, &model2, started, false,
-                                        0, 0, Some(ErrorClass::Transient), false, &spec_url,
+                                         0, 0, Some(ErrorClass::Transient), false, &spec_url, 0,
                                     );
                                 }
                             }
@@ -6589,7 +6661,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                 Err(e) => {
                     record(
                         &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                        0, 0, Some(e.class), false, &spec.base_url,
+                         0, 0, Some(e.class), false, &spec.base_url, 0,
                     );
                     // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
                     // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
@@ -6632,7 +6704,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                     let (tin, tout) = usage_or_estimate(&v, body.len());
                     record(
                         &st.store, &st.pool, &spec.id, &account, &model, started, true,
-                        tin, tout, None, false, &spec.base_url,
+                        tin, tout, None, false, &spec.base_url, 0,
                     );
                     Ok(ChatCoreOut::Json(v))
                 }
@@ -6640,7 +6712,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
                     let waf_fp = e.status == 200;
                     record(
                         &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                        0, 0, Some(e.class), waf_fp, &spec.base_url,
+                        0, 0, Some(e.class), waf_fp, &spec.base_url, 0,
                     );
                     // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
                     // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
@@ -7076,7 +7148,7 @@ async fn credential_retry_after_refresh(
                                 record(
                                     &store, &pool, &spec_id, &account2, &model2, started,
                                     stat.error.is_none(), stat.tokens_in, stat.tokens_out,
-                                    stat.error, false, &spec_url,
+                                    stat.error, false, &spec_url, stat.ttfb_ms,
                                 )
                             }
                         }
@@ -7088,7 +7160,7 @@ async fn credential_retry_after_refresh(
                             );
                             record(
                                 &store, &pool, &spec_id, &account2, &model2, started, false,
-                                0, 0, Some(ErrorClass::Transient), false, &spec_url,
+                                 0, 0, Some(ErrorClass::Transient), false, &spec_url, 0,
                             )
                         }
                     }
@@ -7098,7 +7170,7 @@ async fn credential_retry_after_refresh(
             Err(e2) => {
                 record(
                     &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                    0, 0, Some(e2.class), false, &spec.base_url,
+                    0, 0, Some(e2.class), false, &spec.base_url, 0,
                 );
                 let hint = upstream_hint(&spec, e2.status, Some(e2.class), &e2.body);
                 Some(Err(ChatCoreErr::Upstream {
@@ -7115,14 +7187,14 @@ async fn credential_retry_after_refresh(
                 let (tin, tout) = usage_or_estimate(&v, body2.len());
                 record(
                     &st.store, &st.pool, &spec.id, &account, &model, started, true,
-                    tin, tout, None, false, &spec.base_url,
+                    tin, tout, None, false, &spec.base_url, 0,
                 );
                 Some(Ok(ChatCoreOut::Json(v)))
             }
             Err(e2) => {
                 record(
                     &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                    0, 0, Some(e2.class), false, &spec.base_url,
+                    0, 0, Some(e2.class), false, &spec.base_url, 0,
                 );
                 let hint = upstream_hint(&spec, e2.status, Some(e2.class), &e2.body);
                 Some(Err(ChatCoreErr::Upstream {
@@ -8051,6 +8123,49 @@ async fn search_messages(
             anthropic_error(502, &format!("搜索上游失败：{e}"))
         }
     }
+}
+
+/// ★ 2026-10-26（P3）：运行时配置读取（面板 GET /api/runtime）。
+async fn runtime_get(State(st): State<AppState>) -> Json<Value> {
+    Json(json!({"ok": true, "cfg": st.cfg.snapshot()}))
+}
+
+/// ★ 2026-10-26（P3）：运行时配置热更新（面板 POST /api/runtime）。
+///
+/// 改完**立即生效**：正在飞的请求不受影响（它们已取过自己的值），
+/// 下一次请求就用新参数。落盘 data/runtime.json，重启保持。
+async fn runtime_set(State(st): State<AppState>, body: Bytes) -> Response {
+    let v: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
+        }
+    };
+    let patch = v.get("cfg").cloned().unwrap_or(v);
+    let (changed, clamped) = st.cfg.apply(&patch);
+    // 同步到号池：max_inflight 是 pick 的硬门槛，必须在同一个请求里生效
+    if changed.iter().any(|c| c == "max_inflight") {
+        st.pool.set_max_inflight(st.cfg.max_inflight());
+    }
+    let mut msg = if changed.is_empty() {
+        "没有字段发生变化".to_string()
+    } else {
+        format!("已更新 {} 项，立即生效", changed.len())
+    };
+    if !clamped.is_empty() {
+        msg.push_str(&format!(
+            "；{} 超出允许范围已被夹到边界",
+            clamped.join("、")
+        ));
+    }
+    Json(json!({
+        "ok": true,
+        "changed": changed,
+        "clamped": clamped,
+        "message": msg,
+        "cfg": st.cfg.snapshot(),
+    }))
+    .into_response()
 }
 
 /// /v1/messages/count_tokens：Claude Code 等客户端在发送前会调它做预算。

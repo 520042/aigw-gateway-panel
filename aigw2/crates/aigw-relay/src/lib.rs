@@ -1332,12 +1332,18 @@ fn tap_passthrough(
     let (tx, rx) = mpsc::channel::<StreamStat>(1);
     let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     tokio::spawn(async move {
+        let t0 = std::time::Instant::now();
         let mut parser = SseParser::new();
         let mut stat = StreamStat::default();
         let mut stream = resp.bytes_stream();
         while let Some(item) = stream.next().await {
             match item {
                 Ok(chunk) => {
+                    // ★ 2026-10-26（P3）：首块数据到达 → 记 TTFB（只记一次）。
+                    // 这是「上游多久开始出字」的实测值，与整轮耗时是两个指标。
+                    if stat.ttfb_ms == 0 && !chunk.is_empty() {
+                        stat.ttfb_ms = t0.elapsed().as_millis() as i64;
+                    }
                     for ev in parser.feed(&chunk) {
                         stat.absorb(&ev);
                     }
@@ -1418,6 +1424,11 @@ pub struct StreamStat {
     pub error: Option<ErrorClass>,
     pub error_msg: String,
     pub saw_done: bool,
+    /// ★ 2026-10-26（P3）：首字节耗时（毫秒，从发起上游请求算起）。
+    /// 0 = 一个字节都没收到（整轮失败）。这是流式体验的核心指标——
+    /// 推理 30 秒但 0.8 秒出字，与 8 秒才出字，用户体验差一个数量级，
+    /// 而只看总耗时（ms）两者完全一样。
+    pub ttfb_ms: i64,
     /// 流内累计的正文/思考字符数（上游不给 usage 时按 chars/2 估算出参用）。
     pub out_chars: usize,
     /// 这次「失败」其实是**客户端自己取消**（下游断开），不是上游出问题。

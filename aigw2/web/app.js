@@ -120,6 +120,8 @@ const VIEWS = {
   sources:  { t: '接入源', s: '官方 API · 订阅反代 · 客户端 · 公益站 · 自定义', f: viewSources },
   accounts: { t: '账号', s: '凭据掩码展示，secret 仅后台使用', f: viewAccounts },
   usage:    { t: '用量', s: 'SQLite(WAL) 用量台账', f: viewUsage },
+  // ★ 2026-10-26（P3）：运行时配置热更新（并发/超时/重试/限流），改完立即生效。
+  runtime:  { t: '运行配置', s: '并发 · 超时 · 重试 · 限流（热更新，无需重启）', f: viewRuntime },
   about:    { t: '关于', s: '版本 · 在线更新 · 备份恢复 · 使用说明 · 免责声明', f: viewAbout },
 };
 
@@ -2383,6 +2385,70 @@ function usageQuery() {
 function setUsageLimit(n) { usageLimit = Math.max(10, Math.min(USAGE_PAGE_MAX, n)); route(); }
 function usageWinLabel() { return (USAGE_WINS.find((x) => x[0] === usageWin) || USAGE_WINS[3])[1]; }
 function setUsageWin(k) { usageWin = k; route(); }
+
+// ★ 2026-10-26（P3）：运行配置（热更新，改完立即生效，无需重启服务）。
+// 语义说明写进每个字段的 hint —— 这些参数填错会直接影响线上行为，光给数字范围不够。
+const RUNTIME_HINTS = {
+  max_inflight: '单账号在单个模型上的最大并发。调高能提吞吐，但过高容易触发上游风控',
+  upstream_timeout_s: '上游读写超时（秒）。长上下文/推理模型需要更长',
+  max_account_tries: '一次请求最多换几个账号重试。换号会掉会话粘性与上游 prompt 缓存',
+  per_ip_rpm: '每 IP 每分钟请求上限，0 = 不限',
+  global_rpm: '全局每分钟请求上限，0 = 不限',
+  key_rpm: '每把访问密钥每分钟上限，0 = 不限',
+};
+const RUNTIME_LABELS = {
+  max_inflight: '单账号并发',
+  upstream_timeout_s: '上游超时（秒）',
+  max_account_tries: '最大重试账号数',
+  per_ip_rpm: '每 IP 每分钟',
+  global_rpm: '全局每分钟',
+  key_rpm: '每密钥每分钟',
+};
+async function viewRuntime(el) {
+  el.innerHTML = '<div class="card glass empty">加载运行配置…</div>';
+  let r = null;
+  try { r = await api('/api/runtime'); } catch (_) { r = null; }
+  if (!r || !r.ok) { el.innerHTML = '<div class="card glass"><div class="note errnote">读取运行配置失败</div></div>'; return; }
+  const c = r.cfg || {};
+  const fields = c.fields || [];
+  const upd = c.updated_at ? new Date(c.updated_at * 1000).toLocaleString() : '从未修改（使用默认值）';
+  el.innerHTML = `<section class="card glass">
+    <div class="card-t"><b>运行配置</b><span class="faint small" style="margin-left:8px">改完立即生效 · 无需重启 · 正在飞的请求不受影响</span></div>
+    <div class="faint small" style="margin-bottom:12px">上次修改：${esc(upd)}。值存 <span class="mono">data/runtime.json</span>，重启保持。</div>
+    ${fields.map((f) => {
+      const v = c[f.name] ?? f.default;
+      return `<div class="row" style="align-items:flex-start;margin-bottom:10px">
+        <label style="min-width:150px;padding-top:6px"><b>${esc(RUNTIME_LABELS[f.name] || f.name)}</b><br>
+          <span class="faint mono" style="font-size:11px">${esc(f.name)}</span></label>
+        <div class="grow">
+          <input class="q mono" id="rt_${esc(f.name)}" type="number" min="${f.min}" max="${f.max}" value="${v}" style="width:120px">
+          <span class="faint" style="font-size:11.5px;margin-left:6px">范围 ${f.min}–${f.max}，默认 ${f.default}</span>
+          <div class="faint" style="font-size:11.5px;margin-top:3px">${esc(RUNTIME_HINTS[f.name] || '')}</div>
+        </div>
+      </div>`;
+    }).join('')}
+    <div class="row" style="margin-top:14px">
+      <button class="btn pri" onclick="runtimeSave()">保存并立即生效</button>
+      <button class="btn gh" onclick="route()">刷新</button>
+    </div>
+    <div id="rtMsg" style="margin-top:10px"></div>
+  </section>`;
+}
+async function runtimeSave() {
+  const box = document.getElementById('rtMsg');
+  const cfg = {};
+  document.querySelectorAll('input[id^="rt_"]').forEach((i) => {
+    const n = i.id.slice(3);
+    const v = parseInt(i.value, 10);
+    if (Number.isFinite(v)) cfg[n] = v;
+  });
+  if (box) box.innerHTML = '<span class="faint">保存中…</span>';
+  const r = await post('/api/runtime', { cfg }).catch((e) => ({ ok: false, message: String(e) }));
+  if (!box) return;
+  if (!r || !r.ok) { box.innerHTML = `<div class="note errnote">保存失败：${esc((r && r.message) || '未知错误')}</div>`; return; }
+  box.innerHTML = `<div class="note oknote">${esc(r.message || '已保存')}</div>`;
+  setTimeout(() => route(), 900);
+}
 async function viewUsage(el) {
   const q = usageQuery();
   const [us, hist] = await Promise.all([api('/api/usage' + q), api('/api/requests' + q)]);
@@ -2447,6 +2513,14 @@ async function viewUsage(el) {
       <div class="card glass kpi"><div class="lb">失败</div><div class="vl" style="background:none;-webkit-text-fill-color:currentColor;color:var(--err)">${nfmt(us.failed)}</div>${us.cancelled ? `<div class="ex">另有 ${nfmt(us.cancelled)} 次客户端取消（不计入失败与成功率）</div>` : ''}</div>
       <div class="card glass kpi"><div class="lb">成功率</div><div class="vl">${rate}%</div></div>
     </div>
+    ${(us.ttfb && us.ttfb.samples) || (us.latency && us.latency.samples) ? `<div class="grid g2" style="margin-top:12px">
+      ${us.ttfb && us.ttfb.samples ? `<div class="card glass kpi"><div class="lb">首字节 TTFB</div>
+        <div class="vl">${us.ttfb.p50}<span style="font-size:14px">ms</span></div>
+        <div class="ex">P95 ${us.ttfb.p95}ms · 平均 ${us.ttfb.avg}ms · ${nfmt(us.ttfb.samples)} 次流式样本</div></div>` : ''}
+      ${us.latency && us.latency.samples ? `<div class="card glass kpi"><div class="lb">整轮耗时</div>
+        <div class="vl">${us.latency.p50}<span style="font-size:14px">ms</span></div>
+        <div class="ex">P95 ${us.latency.p95}ms · 平均 ${us.latency.avg}ms · ${nfmt(us.latency.samples)} 次样本</div></div>` : ''}
+    </div>` : ''}
     <div class="grid g2">
       <section class="card glass"><h3>输出 tokens 分布（donut）</h3>${donut}</section>
       <section class="card glass"><h3>${trendTitle}</h3>${trend}</section>
