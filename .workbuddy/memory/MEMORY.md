@@ -201,3 +201,11 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
 - 模块规模：lib 15198（生产 7619 + 测试 7579）/ stream 820 / dialect 949 / net 273 / ratelimit 324 / livecfg 235。
 - 测试基线 **560**。
 - ★ 坑：`git show | Out-File` 写出 UTF-16 不可用，取历史文件要用 node `child_process` 直接收 stdout；切代码区间前先核对「上边界是否真的是目标函数起点」。
+
+## 2026-10-26 第六轮（state / models 拆分）
+- **新增 `state.rs`（822 行）**：AppState + 12 个 with_* + 5 个 platform_* 判定 + spec_for_model / resolve_spec / fetch_live_models / warm_models。**`models.rs`（133 行）**：custom_to_spec / free_to_spec / ModelsEntry / models_ttl / 四个 TTL 常量 + WARM_WAIT_CAP。`scheme_ok` 迁入 net.rs。
+- lib.rs 生产代码 **9134 → 6706 行**（−26.6%）。模块：lib 14285 / state 822 / stream 820 / dialect 949 / models 133 / net 286 / ratelimit 324 / livecfg 235。
+- ★ 坑1：`warm_models` 返回 `impl Future + 'static` 却取 `&self` → 异步块捕获引用撑破 'static。改按值 `self`。
+- ★ 坑2：搬 AppState 时把 `#[derive(Clone)]` 留在原文件，AppState 不再 Clone → axum State extractor 全线失效，报 40+ 条 Handler trait 未满足（错误信息完全指向路由，根因在结构体）。
+- ★ 坑3：本仓库 .rs 文件是 **CRLF**，写替换串必须用 `\r?\n` 或按行数组 splice，否则静默不命中。
+- 测试基线 **560**。
