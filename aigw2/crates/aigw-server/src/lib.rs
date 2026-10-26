@@ -3755,6 +3755,13 @@ async fn accounts(State(st): State<AppState>) -> Json<Value> {
         }
     }
     snap["daily_checkin"] = json!(st.flags.daily_checkin());
+    snap["daily_growth"] = json!(st.flags.daily_growth());
+    snap["growth_task"] = st
+        .tasks
+        .snapshot()
+        .get("daily_growth")
+        .cloned()
+        .unwrap_or(Value::Null);
     snap["checkin_task"] = st
         .tasks
         .snapshot()
@@ -4039,6 +4046,48 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
     let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("claim");
     match action {
         "claim" => Json(checkin_all(&st, true).await).into_response(),
+        // ★ 2026-10-26（P0）：成长任务一键完成。对齐 workbuddy2api 17 任务闭环：
+        //   读清单 → 接受 → 事件链点亮（桌面指纹 /v2/report）→ 逐个领奖。
+        "growth" => {
+            let platform = req.get("platform").and_then(|v| v.as_str()).unwrap_or("wb-gateway").to_string();
+            let Some(base) = aigw_relay::wb::wb_checkin_base(&platform) else {
+                return Json(json!({"ok": false, "message": "成长任务仅 WorkBuddy / CodeBuddy 族支持"})).into_response();
+            };
+            let web_base = if platform == "codebuddy" {
+                "https://www.codebuddy.cn"
+            } else {
+                "https://www.workbuddy.cn"
+            };
+            let http = aigw_relay::auth_login::auth_http();
+            let accounts = st.accounts.secrets_for(&platform);
+            if accounts.is_empty() {
+                return Json(json!({"ok": false, "message": format!("{platform} 还没有账号，先登录")})).into_response();
+            }
+            let mut all: Vec<Value> = Vec::new();
+            for (acc_id, secret) in accounts {
+                // uid：成长任务的桌面指纹要 userId。Account 没有独立 uid 字段，
+                // 用账号 id（登录时由上游 uid 派生）当稳定标识即可——同账号恒定。
+                let nick = st
+                    .accounts
+                    .rows_snapshot()
+                    .get("rows")
+                    .and_then(|r| r.as_array())
+                    .and_then(|arr| {
+                        arr.iter()
+                            .find(|a| a.get("id").and_then(|x| x.as_str()) == Some(acc_id.as_str()))
+                    })
+                    .and_then(|a| a.get("name"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let r = aigw_relay::wb_growth::run_all_growth(
+                    &http, base, web_base, &secret, &acc_id, &nick,
+                )
+                .await;
+                all.push(json!({"account": acc_id, "result": r}));
+            }
+            Json(json!({"ok": true, "platform": platform, "accounts": all})).into_response()
+        }
         "schedule" => {
             let Some(on) = req.get("enabled").and_then(|v| v.as_bool()) else {
                 return (
@@ -4067,6 +4116,27 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
                 "ok": true,
                 "daily": on,
                 "message": message,
+            }))
+            .into_response()
+        }
+        // ★ 2026-10-26（P0）：成长任务自动开关（只写 flags，后台循环自己读）。
+        "growth_schedule" => {
+            let Some(on) = req.get("enabled").and_then(|v| v.as_bool()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"ok": false, "message": "缺 enabled（true/false）"})),
+                )
+                    .into_response();
+            };
+            st.flags.set_daily_growth(on);
+            Json(json!({
+                "ok": true,
+                "daily_growth": on,
+                "message": if on {
+                    "已开启每日自动成长任务：后台每 12 小时跑一轮（开关存 flags.json，重启保持）"
+                } else {
+                    "已关闭每日自动成长任务：后台不再上报事件链"
+                },
             }))
             .into_response()
         }

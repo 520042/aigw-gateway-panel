@@ -12,6 +12,11 @@ use serde_json::{json, Value};
 
 const WB_CLI_UA: &str = "CLI/2.63.2 CodeBuddy/2.63.2";
 
+/// CLI UA（成长任务等模块复用；与签到域保持一致）。
+pub fn cli_ua() -> &'static str {
+    WB_CLI_UA
+}
+
 /// 平台 → 签到域（仅 CN；intl 返回 None = 不支持）。
 pub fn wb_checkin_base(platform: &str) -> Option<&'static str> {
     match platform {

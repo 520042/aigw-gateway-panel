@@ -2036,6 +2036,8 @@ async function viewAccounts(el) {
       <b>账号凭据</b>
       ${wbN > 0 ? `<button class="btn sm" onclick="wbCheckin()">wb 每日签到（${wbN} 账号）</button>` : ''}
       ${wbN > 0 ? `<button class="btn sm ${ac.daily_checkin ? 'pri' : 'gh'}" onclick="wbAutoToggle(${ac.daily_checkin ? 'false' : 'true'}, this)" title="开启后后台每 12 小时自动领取一次；默认关，开关存 flags.json，重启保持。当天已领过时上游回「今日已领取」，无副作用">自动签到：${ac.daily_checkin ? '开 ✔' : '关'}</button>` : ''}
+      ${wbN > 0 ? `<button class="btn sm" onclick="wbGrowth()" title="一键完成成长任务（17 项）：事件链上报 + 领奖，全新账号约 +1950 积分">⚡ 成长任务</button>` : ''}
+      ${wbN > 0 ? `<button class="btn sm ${ac.daily_growth ? 'pri' : 'gh'}" onclick="wbGrowthToggle(${ac.daily_growth ? 'false' : 'true'}, this)" title="开启后后台每 12 小时自动跑一轮成长任务；默认关">自动成长：${ac.daily_growth ? '开 ✔' : '关'}</button>` : ''}
       <span class="faint" style="margin-left:auto">健康列来自最近一次真实请求 / 「检查」验活的结果（重启后清空）· Buddy 加油站每日 100 积分仅 wb 族账号可签到</span>
     </div>
     ${checkinTaskLine(ac.checkin_task)}
@@ -2186,6 +2188,39 @@ function checkinTaskLine(t) {
 async function wbAutoToggle(on, btn) {
   btn.disabled = true;
   const r = await post('/api/checkin', { action: 'schedule', enabled: on }).catch((e) => ({ ok: false, message: String(e) }));
+  btn.disabled = false;
+  if (!r || !r.ok) { alert('操作失败：' + ((r && r.message) || '未知错误')); return; }
+  render();
+}
+
+// ★ 2026-10-26（P0）：成长任务一键完成（17 项：事件链上报 + 领奖）。
+async function wbGrowth() {
+  if (!confirm('一键完成成长任务？\n\n会对 wb 族所有账号：读取任务清单 → 接受未完成任务 → 以桌面客户端指纹上报行为事件链 → 逐个领奖。\n全新账号约可拿 +1950 积分（部分任务需真实对话）。\n\n⚠ 这是对上游的主动写操作，请确认账号允许。')) return;
+  const mk = `<div class="modal-mask" onclick="if(event.target===this)this.remove()"><div class="modal">
+    <div class="modal-hd">⚡ 成长任务执行中…<b class="x" onclick="this.closest('.modal-mask').remove()">✕</b></div>
+    <div class="modal-bd" id="growthBox"><div class="faint">正在逐个账号跑 17 项任务（可能需要 30-60 秒）…</div></div>
+  </div></div>`;
+  document.body.insertAdjacentHTML('beforeend', mk);
+  const box = document.getElementById('growthBox');
+  const r = await post('/api/checkin', { action: 'growth', platform: 'wb-gateway' }).catch((e) => ({ ok: false, message: String(e) }));
+  if (!box) return;
+  if (!r || !r.ok) { box.innerHTML = `<div class="note errnote">执行失败：${esc((r && r.message) || '未知错误')}</div>`; return; }
+  const accs = r.accounts || [];
+  box.innerHTML = accs.length ? accs.map((a) => {
+    const d = a.result || {};
+    const steps = (d.steps || []).map((s) => `· ${esc(s.action)}：${s.ok ? '✓' : '✗'}${s.message ? ' ' + esc(String(s.message).slice(0, 60)) : ''}${s.credit ? ' +' + s.credit : ''}`).join('<br>');
+    return `<div class="note ${d.ok ? 'oknote' : 'errnote'}">
+      <b>${esc(a.account)}</b> — 任务 ${d.total_tasks || 0} 项，待做 ${d.pending || 0}，领取 ${d.claimed || 0} 项，
+      本次 <b>+${d.credit || 0} 积分</b>${d.energy ? ' +' + d.energy + ' 能量' : ''}
+      <div class="faint" style="margin-top:6px;font-size:11.5px">${steps || esc(d.message || '')}</div>
+    </div>`;
+  }).join('') : '<div class="note">没有 wb 族账号</div>';
+  setTimeout(() => render(), 1200);
+}
+
+async function wbGrowthToggle(on, btn) {
+  btn.disabled = true;
+  const r = await post('/api/checkin', { action: 'growth_schedule', enabled: on }).catch((e) => ({ ok: false, message: String(e) }));
   btn.disabled = false;
   if (!r || !r.ok) { alert('操作失败：' + ((r && r.message) || '未知错误')); return; }
   render();
