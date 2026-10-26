@@ -6243,24 +6243,59 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
         // WorkBuddy / CodeBuddy 族转发必须带 X-Domain（账号登录时上游给的归属域）。
         // 其余平台的 domain 恒为空串，注入端会跳过这个头。
         let domain = st.accounts.domain_of(&spec.id, &secret);
-        let lease = {
-            const ACQUIRE_WAIT: Duration = Duration::from_secs(15);
-            let deadline = Instant::now() + ACQUIRE_WAIT;
-            loop {
-                if let Some(l) = st.pool.acquire(&spec.id, &account, &model) {
-                    break l;
-                }
-                if Instant::now() >= deadline {
-                    return Err(ChatCoreErr::Local {
-                        status: 429,
-                        message: "provider busy: 该账号在途请求已达上限（2 路），请稍后重试".to_string(),
-                        code: None,
-                        retry_after: Some(2),
-                    });
-                }
-                tokio::time::sleep(Duration::from_millis(120)).await;
+        // ★ 2026-10-26：原来是一条 15 秒的「等这一个账号空出来」死等。
+        //
+        //   池子上限是每 (平台,账号,模型) 2 路在途。旧逻辑一旦选中一个已满的账号，
+        //   后续 15 秒都在死等它 —— 而池里另外几个健康账号全程空闲，本可以立刻换。
+        //   典型现场：两个客户端并发同一个会话（粘性把两个请求钉到同一个号上），
+        //   第二个请求整整排队 15 秒，然后报 429「provider busy」，用户以为平台挂了。
+        //
+        //   现在的取舍：先等一小段（ROTATE_AFTER）——覆盖「同一次会话里前一个请求刚
+        //   收尾」的常规情况，保住粘性与上游 prompt cache；还拿不到就**换一个没试过的
+        //   账号**（换号有代价，但比空等 15 秒再失败强）。只有全平台确实没有别的号可换
+        //   时才退回总预算，报错口径不变。
+        const ROTATE_AFTER: Duration = Duration::from_millis(1500);
+        const ACQUIRE_WAIT: Duration = Duration::from_secs(15);
+        // 本轮判定为「换号」时置位：跳出等待后直接 continue 外层循环重选账号
+        let mut break_locked = false;
+        let acquire_start = Instant::now();
+        let lease = loop {
+            if let Some(l) = st.pool.acquire(&spec.id, &account, &model) {
+                break l;
             }
+            let waited = acquire_start.elapsed();
+            // ① 还有别的号可换 → 立刻换（已试过的号不会再次出现，见 remaining）
+            let has_other = ids.iter().any(|i| !tried.contains(i) && i != &account);
+            if has_other && waited >= ROTATE_AFTER {
+                tracing::info!(
+                    "账号 {} 在途已满（{} 路），{:.1}s 内没空出来，换下一个账号",
+                    account,
+                    st.pool.max_inflight_public(),
+                    waited.as_secs_f64()
+                );
+                tried.push(account.clone());
+                break_locked = true;
+            }
+            // ② 没有别的号可换 → 按原口径等满 15 秒再报 busy
+            if waited >= ACQUIRE_WAIT {
+                return Err(ChatCoreErr::Local {
+                    status: 429,
+                    message: "provider busy: 该账号在途请求已达上限（2 路），请稍后重试".to_string(),
+                    code: None,
+                    // 提示从固定 2 秒改成 5 秒：并发满通常是瞬时，2 秒偏乐观，
+                    // 客户端会密集重试继续撞同一个满号。
+                    retry_after: Some(5),
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
         };
+        if break_locked {
+            // 判定「换号」：本轮不发请求。★ 必须先解绑粘性 —— 否则下一轮
+            // sticky.route 又会给出同一个满号，这样「换号」会变成无限循环
+            // （每次只白等 1.5 秒）。tried 里已有该号，remaining 自然不含它。
+            st.sticky.unbind(&skey);
+            continue;
+        }
         let started = Instant::now();
         // 每一轮尝试的产物：成功直接返回；失败带上「原始状态码 + 分类」出来，
         // 由循环尾部决定「换下一个账号」还是「把错误交给调用方」。

@@ -299,6 +299,11 @@ impl Pool {
     }
 
     /// 设置单账号单模型最大并发（0 = 回到编译期默认）。面板 /api/runtime 调用。
+    /// 当前在途上限（只读，供日志/面板说明「几路已满」）。
+    pub fn max_inflight_public(&self) -> u32 {
+        self.max_inflight()
+    }
+
     pub fn set_max_inflight(&self, n: u32) {
         self.max_inflight
             .store(n, std::sync::atomic::Ordering::Relaxed);
