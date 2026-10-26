@@ -3205,6 +3205,68 @@ fn callback_warning(ports: &[(u16, bool, String)]) -> Option<String> {
 ///   {"action":"poll","id":"ls-..."}
 ///   {"action":"save","platform":"apk-yuanbao","secret":"Cookie..."}  ← 跳转登录手动粘贴闭环
 /// 成功 token/cookie 自动落账号池。
+/// 保存凭据后的即时验活（`/api/auth` 的 `save` 分支主体）。
+///
+/// 为什么值得单独一个函数：这段决定了「用户粘贴 Cookie 后看到什么」——
+/// 验活结论要同时落到三处（响应体的 verified / message，平台卡片的 last_err，
+/// 号池健康快照），而失败原因还必须按平台类型分档说清。混在 75 行的 `save` 分支里，
+/// 上面是长度校验、下面是入库，中间这 48 行最难独立审。
+///
+/// 返回值：验活结论（`None` 表示内存里找不到这个平台的 spec，调用方原样返回 saved）。
+/// 验活失败时的「该往哪儿查」提示，按平台类型分档。
+///
+/// 抽成纯函数是为了能直接测：这段文案是用户保存凭据失败后唯一看到的指引，
+/// 落错档会把人往完全错误的方向带 —— 例如扫码类平台（Loomy / 小浣熊）压根不收
+/// Cookie，兜底文案却让人去查 Cookie 字段，用户会反复复制 Cookie 再失败。
+fn verify_failure_hint(spec: &ProviderSpec) -> &'static str {
+    if spec.upstream_kind == "kiro" {
+        "确认 accessToken 是否过期、profileArn 是否与账号匹配（建议从 Kiro 客户端重新导出完整 JSON）"
+    } else if spec.upstream_kind == "qwen-web" || spec.upstream_kind == "mimo" {
+        "确认 token 与完整 Cookie 都已粘贴（缺字段、缺 Cookie 或已过期都会失败）"
+    } else if spec.auth == aigw_registry::AuthKind::ApiKey {
+        "确认 API Key 有效、额度未用尽、未被风控"
+    } else if spec.auth == aigw_registry::AuthKind::OAuthDevice {
+        "设备授权可能已过期，重新走一次登录即可"
+    } else if spec.auth == aigw_registry::AuthKind::SmsCode {
+        "短信登录拿到的 session 有时效（约 14 天），过期后重新走一次短信登录即可"
+    } else if spec.auth == aigw_registry::AuthKind::QrScan {
+        // 扫码类（apk-loomy / apk-raccoon）：拿到的 session / access_token 有时效，
+        // 旧实现落进 cookie 兜底文案会让人去查 Cookie 字段，而这类平台压根不收 Cookie。
+        "扫码拿到的 session / access_token 可能已过期，重新扫一次即可（也可以用抽屉里的「手动粘贴」方式）"
+    } else {
+        "请确认所需 Cookie 字段是否完整、是否已过期（可重新复制后再保存）"
+    }
+}
+
+async fn verify_after_save(
+    st: &AppState,
+    spec: &ProviderSpec,
+    platform: &str,
+    secret: &str,
+    mut saved: Value,
+) -> Value {
+    let ok = st.client.verify_account(spec, secret).await;
+    // 记进号池健康快照：面板账号表立刻能看出这个号是否可用。
+    if let Some(acc_id) = st.accounts.id_of(platform, secret) {
+        st.pool.mark_health(&acc_id, ok, "");
+    }
+    // 失败原因按平台类型分开说：抓错方向的提示比「失败了」更难用。
+    let why = verify_failure_hint(spec);
+    // ★ 与 /api/accounts 的 verify 保持一致：验活结论要落到平台卡片上。
+    //   保存凭据这个动作本身就是用户的「修好它」尝试，成功必须清掉旧原因，
+    //   失败要把原因写上去 —— 否则用户回到接入源页看到的还是上一次的旧原因。
+    saved["verified"] = json!(ok);
+    if ok {
+        st.last_err.clear(platform);
+        saved["message"] = json!("凭据已保存，验活通过 ✓");
+    } else {
+        st.last_err.note(platform, 0, &format!("验活未通过：{why}"));
+        saved["message"] = json!(format!("凭据已保存，但验活未通过：{why}"));
+    }
+    saved["last_error"] = st.last_err.json(platform);
+    saved
+}
+
 async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
     let v = match parse_action_body(&body) {
         Ok(v) => v,
@@ -3272,46 +3334,12 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
                 }
             }
             // 保存成功后即时验活（cookie 平台走各自真实端点），让用户立刻知道 Cookie 是否有效
+            // 保存成功后即时验活（cookie 平台走各自真实端点），让用户立刻知道 Cookie 是否有效
             if saved.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
                 invalidate_models_cache(&st);
                 let specs = st.all_specs();
                 if let Some(spec) = specs.iter().find(|s| s.id == platform) {
-                    let ok = st.client.verify_account(spec, secret).await;
-                    // 记进号池健康快照：面板账号表立刻能看出这个号是否可用。
-                    if let Some(acc_id) = st.accounts.id_of(platform, secret) {
-                        st.pool.mark_health(&acc_id, ok, "");
-                    }
-                    // 失败原因按平台类型分开说：抓错方向的提示比「失败了」更难用。
-                    let why = if spec.upstream_kind == "kiro" {
-                        "确认 accessToken 是否过期、profileArn 是否与账号匹配（建议从 Kiro 客户端重新导出完整 JSON）"
-                    } else if spec.upstream_kind == "qwen-web" || spec.upstream_kind == "mimo" {
-                        "确认 token 与完整 Cookie 都已粘贴（缺字段、缺 Cookie 或已过期都会失败）"
-                    } else if spec.auth == aigw_registry::AuthKind::ApiKey {
-                        "确认 API Key 有效、额度未用尽、未被风控"
-                    } else if spec.auth == aigw_registry::AuthKind::OAuthDevice {
-                        "设备授权可能已过期，重新走一次登录即可"
-                    } else if spec.auth == aigw_registry::AuthKind::SmsCode {
-                        "短信登录拿到的 session 有时效（约 14 天），过期后重新走一次短信登录即可"
-                    } else if spec.auth == aigw_registry::AuthKind::QrScan {
-                        // 扫码类（apk-loomy / apk-raccoon）：拿到的 session / access_token 有时效，
-                        // 旧实现落进 cookie 兜底文案会让人去查 Cookie 字段，而这类平台压根不收 Cookie。
-                        "扫码拿到的 session / access_token 可能已过期，重新扫一次即可（也可以用抽屉里的「手动粘贴」方式）"
-                    } else {
-                        "请确认所需 Cookie 字段是否完整、是否已过期（可重新复制后再保存）"
-                    };
-                    // ★ 与 /api/accounts 的 verify 保持一致：验活结论要落到平台卡片上。
-                    //   保存凭据这个动作本身就是用户的「修好它」尝试，成功必须清掉旧原因，
-                    //   失败要把原因写上去 —— 否则用户回到接入源页看到的还是上一次的旧原因。
-                    let mut obj = saved;
-                    obj["verified"] = json!(ok);
-                    if ok {
-                        st.last_err.clear(platform);
-                        obj["message"] = json!("凭据已保存，验活通过 ✓");
-                    } else {
-                        st.last_err.note(platform, 0, &format!("验活未通过：{why}"));
-                        obj["message"] = json!(format!("凭据已保存，但验活未通过：{why}"));
-                    }
-                    obj["last_error"] = st.last_err.json(platform);
+                    let obj = verify_after_save(&st, spec, platform, secret, saved).await;
                     return Json(obj).into_response();
                 }
             }
@@ -7121,6 +7149,29 @@ stream_dialect = "sse_delta"
         assert!(w.contains("端口被占用"), "警告要带失败原因：{w}");
         assert!(!w.contains("1455（"), "绑上的端口不该出现在警告里：{w}");
         assert!(w.contains("粘贴"), "必须给出替代路径（手动粘贴回调 URL）：{w}");
+    }
+
+    #[test]
+    fn verify_failure_hint_points_at_the_right_thing() {
+        // 这段文案是用户保存凭据失败后唯一的指引，落错档会把人往错误方向带。
+        let mk = |kind: &str, auth: &str| {
+            spec_toml(&format!(
+                "id = \"x\"\nname = \"x\"\nauth = \"{auth}\"\nbase_url = \"https://e.invalid/v1\"\n\
+                 format = \"openai\"\nmodels_policy = \"live\"\nupstream_kind = \"{kind}\"\n\
+                 stream_dialect = \"sse_delta\"\n"
+            ))
+        };
+        // 专用 adapter 优先于 auth 类型：kiro 拿的是 accessToken，不是 Cookie
+        let kiro = mk("kiro", "cookie");
+        assert!(verify_failure_hint(&kiro).contains("accessToken"), "kiro 提示应指向 accessToken");
+        // 扫码类平台不收 Cookie，不能落到兜底的「确认 Cookie 字段」
+        let qr = mk("openai", "qr_scan");
+        let h = verify_failure_hint(&qr);
+        assert!(h.contains("扫码"), "扫码平台应提示重新扫码：{h}");
+        assert!(!h.contains("Cookie 字段是否完整"), "不该给扫码平台指 Cookie：{h}");
+        // API Key 与设备码各自有明确指引
+        assert!(verify_failure_hint(&mk("openai", "api_key")).contains("API Key"));
+        assert!(verify_failure_hint(&mk("openai", "o_auth_device")).contains("设备授权"));
     }
 
 
