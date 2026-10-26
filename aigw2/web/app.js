@@ -5,7 +5,7 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261026a';
+const BUILD = 'v20261026b';
 
 // 公益站聚合源状态（/api/free 的 sources + last_refresh）：只在需要时拉一次，
 // 手动刷新后置空，下次渲染重取。
@@ -363,9 +363,9 @@ let SRC_EXPAND = null; // 展开的平台卡片 id
 //     （minimax=MiniMax Code 设备码、codearts=华为云账号跳转登录+AK/SK，均非单纯 Key）
 function srcGroupOf(p) {
   if (p.id.startsWith('custom-')) return 'custom';
-  if (p.id.startsWith('api-') || p.id === 'apk-coze' || p.id === 'kimi-code' || p.id === 'codex') return 'official';
+  if (p.id.startsWith('api-') || GROUP_OVERRIDE.official.includes(p.id)) return 'official';
   if (p.id.startsWith('sub-')) return 'sub';
-  if (p.id.startsWith('free-') || p.id === 'anon-zen' || p.id === 'kilo' || p.id === 'pollinations') return 'free';
+  if (p.id.startsWith('free-') || GROUP_OVERRIDE.free.includes(p.id)) return 'free';
   return 'client';
 }
 const GROUP_META = {
@@ -747,23 +747,72 @@ function unusableBanner(p) {
   return '<div class="note" style="border-color:#5a4a2a">这个平台现在<b>不发布模型</b>：' + esc(why) + '。<br>'
     + esc(fix) + '<br><a href="' + att(href) + '" target="_blank" rel="noopener">看看它在 /v1/models 里的样子 →</a></div>';
 }
+// 分组判定的例外表：前缀规则（api- / free-）覆盖不到的少数平台。
+// 与 LOGIN_UI 一样，把「代码里散落的 id 判断」收成一处。
+const GROUP_OVERRIDE = {
+  official: ['apk-coze', 'kimi-code', 'codex'],
+  free: ['anon-zen', 'kilo', 'pollinations'],
+};
+
+// 「哪些平台走哪种登录界面」的**唯一一张表**。
+//
+// 之前这些判断散在 srcDrawer 开头 17 行 `p.id === '...'` 里（25 个 id 硬编码），
+// 后端 providers/*.toml 改了 id、或者新增一个同族平台，前端就得跟着改代码，而且
+// 漏改的症状是「抽屉画成手填 Key」。收成一张表后：新增平台要么进表，要么落进
+// 「按 auth 推导」的默认分支，不会再出现「代码里少写一个 id」这种错。
+//
+// 注意：这里表达的是**界面形态**（画哪个表单/按钮），不是协议能力 ——
+// 后者后端已经通过 login_methods / auth / upstream_kind 下发了。
+const LOGIN_UI = {
+  // codebuddy 在 auth_login 里有独立设备授权实现（codebuddy.cn + CLI），
+  // 但 spec 侧由 wb-gateway 承载多域，故此处只列 id 供老账号复用同一张抽屉。
+  wb: ['wb-gateway', 'wb-gateway-intl', 'codebuddy'],
+  minimax: ['minimax'],
+  kimi: ['sub-kimi', 'sub-kimi-ai', 'sub-grok'],
+  cline: ['cline'],
+  meta: ['sub-meta'],
+  pkce: ['sub-codex', 'sub-claude', 'sub-antigravity', 'sub-devin'],
+  qoder: ['apk-qoder', 'web-qoder'],
+  trae: ['apk-trae', 'web-trae'],
+  codearts: ['codearts'],
+  // web-lobster 的 spec 已并进 lobster（同一 OAuth 链路、同一个 @lobster 占位地址），
+  // 保留 id 只为兼容老备份里残留的账号行 —— 没有对应 spec 时不会渲染出卡片。
+  lobster: ['lobster', 'web-lobster'],
+  pasteToken: ['web-deepseek'],
+  pasteQwen: ['web-qwen'],
+  pasteMimo: ['mimo'],
+  pasteKiro: ['sub-kiro'],
+  pasteCoze: ['apk-coze'],
+  pasteAntigravity: ['apk-antigravity'],
+  // 拖拽式扫码（后端 relay 里有出码+轮询实现）
+  qrPaste: ['apk-raccoon', 'apk-doubao', 'apk-kuku', 'apk-loomy'],
+};
+
+// 平台 id → 界面族（同一个 id 只可能属于一族；重复登记按先出现的算）
+const LOGIN_UI_OF = (() => {
+  const m = {};
+  for (const [k, ids] of Object.entries(LOGIN_UI)) ids.forEach((id) => { if (!m[id]) m[id] = k; });
+  return m;
+})();
+
 function srcDrawer(p) {
-  const isWb = p.id === 'wb-gateway' || p.id === 'wb-gateway-intl' || p.id === 'codebuddy';
-  const isMinimax = p.id === 'minimax';
-  const isKimi = p.id === 'sub-kimi' || p.id === 'sub-kimi-ai' || p.id === 'sub-grok';
-  const isCline = p.id === 'cline';
-  const isMeta = p.id === 'sub-meta';
-  const isPkce = p.id === 'sub-codex' || p.id === 'sub-claude' || p.id === 'sub-antigravity' || p.id === 'sub-devin';
-  const isQoder = p.id === 'apk-qoder' || p.id === 'web-qoder';
-  const isTrae = p.id === 'apk-trae' || p.id === 'web-trae';
-  const isCodearts = p.id === 'codearts';
-  const isLobster = p.id === 'lobster' || p.id === 'web-lobster';
-  const isPasteToken = p.id === 'web-deepseek';
-  const isPasteQwen = p.id === 'web-qwen';
-  const isPasteMimo = p.id === 'mimo';
-  const isPasteKiro = p.id === 'sub-kiro';
-  const isPasteCoze = p.id === 'apk-coze';
-  const isPasteAntigravity = p.id === 'apk-antigravity';
+  const ui = LOGIN_UI_OF[p.id] || '';
+  const isWb = ui === 'wb';
+  const isMinimax = ui === 'minimax';
+  const isKimi = ui === 'kimi';
+  const isCline = ui === 'cline';
+  const isMeta = ui === 'meta';
+  const isPkce = ui === 'pkce';
+  const isQoder = ui === 'qoder';
+  const isTrae = ui === 'trae';
+  const isCodearts = ui === 'codearts';
+  const isLobster = ui === 'lobster';
+  const isPasteToken = ui === 'pasteToken';
+  const isPasteQwen = ui === 'pasteQwen';
+  const isPasteMimo = ui === 'pasteMimo';
+  const isPasteKiro = ui === 'pasteKiro';
+  const isPasteCoze = ui === 'pasteCoze';
+  const isPasteAntigravity = ui === 'pasteAntigravity';
   const isSms = p.auth === 'sms_code';
   // 多路登录：toml 的 login_methods 列出多种方式（例如 Loomy = sms/pwd/qr）。后端下发 p.login_methods，
   // 没配就退回按 auth 推导。用它决定画哪些选项卡 —— 而不是在前端写死平台 id。
@@ -929,7 +978,7 @@ function srcDrawer(p) {
         <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
       </div>
       <div id="authBox"></div>`;
-  } else if (p.id === 'apk-raccoon') {
+  } else if (ui === 'qrPaste' && p.id === 'apk-raccoon') {
     // 小浣熊（商汤）微信小程序扫码：code 由服务端自造（32 位 hex），二维码内容 = xiaohuanxiong.com/login/mp?code=…
     // 扫码后用同一个 code 轮询 login_with_qrcode_code 换 Bearer access_token（约 3 小时有效）。
     body = `<div class="note">小浣熊（商汤）<b>微信扫码登录</b>（纯 HTTP，免粘贴 Cookie）：点「开始登录」生成二维码，用<b>微信</b>扫一扫（进入「商汤小浣熊」小程序）并在手机上确认，面板自动换取 access_token 入账号池。token 约 3 小时有效，过期后重新扫码即可。</div>
@@ -952,7 +1001,7 @@ function srcDrawer(p) {
         <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
       </div>
       <div id="authBox"></div>`;
-  } else if (p.id === 'apk-doubao') {
+  } else if (ui === 'qrPaste' && p.id === 'apk-doubao') {
     // ★ 可达性：豆包 auth=qr_scan（不是 api_key/cookie），所以上面的 isKey 分支不会截走；
     //   这条分支与 kuku/loomy 都是「有扫码实现」的平台，靠 toml 的 auth=qr_scan 标记能力。
     // 豆包扫码登录（doubao2api qr_login 的纯 HTTP 实现）：start 返回二维码 → 自动轮询收整段 Cookie
@@ -969,7 +1018,7 @@ function srcDrawer(p) {
           <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
         </div>
       </details>`;
-  } else if (p.id === 'apk-kuku') {
+  } else if (ui === 'qrPaste' && p.id === 'apk-kuku') {
     // 库库 AI 扫码登录（kuku2api passport 的纯 HTTP 实现）：start 出二维码 → 轮询拿 BDUSS/PTOKEN → 换 STOKEN
     body = `<div class="note">库库 AI<b>扫码登录</b>（纯 HTTP，免粘贴 Cookie）：点「开始登录」生成二维码，用<b>百度 App / 百度网盘 App</b> 扫一扫并在手机上确认，面板自动完成 BDUSS/PTOKEN → STOKEN 交换并入账号池。</div>
       <div class="row">
@@ -984,7 +1033,7 @@ function srcDrawer(p) {
           <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
         </div>
       </details>`;
-  } else if (p.id === 'apk-loomy') {
+  } else if (ui === 'qrPaste' && p.id === 'apk-loomy') {
     // Loomy（讯飞）微信扫码登录：open.weixin qrconnect → 长轮询 wx_code → 讯飞 bind/skip → session
     // 一手来源 _refs/Ebony-Vinyl-dsh-our-free-model/.../loomy-wechat.ts
     body = `<div class="note">Loomy（讯飞）<b>微信扫码登录</b>（纯 HTTP，免粘贴 session）：点「开始登录」生成二维码，用<b>微信</b>扫一扫并在手机上确认，面板自动换取 14 天有效的 session 入账号池。<br>若这个微信还没绑定过讯飞账号，微信侧会要求先绑定手机号（可先去 <a href="https://loomy.xunfei.cn/login" target="_blank" rel="noopener">loomy.xunfei.cn</a> 用手机号登录并绑定微信，再回来扫码）。</div>
