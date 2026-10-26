@@ -37,7 +37,9 @@ def gen(pid):
             base = 'https://' + upstream if upstream else ''
             auth = 'api_key'
         # OpenAI 兼容上游统一拼 /v1（dashscope/qianfan 兼容模式也在 /v1）
-        if pid in ('api-dashscope', 'api-bailian'):
+        # api-bailian 已并入 api-dashscope（同一端点、同一套 Key、同一份模型清单），
+        # 生成器只保留存活的那个 id，避免下次批量生成又把重复卡片造回来。
+        if pid == 'api-dashscope':
             base = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
         elif pid == 'api-qianfan':
             base = 'https://qianfan.baidubce.com/v2'

@@ -5,7 +5,7 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261111c';
+const BUILD = 'v20261026a';
 
 // 公益站聚合源状态（/api/free 的 sources + last_refresh）：只在需要时拉一次，
 // 手动刷新后置空，下次渲染重取。

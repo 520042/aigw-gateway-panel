@@ -113,7 +113,16 @@ code{font-family:var(--mono);font-size:11.5px;color:var(--accent)}
 .srcname{font-weight:650;font-size:13.5px;line-height:1.35}
 .srcname .mono{font-weight:400}
 .srcmeta{display:flex;gap:6px;flex-wrap:wrap}
-.srccard .btn{margin-top:auto;align-self:flex-start}
+.srccard .row{margin-top:auto}
+.srccard .btn{align-self:flex-start}
+
+/* 抽屉内逐模型开关清单 */
+.mlist{max-height:240px;overflow:auto;margin:8px 0 4px;border:1px solid rgba(255,255,255,.08);
+  border-radius:10px;padding:4px 8px;background:rgba(0,0,0,.14)}
+.mrow{display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.mrow:last-child{border-bottom:none}
+.mrow .mono{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mrow .btn{flex:0 0 auto}
 
 /* 弹窗（抽屉复用） */
 .modal-mask{position:fixed;inset:0;background:rgba(8,10,14,.62);backdrop-filter:blur(6px);
@@ -139,6 +148,8 @@ code{font-family:var(--mono);font-size:11.5px;color:var(--accent)}
 .note a{color:var(--accent)}
 .oknote{background:var(--ok-soft);border-color:rgba(63,189,119,.3)}
 .errnote{background:var(--err-soft);border-color:rgba(240,106,106,.3)}
+/* note 内的行内告警（备份 checkpoint 失败 / 恢复跳过文件）：不加这条 .warn 会被当成普通正文 */
+.note .warn{color:var(--warn)}
 .usercode{font-size:16px;font-weight:700;color:var(--accent);padding:8px 0}
 select.q{appearance:none;-webkit-appearance:none;background:rgba(255,255,255,.06)}
 h3{margin:2px 0 12px;font-size:14px;font-weight:650}

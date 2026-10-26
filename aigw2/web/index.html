@@ -3,8 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- 静态资源版本不在这里手写：服务端统一发 Cache-Control: no-cache，
+     app.js 自己的 BUILD 常量才是唯一版本号（改前端只需 cargo build）。 -->
 <title>aigw v2 · 控制台</title>
-<link rel="stylesheet" href="/style.css?v=20261019g">
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div class="wrap">
@@ -30,6 +32,6 @@
     <div id="view"></div>
   </main>
 </div>
-<script src="/app.js?v=20261019g"></script>
+<script src="/app.js"></script>
 </body>
 </html>
