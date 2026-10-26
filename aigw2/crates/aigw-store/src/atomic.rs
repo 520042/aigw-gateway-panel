@@ -143,6 +143,26 @@ pub(crate) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
 
 /// 原子写入 JSON。序列化失败返回 Err —— 旧版写 `"[]"`，对对象型结构（如 flags.json）
 /// 下次 open 解析失败会被当成损坏文件重置，属于用一个新 bug 掩盖旧 bug。
+/// 落盘串行化闸门（进程内，全 crate 共用）。
+///
+/// 各 Store 的写方法现在是「改内存 → 取快照 → 放锁 → 落盘」，内存锁保护内存，
+/// 但这把闸门保护**磁盘写序**：两个并发写各自 clone 快照后放锁，完全可能后开始的
+/// 先写完，磁盘上就留下较旧的那份（内存对、重启后回退）。旧实现靠「持内存锁落盘」
+/// 隐式排序，代价是所有读请求陪着等 —— 拆开之后两边都拿到了。
+///
+/// 用 OnceLock 而不是 `static MUTEX: Mutex<()> = Mutex::new(())` 是为了兼容
+/// 老版本 rustc（后者要求 const Mutex::new，1.63+ 才有）。
+fn save_gate() -> &'static std::sync::Mutex<()> {
+    static G: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    G.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// 在写闸门内执行一次落盘（闸门中毒不影响后续写入）。
+pub(crate) fn with_save_gate<R>(f: impl FnOnce() -> R) -> R {
+    let _g = save_gate().lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

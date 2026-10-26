@@ -34,7 +34,7 @@ pub struct CustomApi {
     pub base_url: String,
     /// 用户自己的 API Key。
     ///
-    /// 内存里是**明文**（中继要拼 Authorization）；落盘时由 `save_snapshot` 换成
+    /// 内存里是**明文**（中继要拼 Authorization）；落盘时由 `persist_now` 换成
     /// `dpapi:<b64>`，装载时再解开 —— 与账号池同一套（见 `crate::secret`）。
     pub api_key: String,
     /// 密文解不开（换过机器 / 换过 Windows 用户 / 文件被改过）。
@@ -158,22 +158,28 @@ impl CustomStore {
     ///
     /// ★ **调用方必须已经释放 `inner` 锁**：DPAPI + fsync 是毫秒到几十毫秒的阻塞操作，
     ///   持锁做会让面板、`all_specs()`、转发时解析 Key 这些读路径一起排队。
-    fn save_snapshot(&self, rows: &[CustomApi]) {
-        let Some(p) = &self.path else { return };
-        // 走写闸门：加密 + 落盘都在闸门内，保证磁盘上的顺序与内存更新顺序一致。
+
+    /// 在写闸门内取快照并落盘（各写方法的统一出口）。
+    ///
+    /// ★ 闸门必须同时盖住「取快照」与「写盘」：只盖写盘时，A 取到旧快照后被抢占、
+    ///   B 取新快照先写完，A 再把旧快照写回去 —— 磁盘留下旧数据（内存对、重启后回退）。
+    fn persist_now(&self) {
         with_save_gate(|| {
-            let disk: Vec<CustomApi> = rows
-                .iter()
-                .map(|c| {
-                    let mut d = c.clone();
-                    if !d.key_broken {
-                        d.api_key = crate::secret::wrap_with(&d.api_key, SECRET_PURPOSE);
-                    }
-                    d
-                })
-                .collect();
-            if let Err(e) = crate::atomic::write_json_atomic(p, &disk) {
-                tracing::warn!("custom 落盘失败（{}）：{e}", p.display());
+            let snapshot = self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(p) = &self.path {
+                let disk: Vec<CustomApi> = snapshot
+                    .iter()
+                    .map(|c| {
+                        let mut d = c.clone();
+                        if !d.key_broken {
+                            d.api_key = crate::secret::wrap_with(&d.api_key, SECRET_PURPOSE);
+                        }
+                        d
+                    })
+                    .collect();
+                if let Err(e) = crate::atomic::write_json_atomic(p, &disk) {
+                    tracing::warn!("custom 落盘失败（{}）：{e}", p.display());
+                }
             }
         });
     }
@@ -241,9 +247,8 @@ impl CustomStore {
             enabled: true,
         };
         rows.push(c.clone());
-        let snapshot = rows.clone();
         drop(rows);
-        self.save_snapshot(&snapshot);
+        self.persist_now();
         Ok(c)
     }
 
@@ -254,9 +259,8 @@ impl CustomStore {
             return Err("自定义 API 不存在".into());
         };
         c.models = models;
-        let snapshot = rows.clone();
         drop(rows);
-        self.save_snapshot(&snapshot);
+        self.persist_now();
         Ok(())
     }
 
@@ -278,9 +282,8 @@ impl CustomStore {
         models.truncate(MAX_CUSTOM_MODELS);
         c.models = models;
         c.models_pinned = pinned;
-        let snapshot = rows.clone();
         drop(rows);
-        self.save_snapshot(&snapshot);
+        self.persist_now();
         Ok(())
     }
 
@@ -325,9 +328,8 @@ impl CustomStore {
             c.key_broken = false;
         }
         let clone = c.clone();
-        let snapshot = rows.clone();
         drop(rows);
-        self.save_snapshot(&snapshot);
+        self.persist_now();
         Ok(clone)
     }
 
@@ -344,9 +346,8 @@ impl CustomStore {
             }
         }
         if hit {
-            let snapshot = rows.clone();
             drop(rows);
-            self.save_snapshot(&snapshot);
+            self.persist_now();
         }
         hit
     }
@@ -357,9 +358,8 @@ impl CustomStore {
         rows.retain(|c| c.id != id);
         let changed = rows.len() != before;
         if changed {
-            let snapshot = rows.clone();
             drop(rows);
-            self.save_snapshot(&snapshot);
+            self.persist_now();
         }
         changed
     }

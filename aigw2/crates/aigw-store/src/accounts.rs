@@ -181,12 +181,7 @@ impl AccountStore {
         };
         if !plain.is_empty() {
             let encrypted = crate::secret::wrap(&plain[0]) != plain[0];
-            let snapshot = store
-                .inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            store.save_snapshot(&snapshot);
+            store.persist_now();
             if encrypted {
                 tracing::info!("accounts：启动时把 {} 个明文凭据换成 DPAPI 密文落盘", plain.len());
             } else {
@@ -215,22 +210,17 @@ impl AccountStore {
         }
     }
 
-    /// 原子落盘（tmp + fsync + rename）：进程中途崩溃不会留下半截 accounts.json。
-    ///
-    /// ★ **调用方必须已经释放 `inner` 锁**。落盘的每一步都是阻塞的：
-    ///   `wrapped()` 逐条调 DPAPI（每次都是一次系统调用），`write_json_atomic`
-    ///   还要 `sync_all()` 等磁盘确认。旧实现持锁做完这些，意味着「一个账号重新登录」
-    ///   期间**所有**转发请求都卡在 `platform_secret()` 的读锁上 —— 而那正是
-    ///   `/v1/chat/completions` 的必经之路。
-    ///
-    /// 内存态在放锁之前就已更新，所以并发读者看到的永远是最新数据；落盘只是一份
-    /// 持久化快照，晚一点写不影响可用性（进程崩了也只是回到上一次成功写入）。
-    fn save_snapshot(&self, accs: &[Account]) {
-        let Some(p) = &self.path else { return };
-        // 走写闸门：并发写的落盘顺序必须与内存更新顺序一致，否则磁盘上会留下旧快照。
-        with_save_gate(|| match crate::atomic::write_json_atomic(p, &wrapped(accs)) {
-            Ok(()) => {}
-            Err(e) => tracing::warn!("accounts 落盘失败（{}）：{e}", p.display()),
+
+
+    /// 在写闸门内取快照并落盘（各写方法的统一出口）。
+    fn persist_now(&self) {
+        with_save_gate(|| {
+            let snapshot = self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(p) = &self.path {
+                if let Err(e) = crate::atomic::write_json_atomic(p, &wrapped(&snapshot)) {
+                    tracing::warn!("accounts 落盘失败（{}）：{e}", p.display());
+                }
+            }
         });
     }
 
@@ -292,9 +282,8 @@ impl AccountStore {
             let clone = existing.clone();
             // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
             //   所有转发请求（platform_secret 读锁）一起卡住。
-            let snapshot = accs.clone();
             drop(accs);
-            self.save_snapshot(&snapshot);
+            self.persist_now();
             return (clone, true);
         }
         let a = Account {
@@ -314,9 +303,8 @@ impl AccountStore {
         accs.push(a.clone());
         // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
         //   所有转发请求（platform_secret 读锁）一起卡住。
-        let snapshot = accs.clone();
         drop(accs);
-        self.save_snapshot(&snapshot);
+        self.persist_now();
         (a, false)
     }
 
@@ -335,9 +323,8 @@ impl AccountStore {
             existing.unreadable = false;
             // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
             //   所有转发请求（platform_secret 读锁）一起卡住。
-            let snapshot = accs.clone();
             drop(accs);
-            self.save_snapshot(&snapshot);
+            self.persist_now();
             (true, changed)
         } else {
             (false, false)
@@ -353,9 +340,8 @@ impl AccountStore {
         if changed {
             // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
             //   所有转发请求（platform_secret 读锁）一起卡住。
-            let snapshot = accs.clone();
             drop(accs);
-            self.save_snapshot(&snapshot);
+            self.persist_now();
         }
         changed
     }
@@ -394,9 +380,8 @@ impl AccountStore {
             a.name = name.to_string();
             // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
             //   所有转发请求（platform_secret 读锁）一起卡住。
-            let snapshot = accs.clone();
             drop(accs);
-            self.save_snapshot(&snapshot);
+            self.persist_now();
             return (true, String::new(), true);
         }
         (false, "账号不存在".into(), false)
@@ -410,9 +395,8 @@ impl AccountStore {
             a.status = if enabled { "active".into() } else { "disabled".into() };
             // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
             //   所有转发请求（platform_secret 读锁）一起卡住。
-            let snapshot = accs.clone();
             drop(accs);
-            self.save_snapshot(&snapshot);
+            self.persist_now();
             true
         } else {
             false

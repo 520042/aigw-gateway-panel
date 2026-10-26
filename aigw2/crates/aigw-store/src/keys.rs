@@ -25,7 +25,7 @@ pub struct AccessKey {
     pub id: String,
     /// 备注名（「给小明」「自动化脚本」）。
     pub name: String,
-    /// Key 本体。内存明文，落盘前由 `save_locked` 换成 `dpapi:` 密文。
+    /// Key 本体。内存明文，落盘前由 `save_snapshot` 换成 `dpapi:` 密文。
     pub secret: String,
     /// 密文解不开（换机器 / 换 Windows 用户 / 文件被改过）。
     ///
@@ -163,7 +163,22 @@ impl KeyStore {
     /// 落盘（加密后原子写）。返回「真的写成功了吗」——
     /// ★ 调用方要把这个布尔值一路报到面板上：写失败却回 persisted:true，
     ///   用户会以为已经存住了，重启后 key 全丢才发现，那时只能重建。
-    fn save_locked(&self, rows: &[AccessKey]) -> bool {
+    /// ★ **调用方必须已经释放 `inner` 锁**（落盘里有逐条 DPAPI 加密 + fsync）。
+    ///   磁盘写序由 `atomic::with_save_gate` 串行，不依赖内存锁。
+    /// 在当前写闸门内取快照并落盘。
+    ///
+    /// ★ 闸门必须同时覆盖「取快照」和「写盘」两步。只盖写盘是不够的：
+    ///   A 在锁内取到快照 v1 之后被抢占，B 取到 v2 并先写完，A 随后把 v1 写回去 ——
+    ///   磁盘上就留下旧数据（内存对、重启后回退）。
+    fn persist_snapshot(&self) -> bool {
+        crate::atomic::with_save_gate(|| {
+            let snapshot = self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            self.write_snapshot(&snapshot)
+        })
+    }
+
+    /// 纯写入（不再取闸门；调用方负责串行）。
+    fn write_snapshot(&self, rows: &[AccessKey]) -> bool {
         let Some(p) = &self.path else { return false };
         // 落盘一律加密：内存里是明文，但盘上不该有明文 key。
         let wrapped: Vec<AccessKey> = rows
@@ -200,7 +215,11 @@ impl KeyStore {
         {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             g.push(row.clone());
-            self.save_locked(&g);
+        }
+        // 落盘失败只在这里记一笔：add 的契约是「返回新 key」，不返回持久化状态；
+        // 面板侧要判持久化结果时走 `persist()`。
+        if !self.persist_snapshot() {
+            tracing::warn!("新建 key 已进内存但没能落盘，重启后会丢失");
         }
         (row, secret)
     }
@@ -240,7 +259,10 @@ impl KeyStore {
             None
         };
         let out = row.clone();
-        self.save_locked(&g);
+        // ★ 快照必须在闸门内取：否则「取快照」与「写盘」之间会出现
+        //   「A 取旧快照 → B 取新快照 → B 先写 → A 后写覆盖」的窗口。
+        drop(g);
+        self.persist_snapshot();
         Some((out, fresh))
     }
 
@@ -251,7 +273,8 @@ impl KeyStore {
         g.retain(|r| r.id != id);
         let hit = g.len() != before;
         if hit {
-            self.save_locked(&g);
+            drop(g);
+            self.persist_snapshot();
         }
         hit
     }
@@ -296,12 +319,7 @@ impl KeyStore {
     /// 立刻按当前内存态重写 keys.json（add/update/remove 已经各自落过盘，
     /// 这里是给调用方一个「确实写成了没有」的布尔答复）。
     pub fn persist(&self) -> bool {
-        let rows = self
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        self.save_locked(&rows)
+        self.persist_snapshot()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -558,7 +576,7 @@ mod tests {
     }
 
     /// ★ 回归：写盘失败不能回报 persisted=true。
-    /// 旧实现 save_locked 只 warn 一句，persist() 照样返回 true —— 面板上显示
+    /// 旧实现落盘只 warn 一句，persist() 照样返回 true —— 面板上显示
     /// 「已创建」，用户以为存住了，重启后这把 key 就不见了。
     #[test]
     fn persist_reports_failure_when_the_file_cannot_be_written() {
@@ -587,4 +605,54 @@ mod tests {
         assert!(st.persist());
         assert!(dir.path().join("keys.json").exists());
     }
+    /// 并发改名后，磁盘上的内容必须等于内存最终状态。
+    ///
+    /// keys.json 与 accounts.json 共用同一个写闸门（`atomic::with_save_gate`），
+    /// 但这条用例单独加一份：将来若有人给 KeyStore 换成别的落盘路径，这条会立刻红，
+    /// 而 accounts 的用例不会。
+    #[test]
+    fn key_update_is_visible_on_disk_immediately() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = KeyStore::open(tmp.path());
+        let (k, _) = st.add("a", vec![], "");
+        st.update(&k.id, Some("renamed"), None, None, None, false);
+        let back = KeyStore::open(tmp.path());
+        let names: Vec<String> = back.rows().into_iter().map(|r| r.name).collect();
+        assert_eq!(names, vec!["renamed".to_string()], "单次改名必须立即落盘");
+    }
+
+    #[test]
+    fn concurrent_key_updates_never_leave_an_older_snapshot_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = std::sync::Arc::new(KeyStore::open(tmp.path()));
+
+        let ids: Vec<String> = (0..4)
+            .map(|i| st.add(&format!("k{i}"), vec![], "").0.id)
+            .collect();
+
+        let mut handles = Vec::new();
+        for round in 0..6 {
+            for id in &ids {
+                let s = st.clone();
+                let id = id.clone();
+                handles.push(std::thread::spawn(move || {
+                    s.update(&id, Some(&format!("n{round}")), None, None, None, false);
+                }));
+            }
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mem: std::collections::HashMap<String, String> =
+            st.rows().into_iter().map(|r| (r.id, r.name)).collect();
+
+        let reloaded = KeyStore::open(tmp.path());
+        let disk: std::collections::HashMap<String, String> =
+            reloaded.rows().into_iter().map(|r| (r.id, r.name)).collect();
+        for (id, name) in &mem {
+            assert_eq!(disk.get(id), Some(name), "磁盘留下了旧快照（{id}）");
+        }
+    }
+
 }
