@@ -193,3 +193,11 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
 - **前端登录抽屉表驱动**：`srcDrawer` 开头的 17 行 `p.id === '...'`（25 个 id）收成 `LOGIN_UI` 表 + 反查表；分组例外收成 `GROUP_OVERRIDE`。交叉校验发现 `codebuddy`/`web-lobster` 无对应 spec（分别是 wb-gateway 多域承载、已并入 lobster），已在表内写明。
 - 前端改完必须 `cargo build -p aigw`（rust-embed）+ 刷新；BUILD 记 `v20261026b`。
 - 测试基线仍 **556**（本轮无新增用例，改的是行为与结构）。
+
+## 2026-10-26 第五轮（lib.rs 继续拆分）
+- **接口前导收敛**：`parse_action_body` / `bad_request` / `action_of` / `required_str` 四个 helper 替掉 10 个分发器里逐字重复的 10 处解析前导、9 处 action 提取、7 处缺 id 校验（旧代码 action 提取有的 trim 有的不 trim）。
+- **路由优先级收敛**：`AppState::pick_preferred(preferred, usable, pick)` 替掉 `spec_for_model` 里 6 处「先 preferred 再 usable」的重复循环。
+- **★ 新模块 `stream.rs`（820 行）**：AnthState / RespState / StreamToolCall / anthropic_stream / responses_stream。
+- 模块规模：lib 15198（生产 7619 + 测试 7579）/ stream 820 / dialect 949 / net 273 / ratelimit 324 / livecfg 235。
+- 测试基线 **560**。
+- ★ 坑：`git show | Out-File` 写出 UTF-16 不可用，取历史文件要用 node `child_process` 直接收 stdout；切代码区间前先核对「上边界是否真的是目标函数起点」。
