@@ -481,6 +481,29 @@ impl AppState {
     /// （kilo 的 18 个 free 模型里有 15 个也被 api-openrouter 声明），
     /// 旧实现取「第一个 enabled」，会稳定选中没有 Key 的 openrouter，
     /// 用户拿到的是「平台 api-openrouter 无可用账号」。
+    /// 在「真正能聊天」的平台里先找，找不到才回落到「凭据可达」的平台。
+    ///
+    /// 这个双层顺序在 `spec_for_model` 里重复了六次（静态清单精确 / 整表缓存 /
+    /// 每平台 live 缓存 / 别名归一化 …）。每处都各写一遍 `preferred.iter().find()`
+    /// 加一段 almost-identical 的 `usable.iter().find()`，改口径时极易漏改其中一处，
+    /// 表现为「某些模型永远绕开 preferred」。抽出来后只有一个地方定义优先级。
+    ///
+    /// `pick` 收到的是候选切片，返回命中的平台引用。
+    fn pick_preferred<'a, F>(
+        preferred: &[&'a ProviderSpec],
+        usable: &[&'a ProviderSpec],
+        pick: F,
+    ) -> Option<&'a ProviderSpec>
+    where
+        F: Fn(&ProviderSpec) -> bool,
+    {
+        preferred
+            .iter()
+            .copied()
+            .find(|s| pick(s))
+            .or_else(|| usable.iter().copied().find(|s| pick(s)))
+    }
+
     fn spec_for_model(&self, model: &str) -> Option<ProviderSpec> {
         // 面板上被停用的模型：连 `模型@平台` 显式指定也拒绝（与聚合清单保持一致）
         if self.flags.is_model_disabled(model) {
@@ -517,33 +540,25 @@ impl AppState {
                 model = bare;
             }
         }
-        if let Some(s) = preferred
-            .iter()
-            .find(|s| s.models.iter().any(|m| m == model))
-        {
-            return Some((*s).clone());
-        }
-        if let Some(s) = usable.iter().find(|s| s.models.iter().any(|m| m == model)) {
-            return Some((*s).clone());
+        if let Some(s) = Self::pick_preferred(&preferred, &usable, |s| {
+            s.models.iter().any(|m| m == model)
+        }) {
+            return Some(s.clone());
         }
         {
             let g = self.models_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((_, index, _)) = g.as_ref() {
-                for (sid, m) in index.iter() {
-                    if m != model {
-                        continue;
-                    }
-                    if let Some(s) = preferred.iter().find(|s| &s.id == sid) {
-                        return Some((*s).clone());
-                    }
-                }
-                for (sid, m) in index.iter() {
-                    if m != model {
-                        continue;
-                    }
-                    if let Some(s) = usable.iter().find(|s| &s.id == sid) {
-                        return Some((*s).clone());
-                    }
+                // 先把命中该模型的平台 id 全收集起来，再统一走优先级判定：
+                // 旧实现是「先扫一遍 preferred、再扫一遍 usable」，两个循环体内容相同。
+                let sids: Vec<&String> = index
+                    .iter()
+                    .filter(|(_, m)| m == model)
+                    .map(|(sid, _)| sid)
+                    .collect();
+                if let Some(s) = Self::pick_preferred(&preferred, &usable, |s| {
+                    sids.iter().any(|sid| **sid == s.id)
+                }) {
+                    return Some(s.clone());
                 }
             }
         }
@@ -554,21 +569,15 @@ impl AppState {
         // 的模型全部落到「未知模型 503」——而它们明明在 providers 里声明得好好的。
         {
             let g = self.models_cache_per.lock().unwrap_or_else(|e| e.into_inner());
-            for (sid, (_, ids, _)) in g.iter() {
-                if !ids.iter().any(|m| m == model) {
-                    continue;
-                }
-                if let Some(s) = preferred.iter().find(|s| &s.id == sid) {
-                    return Some((*s).clone());
-                }
-            }
-            for (sid, (_, ids, _)) in g.iter() {
-                if !ids.iter().any(|m| m == model) {
-                    continue;
-                }
-                if let Some(s) = usable.iter().find(|s| &s.id == sid) {
-                    return Some((*s).clone());
-                }
+            let sids: Vec<String> = g
+                .iter()
+                .filter(|(_, (_, ids, _))| ids.iter().any(|m| m == model))
+                .map(|(sid, _)| sid.clone())
+                .collect();
+            if let Some(s) = Self::pick_preferred(&preferred, &usable, |s| {
+                sids.iter().any(|sid| *sid == s.id)
+            }) {
+                return Some(s.clone());
             }
         }
         // ④ 别名归一化匹配：客户端写官方全名（`claude-sonnet-4-5-20250929`）
@@ -581,11 +590,8 @@ impl AppState {
                 .iter()
                 .any(|m| norm_model_id(m) == want && !self.flags.is_model_disabled(m))
         };
-        if let Some(s) = preferred.iter().find(|s| alias_hit(s)) {
-            return Some((*s).clone());
-        }
-        if let Some(s) = usable.iter().find(|s| alias_hit(s)) {
-            return Some((*s).clone());
+        if let Some(s) = Self::pick_preferred(&preferred, &usable, alias_hit) {
+            return Some(s.clone());
         }
         {
             let g = self.models_cache_per.lock().unwrap_or_else(|e| e.into_inner());
@@ -593,21 +599,15 @@ impl AppState {
                 ids.iter()
                     .any(|m| norm_model_id(m) == want && !self.flags.is_model_disabled(m))
             };
-            for (sid, (_, ids, _)) in g.iter() {
-                if !live_hit(ids) {
-                    continue;
-                }
-                if let Some(s) = preferred.iter().find(|s| &s.id == sid) {
-                    return Some((*s).clone());
-                }
-            }
-            for (sid, (_, ids, _)) in g.iter() {
-                if !live_hit(ids) {
-                    continue;
-                }
-                if let Some(s) = usable.iter().find(|s| &s.id == sid) {
-                    return Some((*s).clone());
-                }
+            let sids: Vec<String> = g
+                .iter()
+                .filter(|(_, (_, ids, _))| live_hit(ids))
+                .map(|(sid, _)| sid.clone())
+                .collect();
+            if let Some(s) = Self::pick_preferred(&preferred, &usable, |s| {
+                sids.iter().any(|sid| *sid == s.id)
+            }) {
+                return Some(s.clone());
             }
         }
 
@@ -9054,6 +9054,54 @@ stream_dialect = "sse_delta"
         assert!(body.contains("models_policy"), "body={body}");
         // 仍然 ok=true：一个写错的平台文件不该让整机健康检查变红。
         assert!(body.contains("\"ok\":true"), "body={body}");
+    }
+
+    #[test]
+    fn pick_preferred_prefers_usable_over_routable() {
+        // 同名模型常被多个平台声明：有凭据但地址是占位符的平台（web-lobster 类）
+        // 不该抢到名字 —— 用户会拿到 503「上游地址未配置」，而同一模型在别的
+        // 可用平台上本来能跑。这里锁死「先在 preferred 里找，找不到才回落 usable」。
+        let a = spec_toml(
+            r#"
+id = "only-routable"
+name = "A"
+enabled = true
+auth = "anon"
+base_url = "@placeholder"
+format = "openai"
+models = ["shared"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let b = spec_toml(
+            r#"
+id = "preferred-one"
+name = "B"
+enabled = true
+auth = "anon"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["shared"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let usable = [&a, &b];
+        let preferred = [&b];
+        let got = AppState::pick_preferred(&preferred, &usable, |s| {
+            s.models.iter().any(|m| m == "shared")
+        })
+        .expect("应能选中");
+        assert_eq!(got.id, "preferred-one");
+
+        // preferred 都命中不了时回落 usable（错误信息更具体）
+        let got2 = AppState::pick_preferred(&preferred, &usable, |s| s.id == "only-routable")
+            .expect("应回落到 usable");
+        assert_eq!(got2.id, "only-routable");
+
+        // 两边都不命中 = None（调用方据此走「未知模型」而不是静默兜底）
+        assert!(AppState::pick_preferred(&preferred, &usable, |s| s.id == "nope").is_none());
     }
 
     #[tokio::test]
