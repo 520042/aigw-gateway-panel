@@ -4624,6 +4624,35 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
     }
 }
 
+/// `/api/health` 里「扫数据目录」算出来的体积快照。
+///
+/// 全部在 `spawn_blocking` 里算好再回填，理由见 health 里的注释：这一块的每一步
+/// 都是阻塞 IO，而 health 是面板轮询与外部探活命中频率最高的端点。
+#[derive(Debug, Default, Clone)]
+struct DiskStats {
+    /// (字节, 文件数) —— 滚动日志
+    logs: (u64, usize),
+    /// (文件数, 字节) —— .bak-*/.bad-* 留档
+    archives: (usize, u64),
+    /// panel.db + -wal + -shm 占用
+    db_bytes: u64,
+}
+
+fn disk_stats_of(dd: &std::path::Path) -> Option<DiskStats> {
+    let (lb, lf) = aigw_store::rotlog::stats(dd);
+    let ar = aigw_store::archive::stats(dd);
+    let db_bytes: u64 = ["panel.db", "panel.db-wal", "panel.db-shm"]
+        .iter()
+        .filter_map(|n| std::fs::metadata(dd.join(n)).ok())
+        .map(|m| m.len())
+        .sum();
+    Some(DiskStats {
+        logs: (lb, lf),
+        archives: (ar.files, ar.bytes),
+        db_bytes,
+    })
+}
+
 async fn health(State(st): State<AppState>) -> Json<Value> {
     let skipped = st.skipped_specs.as_ref();
     // ok 只在服务本身能跑时为 true；被跳过的 spec 不影响 ok（否则一个写错的
@@ -4684,8 +4713,20 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
             "ok": failed.is_empty(),
         })
     };
-    if let Some(dd) = st.data_dir.as_deref() {
-        let (bytes, files) = aigw_store::rotlog::stats(dd);
+    // ★ 下面这一整块是**扫目录**：rotlog::stats 要 read_dir 并逐个 metadata，
+    //   archive::stats 同理，再加 panel.db/-wal/-shm 三次 metadata。旧实现直接跑在
+    //   async handler 里 —— 数据目录里积累几十个日志/留档文件后，每次 /api/health
+    //   都会阻塞一个 tokio worker；而 health 是面板轮询与外部探活的入口，频率最高。
+    //   统一丢进 spawn_blocking，失败就退化成一个空快照而不是让整条 health 变慢。
+    let dd_owned = st.data_dir.as_deref().map(|p| p.to_path_buf());
+    let disk_stats = match dd_owned {
+        Some(dd) => tokio::task::spawn_blocking(move || disk_stats_of(&dd))
+            .await
+            .unwrap_or_default(),
+        None => None,
+    };
+    if let Some(s) = disk_stats {
+        let (bytes, files) = s.logs;
         v["logs"] = json!({
             "files": files,
             "bytes": bytes,
@@ -4695,25 +4736,19 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
         // 留档文件（恢复备份的 .bak-*、坏档 .bad-*）现场：数量与占用。
         // 这些文件每恢复一次就多一组，只在启动时按族裁剪；这里报出来，
         // 「数据目录怎么越来越大」才查得到源头。
-        let ar = aigw_store::archive::stats(dd);
         v["archives"] = json!({
-            "files": ar.files,
-            "bytes": ar.bytes,
+            "files": s.archives.0,
+            "bytes": s.archives.1,
             "keep_per_family": aigw_store::archive::KEEP_PER_FAMILY,
         });
         // 用量台账现场：条数 + SQLite 文件占用（含 -wal/-shm：WAL 模式下新写入
         // 可能全在 -wal 里，只报主库会把「台账 1.8MB」显示成「4KB 空壳」）。
         // backend 报出来是因为 JSON 降级模式（SQLite 打不开）此前完全不可见，
         // 用户只会发现「重启后台账没了」。
-        let db_bytes: u64 = ["panel.db", "panel.db-wal", "panel.db-shm"]
-            .iter()
-            .filter_map(|n| std::fs::metadata(dd.join(n)).ok())
-            .map(|m| m.len())
-            .sum();
         v["db"] = json!({
             "backend": if st.store.is_db() { "sqlite" } else { "json" },
             "events": st.store.usage_count(),
-            "bytes": db_bytes,
+            "bytes": s.db_bytes,
         });
     }
     if !skipped.is_empty() {
