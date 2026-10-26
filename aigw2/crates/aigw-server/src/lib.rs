@@ -7823,6 +7823,16 @@ struct RespState {
     /// 旧实现完全忽略 delta.tool_calls —— Codex CLI 流式跑工具时收到的只有空文本，
     /// agent 循环直接卡死（它永远等不到要执行的动作）。
     tool_calls: Vec<StreamToolCall>,
+    /// 已累积的推理文本（上游 `delta.reasoning_content`）。
+    ///
+    /// Responses 协议里推理是独立 item：`{"type":"reasoning","summary":[...]}`，
+    /// 与正文 message item 分开输出。旧实现直接忽略这段增量，客户端（Codex / DSH
+    /// 这类会展示思考过程的）完全看不到推理。这里先攒起来，在 finish 时补成一个
+    /// reasoning item —— 与 function_call item 的处理方式一致，避免增量事件
+    /// 与 item 生命周期交错出错。
+    reasoning: String,
+    /// reasoning item 是否已发出（幂等：正文前冲一次，finish 兜底时不再重复）
+    reasoning_flushed: bool,
     pending: std::collections::VecDeque<Bytes>,
 }
 
@@ -7889,7 +7899,40 @@ impl RespState {
         );
     }
 
+    /// 把已攒下的推理补成一个 reasoning item（幂等，只出一次）。
+    ///
+    /// 为什么不在 finish 里统一补：正文 item 一旦以 output_index 0 开出去，再往前面
+    /// 插 reasoning 就会让客户端的 index 顺序错乱。所以必须在**第一条正文增量之前**
+    /// 冲出去；纯推理无正文的情况由 finish 兜底（同样走这个幂等方法）。
+    fn flush_reasoning(&mut self) {
+        if self.reasoning.trim().is_empty() || self.reasoning_flushed {
+            return;
+        }
+        self.ensure_started();
+        self.reasoning_flushed = true;
+        let rid = format!("rs_{}", nanos_hex());
+        self.event(
+            "response.output_item.added",
+            json!({"output_index": 0, "item": {
+                "id": rid,
+                "type": "reasoning",
+                "status": "in_progress",
+                "summary": [],
+            }}),
+        );
+        self.event(
+            "response.output_item.done",
+            json!({"output_index": 0, "item": {
+                "id": rid,
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{"type": "summary_text", "text": self.reasoning.clone()}],
+            }}),
+        );
+    }
+
     fn delta(&mut self, text: &str) {
+        self.flush_reasoning();
         self.ensure_item();
         self.out_text.push_str(text);
         self.event(
@@ -7935,6 +7978,10 @@ impl RespState {
             return;
         }
         let has_tools = self.tool_calls.iter().any(|c| !c.name.is_empty());
+        // ★ 推理先出：Responses 里推理是独立 item（type=reasoning），排在正文之前。
+        //   上游正文没来时也要先 ensure_started，否则响应流里第一个事件是 output_item
+        //   而没有 response.created，客户端会当作协议错误。
+        self.flush_reasoning();
         // 纯工具调用（没有正文）时不能凭空造一个空 message item：
         // 客户端会把空 assistant 消息当成最终答案，直接结束回合。
         if !has_tools || !self.out_text.is_empty() {
@@ -7942,11 +7989,12 @@ impl RespState {
         }
         let text = self.out_text.clone();
         if self.item_open {
+            let base_idx = usize::from(!self.reasoning.trim().is_empty());
             self.event(
                 "response.output_text.done",
                 json!({
                     "item_id": self.item_id,
-                    "output_index": 0,
+                    "output_index": base_idx,
                     "content_index": 0,
                     "text": text,
                 }),
@@ -8049,6 +8097,17 @@ impl RespState {
                         .and_then(|a| a.first());
                     if let Some(f) = first {
                         let delta = f.get("delta");
+                        // 推理增量先攒着，finish 时补成独立的 reasoning item（见字段注释）
+                        if let Some(r) = delta
+                            .and_then(|d| {
+                                d.get("reasoning_content").or_else(|| d.get("reasoning"))
+                            })
+                            .and_then(|c| c.as_str())
+                        {
+                            if !r.is_empty() {
+                                self.reasoning.push_str(r);
+                            }
+                        }
                         if let Some(text) = delta
                             .and_then(|d| d.get("content"))
                             .and_then(|c| c.as_str())
@@ -8096,6 +8155,8 @@ fn responses_stream(
         closed: false,
         out_text: String::new(),
         tool_calls: Vec::new(),
+        reasoning: String::new(),
+        reasoning_flushed: false,
         pending: std::collections::VecDeque::new(),
     };
     Box::pin(futures_util::stream::unfold(state, |mut s| async move {
@@ -15580,6 +15641,58 @@ stream_dialect = "sse_delta"
         assert_eq!(items[0]["call_id"], "call_9");
         assert_eq!(items[0]["name"], "shell");
         assert_eq!(items[0]["arguments"], "{\"command\":\"ls\"}");
+    }
+
+    #[tokio::test]
+    async fn responses_stream_emits_reasoning_item() {
+        // Responses 协议里推理是独立 item（type=reasoning），与正文 message item 并列。
+        // 旧实现丢掉 reasoning_content，开 thinking 的客户端看不到任何推理。
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先推理\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"答案\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let base = spawn_mock(Box::leak(sse.to_string().into_boxed_str()), "text/event-stream").await;
+        let dir = tempfile::tempdir().unwrap();
+        let app = build_app(AppState::new(
+            vec![spec_for(&base)],
+            Arc::new(Store::open(dir.path())),
+            Pool::new(),
+            Arc::new(OutClient::new()),
+            Arc::new(AccountStore::empty()),
+            Arc::new(CustomStore::empty()),
+            Arc::new(FreeStore::empty()),
+        ));
+        let res = app
+            .oneshot(
+                Request::post("/v1/responses")
+                    .header("host", "127.0.0.1:8800")
+                    .body(Body::from(
+                        r#"{"model":"mock-1","stream":true,"input":"hi"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_string(res).await;
+        assert!(body.contains("\"type\":\"reasoning\""), "缺少 reasoning item：{body}");
+        assert!(body.contains("先推理"), "推理内容被丢弃：{body}");
+        assert!(body.contains("答案"), "正文被丢弃：{body}");
+        // reasoning 必须在正文增量之前出现（先想再说）。
+        // 注意不能拿 "type":"message" 当正文锚点：response.created 里的 output 是空数组，
+        // 但 content_part.added 等事件本身就带 message 字样，位置不唯一。
+        let i_reason = body.find("\"type\":\"reasoning\"").expect("无 reasoning");
+        let i_text = body
+            .find("response.output_text.delta")
+            .expect("无 output_text.delta");
+        assert!(i_reason < i_text, "reasoning 应排在正文之前：{body}");
+        // 正文 item 的 output_index 应顺延到 1（0 被 reasoning 占了）
+        assert!(
+            body.contains("\"output_index\":1"),
+            "正文 output_index 未顺延：{body}"
+        );
     }
 
     #[tokio::test]
