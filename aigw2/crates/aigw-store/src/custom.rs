@@ -34,7 +34,7 @@ pub struct CustomApi {
     pub base_url: String,
     /// 用户自己的 API Key。
     ///
-    /// 内存里是**明文**（中继要拼 Authorization）；落盘时由 `save_locked` 换成
+    /// 内存里是**明文**（中继要拼 Authorization）；落盘时由 `save_snapshot` 换成
     /// `dpapi:<b64>`，装载时再解开 —— 与账号池同一套（见 `crate::secret`）。
     pub api_key: String,
     /// 密文解不开（换过机器 / 换过 Windows 用户 / 文件被改过）。
@@ -146,7 +146,11 @@ impl CustomStore {
     ///
     /// 内存里是明文、磁盘上是 `dpapi:`。解不开的条目（`key_broken`）**原样保留密文**：
     /// 既不二次加密（见 `secret::wrap_with` 的幂等）也不清空（否则用户只能靠自己记得重填）。
-    fn save_locked(&self, rows: &[CustomApi]) {
+    /// 落盘：逐条 DPAPI 加密（每条一次系统调用）+ 写临时文件 + fsync + rename。
+    ///
+    /// ★ **调用方必须已经释放 `inner` 锁**：DPAPI + fsync 是毫秒到几十毫秒的阻塞操作，
+    ///   持锁做会让面板、`all_specs()`、转发时解析 Key 这些读路径一起排队。
+    fn save_snapshot(&self, rows: &[CustomApi]) {
         if let Some(p) = &self.path {
             let disk: Vec<CustomApi> = rows
                 .iter()
@@ -227,7 +231,9 @@ impl CustomStore {
             enabled: true,
         };
         rows.push(c.clone());
-        self.save_locked(&rows);
+        let snapshot = rows.clone();
+        drop(rows);
+        self.save_snapshot(&snapshot);
         Ok(c)
     }
 
@@ -238,7 +244,9 @@ impl CustomStore {
             return Err("自定义 API 不存在".into());
         };
         c.models = models;
-        self.save_locked(&rows);
+        let snapshot = rows.clone();
+        drop(rows);
+        self.save_snapshot(&snapshot);
         Ok(())
     }
 
@@ -260,7 +268,9 @@ impl CustomStore {
         models.truncate(MAX_CUSTOM_MODELS);
         c.models = models;
         c.models_pinned = pinned;
-        self.save_locked(&rows);
+        let snapshot = rows.clone();
+        drop(rows);
+        self.save_snapshot(&snapshot);
         Ok(())
     }
 
@@ -305,7 +315,9 @@ impl CustomStore {
             c.key_broken = false;
         }
         let clone = c.clone();
-        self.save_locked(&rows);
+        let snapshot = rows.clone();
+        drop(rows);
+        self.save_snapshot(&snapshot);
         Ok(clone)
     }
 
@@ -322,7 +334,9 @@ impl CustomStore {
             }
         }
         if hit {
-            self.save_locked(&rows);
+            let snapshot = rows.clone();
+            drop(rows);
+            self.save_snapshot(&snapshot);
         }
         hit
     }
@@ -333,7 +347,9 @@ impl CustomStore {
         rows.retain(|c| c.id != id);
         let changed = rows.len() != before;
         if changed {
-            self.save_locked(&rows);
+            let snapshot = rows.clone();
+            drop(rows);
+            self.save_snapshot(&snapshot);
         }
         changed
     }
