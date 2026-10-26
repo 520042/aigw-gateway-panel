@@ -72,3 +72,43 @@ _refs/
 
 # Rust v2 编译产物
 aigw2/target/
+
+# ── aigw2 探针 / 临时产物（2026-10-26 清理）────────────────────────────
+# 本次整理把「必须入库的源码」与「跑测试留下的碎片」分开：
+# 源码（crates/**/*.rs、providers/*.toml、*.wasm、*.json 数据）全部入库，
+# 下面这些是探针脚本的输出与运行残留，只在本机有意义。
+_fuzz/
+_qr/
+_axtest/
+aigw2/_probe/
+aigw2/_run.out
+aigw2/_run.err
+aigw2/_cmd_out.txt
+aigw2/crates/*/src/*.bak
+aigw2/crates/*/src/._*
+
+# 仓库根目录的探针输出（截断的一批 .json/.txt/.png 与调试脚本）
+/_t*.json
+/_tmp_*
+/_ds_probe.json
+/_cmd_out.txt
+/_run.out
+/_run.err
+/_build_err.txt
+/_e2e*
+/probe-resp2.txt
+/aigw-probe-post2.json
+/loomy_qr.jpg
+/credits_shot.png
+/final2_overview.png
+/shot_*.png
+/_panel_now.png
+/r1.txt
+/r2.txt
+/p.json
+/p2.json
+/b1.json
+/b2.json
+/zen_dbg.ps1
+/zen_test.ps1
+/.tmp_case.json
