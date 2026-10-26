@@ -216,3 +216,9 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
 - ★ 修：两条分支的凭据自愈重试返回口径不一致（`return ret` 是 `Result<CoreOut, CoreErr>`，本层要三元组）。统一成「只有成功才返回，失败落回原错误分类」。
 - ★ 坑：改动本仓库 `.rs` 必须按**行数组 splice**；多行 `String.replace` 在 CRLF 下静默不命中，而且很容易多删/少删一个 `}`。
 - 测试基线 **560**。
+
+## 2026-10-26 第八轮（store 锁 / auth 抽取）
+- **AccountsStore 落盘移出互斥锁**：`save_locked` → `save_snapshot`（要求调用方已放锁），7 处写方法统一成「改内存 → clone 快照 → drop 锁 → 落盘」。此前「一个账号重新登录」期间所有 `/v1` 转发都卡在 `platform_secret()` 的读锁上（DPAPI 逐条加密 + fsync 都在锁内）。
+- **`callback_warning`**：跳转登录的端口体检抽成纯函数 + 1 条用例。
+- ★ 教训：`custom.rs` 用批量 `splice` 改 6 处调用把文件写坏，只能 `git checkout` 回滚。**同构改动超过 3 处时，先改一处编译验证，再批量**。
+- 测试基线 **561**。
