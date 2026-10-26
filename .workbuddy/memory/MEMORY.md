@@ -187,3 +187,9 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
   - 非流式 `openai_to_anthropic`/`openai_to_responses` 同步支持（dialect.rs）。
 - **整表模型缓存改 `Arc<Value>`**：命中路径锁内只做引用计数 +1，过滤/序列化全在锁外（原实现在锁内深拷贝整表）。
 - 测试基线 **354**（core 3 / crypto 21 / pool 33 / registry 13 / relay 153 / server 247 / store 82）。
+
+## 2026-10-26 第四轮（阻塞 IO / 前端表驱动）
+- **async handler 里的阻塞 IO 全部移出**：`/api/backup`、`/api/backup/export`（read_dir+读文件+WAL checkpoint）、`/api/health`（rotlog/archive 扫目录 + panel.db metadata）都改走 `spawn_blocking`。备份/恢复异常回 `ok:false` / 500，不再假装成功。
+- **前端登录抽屉表驱动**：`srcDrawer` 开头的 17 行 `p.id === '...'`（25 个 id）收成 `LOGIN_UI` 表 + 反查表；分组例外收成 `GROUP_OVERRIDE`。交叉校验发现 `codebuddy`/`web-lobster` 无对应 spec（分别是 wb-gateway 多域承载、已并入 lobster），已在表内写明。
+- 前端改完必须 `cargo build -p aigw`（rust-embed）+ 刷新；BUILD 记 `v20261026b`。
+- 测试基线仍 **556**（本轮无新增用例，改的是行为与结构）。
