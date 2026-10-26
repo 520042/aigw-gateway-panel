@@ -159,6 +159,19 @@ pub fn is_loopback_host(host: &str) -> bool {
     }
 }
 
+/// URL 的 scheme 白名单：只认 http/https。
+///
+/// `host_of` 按第一个 `://` 切主机，挡不住 `javascript://evil.com/%0Aalert(1)`——
+/// 主机部分是完全合规的 evil.com，但整个串是可执行的 javascript: URL（浏览器先做
+/// 百分号解码，%0A 换行后 //evil.com/ 只是注释，alert(1) 照跑）。这种串一旦作为
+/// 公益站的 url 入库，就会经 login_url 流进前端的 <a href>，点一下「注册页」即在
+/// 面板源上执行任意 JS。所以入口处先钉死 scheme，不能只靠 host 检查兜底。
+
+pub fn scheme_ok(u: &str) -> bool {
+    let low = u.trim().to_ascii_lowercase();
+    low.starts_with("https://") || low.starts_with("http://")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
