@@ -253,3 +253,10 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
   - 纪律：`save_locked(&x)` → `persist_now()` 的机械替换**必然漏 drop**，逐处确认。
 - **前端 `modalShell(title, body)`**：全站 14 处弹窗同构（遮罩+标题+✕+内容区），已迁移 2 处（代理设置 / 网关信息），剩 5 处手写。
 - 测试基线 **564**。
+
+## 2026-10-26 第十三轮（前端弹窗统一）
+- **`modalShell(title, body, opts)` 覆盖全部弹窗**：手写 `<div class="modal-mask">` 从 8 处降到 1 处（只剩 modalShell 自身）。差异点收进 opts：`drawer` / `id` / `onMask` / `close` / `closable`。
+- 收益：关闭行为只有一处定义（过去漏写 `this.closest('.modal-mask').remove()` 会导致「点 ✕ 关不掉」）。
+- ★ 坑复现：一次改多处 + 行号 splice，前一处替换「未命中」会让后面全部错位 → 写坏文件。**逐处替换 + 每处 node --check** 才稳。
+- BUILD → `v20261026c`；前端改动后必须 `cargo build -p aigw`。
+- 测试基线 **564**。
