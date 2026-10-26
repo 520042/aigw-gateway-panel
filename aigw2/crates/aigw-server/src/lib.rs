@@ -27,14 +27,23 @@ use axum::{Json, Router};
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// ★ 2026-10-26（P3）：在线配置热更新（对齐 workbuddy2api internal/livecfg）。
 /// 声明在 lib 根部，供 AppState 引用。
 pub mod livecfg;
+pub mod net;
+pub mod ratelimit;
+
+// 门禁与出站判定用的纯函数（原 lib.rs 内联，已拆到 net.rs 并补单测）。
+#[allow(unused_imports)]
+pub use ratelimit::RateLimiter;
+pub use net::{
+    blocked_upstream_host, ct_eq, host_allowed, host_only, is_ip_literal, is_loopback_host,
+    origin_host, site_host, static_free_hosts, url_host,
+};
 
 /// 前端静态资源。`$CARGO_MANIFEST_DIR/../../web` = workspace 根的 `web/`。
 /// debug 构建默认动态读盘（改文件刷新即生效），release 构建内嵌进二进制。
@@ -916,163 +925,6 @@ fn free_to_spec(s: &aigw_store::FreeSite) -> ProviderSpec {
     }
 }
 
-/// Host 头取主机名：`127.0.0.1:8800` → `127.0.0.1`；`[::1]:8800` → `[::1]`。
-fn host_only(raw: &str) -> String {
-    let s = raw.trim();
-    if s.starts_with('[') {
-        return match s.find(']') {
-            Some(i) => s[..=i].to_string(),
-            None => s.to_string(),
-        };
-    }
-    match s.rfind(':') {
-        Some(i) if s[i + 1..].chars().all(|c| c.is_ascii_digit()) && !s[i + 1..].is_empty() => {
-            s[..i].to_string()
-        }
-        _ => s.to_string(),
-    }
-}
-
-/// `https://evil.example:8443/x` → `evil.example`；无法解析返回空串（按不通过处理）。
-fn origin_host(raw: &str) -> String {
-    let s = raw.trim();
-    let rest = match s.find("://") {
-        Some(i) => &s[i + 3..],
-        None => s,
-    };
-    let hostport = rest.split(['/', '?', '#']).next().unwrap_or("");
-    host_only(hostport)
-}
-
-/// IP 字面量判定（IPv4 / IPv6 / 带方括号的 IPv6）。域名一律返回 false。
-fn is_ip_literal(host: &str) -> bool {
-    let h = host.trim().trim_start_matches('[').trim_end_matches(']');
-    if h.is_empty() {
-        return false;
-    }
-    if h.parse::<std::net::Ipv4Addr>().is_ok() || h.parse::<std::net::Ipv6Addr>().is_ok() {
-        return true;
-    }
-    // 允许局域网常见写法之外不做任何模糊匹配：主机名一律视为域名
-    false
-}
-
-/// Host / Origin 主机名是否放行。
-///
-/// - 命中白名单（回环名 + 绑定地址）→ 放行；
-/// - 通配监听（0.0.0.0 / ::）时，**任意 IP 字面量**放行：局域网用
-///   `192.168.1.5:8800` 访问面板是正常用法；
-/// - 域名永不因通配而放行：DNS 重绑定的载荷一定是域名。
-fn host_allowed(st: &AppState, host: &str) -> bool {
-    if st.allow_hosts.iter().any(|h| ct_eq(h, host)) {
-        return true;
-    }
-    *st.allow_any_ip_host && is_ip_literal(host)
-}
-
-//// 出站目标是否属于「不该被本面板当上游」的地址。
-///
-/// 面板是本机单用户工具，但它有能力带着用户填的 Key 去请求任意地址。真正值得挡的不是
-/// 「用户自己填内网地址」——那往往是有意的（本机另一个网关、局域网内的 vLLM）；而是两类：
-/// 1. **云元数据端点**（169.254.169.254 / fd00:ec2::254 / metadata.google.internal 等）：
-///   一旦被填进来，上游响应里就是云主机的临时凭据，属典型 SSRF 提权。
-/// 2. **回环地址上的非预期端口**：本机 8800 是面板自己，用它当上游会形成自指回环。
-///
-/// 因此这里只做「元数据 + 面板自指」的硬拦截，回环与其它内网地址一律放行并在文档里
-/// 讲清楚取舍——一刀切封内网会把「接本机另一个 OpenAI 兼容网关」这种正常用法打死。
-pub fn blocked_upstream_host(host: &str) -> bool {
-    let h = host.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
-    if h.is_empty() {
-        return false;
-    }
-    // 云元数据：各家 IaaS 的链路本地地址与常见内网域名
-    const META: &[&str] = &[
-        "169.254.169.254",
-        "169.254.170.2",
-        "100.100.100.200",
-        "metadata.google.internal",
-        "metadata.goog",
-        "metadata.azure.com",
-        "fd00:ec2::254",
-    ];
-    if META.iter().any(|m| h == *m) {
-        return true;
-    }
-    false
-}
-
-/// 从 base_url / 代理 url 里取出主机名（去掉 scheme、端口、路径）。取不到返回空串。
-pub fn url_host(raw: &str) -> String {
-    origin_host(raw)
-}
-
-/// 「同一个站」判定用的 host 规范化：小写 + 去 `www.`（端口与路径 `url_host` 已去掉）。
-fn site_host(raw: &str) -> String {
-    let h = url_host(raw).trim().to_ascii_lowercase();
-    match h.strip_prefix("www.") {
-        Some(rest) => rest.to_string(),
-        None => h,
-    }
-}
-
-/// 内置接入源里公益站那一批的 host 集合（`providers/free-*.toml`）。
-///
-/// 为什么要它：公益站有两条来路 —— 编译进二进制的 `providers/free-*.toml`，与聚合页
-/// 动态刷新出来的条目（id 也叫 `free-*`，但它只是 host 的 slug）。同一个站同时出现在
-/// 两边时 id 并不相同（`free-agentrouter` vs `free-agentrouter-org`），
-/// `FreeStore::upsert_batch` 的**按 id 去重**根本拦不住 —— 面板上就是两张一模一样的
-/// 卡片，「共 N 站」也把同一个站算了两次。真实数据里 agentrouter.org 就这么重了一次。
-pub fn static_free_hosts(specs: &[ProviderSpec]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for s in specs {
-        if !s.id.starts_with("free-") {
-            continue;
-        }
-        // base_url 与 login_url 都算：有的站 base 在 api.x.com、注册页在 x.com。
-        for u in [s.base_url.as_str(), s.login_url.as_str()] {
-            let h = site_host(u);
-            if !h.is_empty() && !out.contains(&h) {
-                out.push(h);
-            }
-        }
-    }
-    out
-}
-
-/// 代理主机是否落在本机回环（localhost / ::1 / 127.0.0.0-8）。
-///
-/// 与前端 `isLocalProxy()` 的判定保持一致：只要不是回环，就必须由调用方显式确认
-/// （`confirm_nonlocal: true`）才允许保存 —— 出站代理能看到每一次转发的完整凭据，
-/// 它的危险程度高于任何单个上游。
-pub fn is_loopback_host(host: &str) -> bool {
-    let h = host
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
-    if h.is_empty() {
-        return false;
-    }
-    if h == "localhost" || h == "::1" {
-        return true;
-    }
-    match h.parse::<std::net::Ipv4Addr>() {
-        Ok(v4) => v4.is_loopback(),
-        Err(_) => false,
-    }
-}
-// 常量时间比较（令牌校验用，避免逐字节短路泄露长度/前缀）。
-fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
 
 fn forbidden(msg: &str) -> Response {
     (
@@ -1127,209 +979,6 @@ fn presented_token(req: &Request) -> Option<String> {
 
 /// 限流窗口：固定 60s。窗口内被拒的请求不计数（标准固定窗口语义）——
 /// 否则持续刷会让计数只增不减，客户端等到窗口滚动也解不开。
-const RATE_WINDOW: Duration = Duration::from_secs(60);
-
-/// 每 IP 计数桶的内存上限。真实场景只有几十个来源，这个上限只为防「来源地址极多
-/// 时 HashMap 无限增长」；超限时先清掉已过窗口的桶，仍超限就只按全局额度放行。
-const RATE_MAX_IP_BUCKETS: usize = 4096;
-
-#[derive(Clone, Copy)]
-struct RateSlot {
-    win: Instant,
-    count: u32,
-}
-
-/// 每分钟固定窗口限流：全局 + 每客户端 IP（`0` 表示该项不启用）。
-///
-/// 为什么需要：`/v1/*` 是唯一真的消耗上游额度的入口。此前只有「每账号 2 路在途、
-/// 等 15s 后 429」这一道闸 —— 那是**按账号的并发闸，不是速率闸**：单个客户端串行
-/// 发几千条小请求永远不会同时占用 3 路在途，却足以把某个账号打到上游限流（冷却 15
-/// 分钟），面板上表现为「所有平台突然一起 429」。本机多个进程、或拿到面板令牌的
-/// 任意客户端都能造成这种效果。
-pub struct RateLimiter {
-    per_ip: u32,
-    global: u32,
-    ip: Mutex<HashMap<IpAddr, RateSlot>>,
-    /// 按访问密钥（key id）的每分钟上限，见下面 `hit_key`。顺序：
-    /// 谁最容易被一把 key 打穿，就先扣谁的额度。
-    pub key_rate: u32,
-    /// key id → 该 key 的计数槽。只放「非空」的槽，key 删掉后自然过期淘汰。
-    key: Mutex<HashMap<String, RateSlot>>,
-    g: Mutex<RateSlot>,
-    /// 累计被挡下的请求数 + 最近一次的现场。
-    ///
-    /// 为什么需要：429 只出现在响应体与日志里，面板上完全不可见 —— 用户体感是
-    /// 「突然变慢 / 全都失败」，却看不到「是我自己打太快」。把计数和上次的时间点
-    /// 暴露到 /api/health，排障时第一眼就能排除/确认限流这个原因。
-    rejected: AtomicU64,
-    last_reject: Mutex<Option<RejectInfo>>,
-}
-
-/// 最近一次被限流的现场。
-struct RejectInfo {
-    at: Instant,
-    /// "ip" 或 "global"：被哪个维度挡下的
-    scope: &'static str,
-    /// 当时告诉客户端的 Retry-After 秒数
-    left_s: u64,
-}
-
-impl RateLimiter {
-    pub fn new(per_ip: u32, global: u32) -> RateLimiter {
-        let now = Instant::now();
-        RateLimiter {
-            per_ip,
-            global,
-            ip: Mutex::new(HashMap::new()),
-            key_rate: 0,
-            key: Mutex::new(HashMap::new()),
-            g: Mutex::new(RateSlot { win: now, count: 0 }),
-            rejected: AtomicU64::new(0),
-            last_reject: Mutex::new(None),
-        }
-    }
-
-    pub fn per_ip(&self) -> u32 {
-        self.per_ip
-    }
-
-    pub fn global(&self) -> u32 {
-        self.global
-    }
-
-    pub fn enabled(&self) -> bool {
-        self.per_ip > 0 || self.global > 0
-    }
-
-    /// 按 key 限流是否启用。
-    pub fn key_enabled(&self) -> bool {
-        self.key_rate > 0
-    }
-
-    /// 记一次「带着访问密钥」的 /v1 请求。
-    ///
-    /// 为什么单独一层：每 IP 限流在本机部署下等同于**全局**限流（面板、脚本、客户端
-    /// 全在 127.0.0.1），所以「给同事一把 key、他挂了死循环」会把这个人的面板和所有
-    /// 别的客户端一起卡住 —— 而 key 的意义正是「把不同用途分开」。按 key 计数才能
-    /// 让限额落在「谁在刷」上。这个 map 有界：key 删了就自然淘汰，上限同 IP 桶。
-    pub fn hit_key(&self, key_id: &str) -> Result<(), u64> {
-        if !self.key_enabled() {
-            return Ok(());
-        }
-        let now = Instant::now();
-        let mut m = self.key.lock().unwrap_or_else(|e| e.into_inner());
-        if m.len() >= RATE_MAX_IP_BUCKETS {
-            m.retain(|_, s| now.duration_since(s.win) < RATE_WINDOW);
-        }
-        if m.len() >= RATE_MAX_IP_BUCKETS {
-            // 桶满且全在窗口内：宁可放行也不丢请求（有界内存优先），代价是新 key 暂不计。
-            return Ok(());
-        }
-        let slot = m.entry(key_id.to_string()).or_insert(RateSlot { win: now, count: 0 });
-        roll(slot, now);
-        if slot.count >= self.key_rate {
-            let wait = retry_after(slot, now);
-            drop(m);
-            self.note_reject("key", wait);
-            return Err(wait);
-        }
-        slot.count += 1;
-        Ok(())
-    }
-
-    /// 记一次 `/v1` 请求；超限返回需要等待的秒数（用于 `Retry-After`）。
-    pub fn hit(&self, ip: Option<IpAddr>) -> Result<(), u64> {
-        if !self.enabled() {
-            return Ok(());
-        }
-        let now = Instant::now();
-        {
-            let mut g = self.g.lock().unwrap_or_else(|e| e.into_inner());
-            roll(&mut g, now);
-            if self.global > 0 && g.count >= self.global {
-                let wait = retry_after(&g, now);
-                drop(g);
-                self.note_reject("global", wait);
-                return Err(wait);
-            }
-            if self.global > 0 {
-                g.count += 1;
-            }
-        }
-        if self.per_ip > 0 {
-            if let Some(ip) = ip {
-                let mut m = self.ip.lock().unwrap_or_else(|e| e.into_inner());
-                if m.len() >= RATE_MAX_IP_BUCKETS {
-                    m.retain(|_, s| now.duration_since(s.win) < RATE_WINDOW);
-                }
-                // 清完仍满：只按全局额度放行（有界内存优先于逐 IP 精确）
-                if m.len() < RATE_MAX_IP_BUCKETS {
-                    let slot = m.entry(ip).or_insert(RateSlot { win: now, count: 0 });
-                    roll(slot, now);
-                    if slot.count >= self.per_ip {
-                        let wait = retry_after(slot, now);
-                        drop(m);
-                        // 这条没被放行：退回刚才预扣的全局额度
-                        if self.global > 0 {
-                            let mut g = self.g.lock().unwrap_or_else(|e| e.into_inner());
-                            g.count = g.count.saturating_sub(1);
-                        }
-                        self.note_reject("ip", wait);
-                        return Err(wait);
-                    }
-                    slot.count += 1;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// 记一次「被挡下」：累计数 + 最近现场。
-    fn note_reject(&self, scope: &'static str, left_s: u64) {
-        self.rejected.fetch_add(1, Ordering::Relaxed);
-        let mut l = self.last_reject.lock().unwrap_or_else(|e| e.into_inner());
-        *l = Some(RejectInfo {
-            at: Instant::now(),
-            scope,
-            left_s,
-        });
-    }
-
-    /// 给面板/health 的快照：限流是否启用、上限多少、被挡过几次、上次多久前。
-    pub fn snapshot(&self) -> Value {
-        let last = self.last_reject.lock().unwrap_or_else(|e| e.into_inner());
-        let (ago, scope, left) = match last.as_ref() {
-            Some(r) => (
-                Some(r.at.elapsed().as_secs()),
-                json!(r.scope),
-                Some(r.left_s),
-            ),
-            None => (None, Value::Null, None),
-        };
-        json!({
-            "enabled": self.enabled(),
-            "per_ip_rpm": self.per_ip,
-            "global_rpm": self.global,
-            "key_rpm": self.key_rate,
-            "rejected_total": self.rejected.load(Ordering::Relaxed),
-            "last_reject_s_ago": ago,
-            "last_reject_scope": scope,
-            "last_retry_after_s": left,
-        })
-    }
-}
-
-fn roll(slot: &mut RateSlot, now: Instant) {
-    if now.duration_since(slot.win) >= RATE_WINDOW {
-        slot.win = now;
-        slot.count = 0;
-    }
-}
-
-fn retry_after(slot: &RateSlot, now: Instant) -> u64 {
-    let el = now.duration_since(slot.win).as_secs();
-    RATE_WINDOW.as_secs().saturating_sub(el).max(1)
-}
 
 /// 429：与 `/v1` 其它错误保持 OpenAI 错误信封，并带 `Retry-After`。
 fn rate_limited(wait: u64, lim: &RateLimiter) -> Response {
@@ -1580,7 +1229,7 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
         if req.uri().path().starts_with("/api/") {
             return forbidden("缺少 Host 头：管理接口只接受带 Host 的请求（面板只允许本机访问）");
         }
-    } else if !host_allowed(&st, &host) {
+    } else if !host_allowed(&st.allow_hosts, *st.allow_any_ip_host, &host) {
         return forbidden("Host 不在白名单：面板只允许本机访问");
     }
     for h in [header::ORIGIN, header::REFERER] {
@@ -1592,7 +1241,7 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
                 return forbidden("来源头非法（非 UTF-8）：拒绝请求");
             };
             let oh = origin_host(v);
-            if oh.is_empty() || !host_allowed(&st, &oh) {
+            if oh.is_empty() || !host_allowed(&st.allow_hosts, *st.allow_any_ip_host, &oh) {
                 return forbidden("来源不在白名单：拒绝跨站请求");
             }
         }
@@ -1608,21 +1257,24 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
     //
     // 语义：传进来的 key 若命中密钥表，就记下它（供模型白名单校验用）；命中不了
     // 就继续按原来的面板令牌逻辑判定 —— 两张表互不干扰，旧部署行为完全不变。
+    // ★ 每请求只查一次密钥表：下面「吊销立即生效」那段还要再问一次同样的问题
+    //   （这串 key 命中不了表吗？），旧实现因此对每个 /v1 请求扫两遍 KeyStore。
+    //   把命中结果留在这里复用，语义完全不变，少一次线性扫描 + 一次 secret 比较。
     let presented = presented_token(&req);
-    if is_v1 {
-        if let Some(t) = presented.as_deref() {
-            if let Some(k) = st.keys.find_by_secret(t) {
-                req.extensions_mut().insert(AccessKeyCtx(k));
-            }
-        }
+    let hit_key = if is_v1 {
+        presented.as_deref().and_then(|t| st.keys.find_by_secret(t))
+    } else {
+        None
+    };
+    if let Some(k) = hit_key.clone() {
+        req.extensions_mut().insert(AccessKeyCtx(k));
     }
     let cur_tok = st.current_token();
     if let Some(tok) = cur_tok.as_ref() {
         if is_api || is_v1 {
             // 访问密钥命中时同样算通过「进得来」这一关，但只对协议面（/v1/*）有效；
             // 管理面（/api/*）仍然只认面板令牌 —— 借出去的 key 不该能改配置。
-            let hit_key = is_v1 && st.keys.find_by_secret(presented.as_deref().unwrap_or("")).is_some();
-            let ok = hit_key || presented.as_deref().map(|t| ct_eq(t, tok)).unwrap_or(false);
+            let ok = hit_key.is_some() || presented.as_deref().map(|t| ct_eq(t, tok)).unwrap_or(false);
             if !ok {
                 return if is_v1 {
                     unauthorized(
@@ -1648,8 +1300,7 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
     //   「删光密钥」变成「一键恢复匿名全开」。
     if is_v1 {
         if let Some(t) = presented.as_deref() {
-            if st.keys.find_by_secret(t).is_none()
-                && (!st.keys.is_empty() || looks_like_access_key(t))
+            if hit_key.is_none() && (!st.keys.is_empty() || looks_like_access_key(t))
             {
                 let is_panel_tok = cur_tok.as_ref().map(|tok| ct_eq(t, tok)).unwrap_or(false);
                 if !is_panel_tok {
@@ -15285,8 +14936,8 @@ stream_dialect = "sse_delta"
     fn wildcard_off_by_default() {
         let st = state(vec![]);
         assert!(!*st.allow_any_ip_host);
-        assert!(host_allowed(&st, "127.0.0.1"));
-        assert!(!host_allowed(&st, "192.168.1.5"));
+        assert!(host_allowed(&st.allow_hosts, *st.allow_any_ip_host, "127.0.0.1"));
+        assert!(!host_allowed(&st.allow_hosts, *st.allow_any_ip_host, "192.168.1.5"));
         assert!(!is_ip_literal("evil.example"));
         assert!(is_ip_literal("10.0.0.1"));
         assert!(is_ip_literal("[::1]"));
