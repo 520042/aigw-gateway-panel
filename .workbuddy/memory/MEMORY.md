@@ -266,3 +266,9 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
 - 模块文档把两条纪律放最前：①导出默认脱敏（白名单制，黑名单是失败开放）②恢复必须留退路（.bak-<ts> + DB 走暂存）。
 - ★ 可见性坑：搬走后测试仍在 lib.rs 引用这些辅助 → 需 `pub(crate)` + `pub(crate) use`；对外的 `pub use` 会报「cannot be re-exported outside」。
 - 测试基线 **564**。
+
+## 2026-10-26 第十五轮（Session::fail）
+- **`Session::fail(msg)`** 收敛 `start()` 19 个分支里手抄 18 遍的「status=error + message」。漏写 status 的那一处会让前端永远停在「等待授权中」。
+- ★ 尝试过抽 `fill_device_session` 辅助统一 Ok 侧，**放弃了**——各平台 state 拼法/文案差异本来就大，强行合并更难读。只收敛真正同构的失败侧。
+- ★ 又一次「测试插错位置」：插进 `raccoon_qr_poll` 函数体，吃掉收尾括号 → 4 个类型不匹配。**正确做法：先加 impl → 编译 → 再替换 → 编译 → 最后插测试（插在 `mod tests` 起始后第 2 行）**。
+- 测试基线 **565**。
