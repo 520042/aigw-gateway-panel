@@ -225,6 +225,18 @@ struct Session {
     user_code: String,
 }
 
+impl Session {
+    /// 把会话置为失败态并记下原因（各登录分支的 Err 侧统一走这里）。
+    ///
+    /// 旧写法在每个分支里手抄两行（status = "error" + message = ...）。各分支抄了
+    /// 十几遍，漏写 status 的那一处会让前端永远显示「等待授权中」—— 看起来像卡住，
+    /// 实际是已经在等一个不会来的回调。
+    fn fail(&mut self, msg: String) {
+        self.status = "error".into();
+        self.message = msg;
+    }
+}
+
 /// 登录会话保留上限。旧实现只 push 不清理：每次点「登录」都留一条永久会话，
 /// 长时间运行后面板 /api/login/sessions 会越拉越长（还都带着 login_url）。
 const SESSIONS_CAP: usize = 24;
@@ -337,8 +349,7 @@ impl LoginEngine {
                     sess.message = "已生成设备授权会话：打开授权页完成登录，面板自动拿到 token 并入库。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("auth/state 失败：{e}（可回退手动粘贴 token）");
+                    sess.fail(format!("auth/state 失败：{e}（可回退手动粘贴 token）"));
                 }
             }
         } else if platform == "minimax" {
@@ -350,8 +361,7 @@ impl LoginEngine {
                     sess.message = format!("MiniMax 设备码：打开验证页输入 {user_code} 完成授权。");
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("设备码申请失败：{e}");
+                    sess.fail(format!("设备码申请失败：{e}"));
                 }
             }
         } else if platform == "cline" {
@@ -367,8 +377,7 @@ impl LoginEngine {
                     );
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("WorkOS 设备码申请失败：{e}");
+                    sess.fail(format!("WorkOS 设备码申请失败：{e}"));
                 }
             }
         } else if let Some(oauth_host) = kimi_oauth_host(platform) {
@@ -384,8 +393,7 @@ impl LoginEngine {
                     );
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Kimi 设备码申请失败：{e}（可回退手动粘贴 token）");
+                    sess.fail(format!("Kimi 设备码申请失败：{e}（可回退手动粘贴 token）"));
                 }
             }
         } else if platform == "sub-grok" {
@@ -401,8 +409,7 @@ impl LoginEngine {
                     );
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Grok 设备码申请失败：{e}（可回退手动粘贴 token）");
+                    sess.fail(format!("Grok 设备码申请失败：{e}（可回退手动粘贴 token）"));
                 }
             }
         } else if platform == "sub-codex" {
@@ -414,8 +421,7 @@ impl LoginEngine {
                     sess.message = "Codex 跳转登录：点「打开授权页」在浏览器完成登录，面板自动捕获回调换 token 入库；若面板部署在服务器，把浏览器跳转后地址栏的 URL 粘贴到下方输入框。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Codex 授权 URL 生成失败：{e}");
+                    sess.fail(format!("Codex 授权 URL 生成失败：{e}"));
                 }
             }
         } else if platform == "sub-claude" {
@@ -427,8 +433,7 @@ impl LoginEngine {
                     sess.message = "Claude 跳转登录：点「打开授权页」在浏览器完成登录，面板自动捕获回调换 token 入库；若面板部署在服务器，把浏览器跳转后地址栏的 URL 粘贴到下方输入框。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Claude 授权 URL 生成失败：{e}");
+                    sess.fail(format!("Claude 授权 URL 生成失败：{e}"));
                 }
             }
         } else if platform == "lobster" {
@@ -440,8 +445,7 @@ impl LoginEngine {
                     sess.message = "Lobster 跳转登录：点「打开授权页」在浏览器完成登录，面板自动捕获回调换 token 入库；若面板部署在服务器，把浏览器跳转后地址栏的 URL 粘贴到下方输入框。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Lobster 授权 URL 生成失败：{e}");
+                    sess.fail(format!("Lobster 授权 URL 生成失败：{e}"));
                 }
             }
         } else if platform == "sub-antigravity" {
@@ -453,8 +457,7 @@ impl LoginEngine {
                     sess.message = "Antigravity 跳转登录（Google 账号）：点「打开授权页」在浏览器完成登录，面板自动捕获回调换 token 入库；若面板部署在服务器，把浏览器跳转后地址栏的 URL 粘贴到下方输入框。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Antigravity 授权 URL 生成失败：{e}");
+                    sess.fail(format!("Antigravity 授权 URL 生成失败：{e}"));
                 }
             }
         } else if platform == "sub-devin" {
@@ -466,8 +469,7 @@ impl LoginEngine {
                     sess.message = "Devin 跳转登录（headless PKCE）：点「打开授权页」在浏览器完成登录后，把跳转后地址栏的完整 URL（带 code=...&state=...）粘贴到下方输入框并点「提交回调」；本机自动捕获回调。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Devin 授权 URL 生成失败：{e}");
+                    sess.fail(format!("Devin 授权 URL 生成失败：{e}"));
                 }
             }
         } else if platform == "sub-meta" {
@@ -480,8 +482,7 @@ impl LoginEngine {
                     sess.message = "Meta Muse 设备码：打开验证页完成登录后，面板自动轮询换 token 并铸造 API Key 入库。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Meta 设备码申请失败：{e}");
+                    sess.fail(format!("Meta 设备码申请失败：{e}"));
                 }
             }
         } else if platform == "codearts" {
@@ -493,8 +494,7 @@ impl LoginEngine {
                     sess.message = "CodeArts 跳转登录（华为云账号）：点「打开授权页」在浏览器完成华为云登录，面板自动轮询换取临时 AK/SK 入库（AK:SK 格式，转发时 SDK-HMAC-SHA256 签名）。服务器部署：授权完成后把浏览器地址栏 URL（含 secret=...）粘贴到下方输入框并点「提交回调」。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("CodeArts 授权 URL 生成失败：{e}");
+                    sess.fail(format!("CodeArts 授权 URL 生成失败：{e}"));
                 }
             }
         } else if platform == "apk-qoder" || platform == "web-qoder" {
@@ -506,8 +506,7 @@ impl LoginEngine {
                     sess.message = "Qoder 设备授权（免客户端）：点「打开授权页」在浏览器登录 Qoder 账号，面板自动轮询 deviceToken 入库（dt- 前缀 token，Bearer 转发）。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Qoder 授权 URL 生成失败：{e}");
+                    sess.fail(format!("Qoder 授权 URL 生成失败：{e}"));
                 }
             }
         } else if platform == "apk-trae" || platform == "web-trae" {
@@ -519,8 +518,7 @@ impl LoginEngine {
                     sess.message = "Trae 跳转登录：点「打开授权页」在浏览器完成 Trae 登录，面板自动捕获 18080 回调换 token 入库；服务器部署：授权完成后把浏览器地址栏 URL（含 refreshToken=...）粘贴到下方输入框并点「提交回调」。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Trae 授权 URL 生成失败：{e}");
+                    sess.fail(format!("Trae 授权 URL 生成失败：{e}"));
                 }
             }
         } else if platform == "apk-doubao" {
@@ -532,8 +530,7 @@ impl LoginEngine {
                     sess.message = "豆包扫码登录：用豆包 App 或手机浏览器扫一扫二维码，确认登录后面板自动收 Cookie 入库（整段 Cookie 直连 samantha 端点，无需再次粘贴）。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("豆包扫码登录发起失败：{e}（可回退手动粘贴 Cookie）");
+                    sess.fail(format!("豆包扫码登录发起失败：{e}（可回退手动粘贴 Cookie）"));
                 }
             }
         } else if platform == "apk-kuku" {
@@ -545,8 +542,7 @@ impl LoginEngine {
                     sess.message = "库库 AI 扫码登录：用百度 App 扫一扫二维码，确认登录后面板自动完成 BDUSS/STOKEN 交换并入账号池（无需手动粘贴 Cookie）。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("库库扫码登录发起失败：{e}（可回退手动粘贴 Cookie）");
+                    sess.fail(format!("库库扫码登录发起失败：{e}（可回退手动粘贴 Cookie）"));
                 }
             }
         } else if platform == "apk-loomy" {
@@ -566,8 +562,7 @@ impl LoginEngine {
                     sess.message = "Loomy 微信扫码登录：用微信扫一扫二维码并在手机上确认，面板自动换取 14 天有效的 session 并入账号池（该微信若未绑定讯飞账号，请先在官网绑定手机号；也可直接粘贴 session）。".into();
                 }
                 Err(e) => {
-                    sess.status = "error".into();
-                    sess.message = format!("Loomy 微信扫码发起失败：{e}（可回退手动粘贴 session）");
+                    sess.fail(format!("Loomy 微信扫码发起失败：{e}（可回退手动粘贴 session）"));
                 }
             }
         } else if platform == "apk-raccoon" {
@@ -588,8 +583,7 @@ impl LoginEngine {
                 spec.login_url
             );
         } else {
-            sess.status = "error".into();
-            sess.message = format!("平台 {platform} 暂不支持自动登录（手动粘贴凭据到账号池）");
+            sess.fail(format!("平台 {platform} 暂不支持自动登录（手动粘贴凭据到账号池）"));
         }
         let out = json!({
             "id": sess.id, "platform": sess.platform, "status": sess.status,
@@ -1726,6 +1720,26 @@ fn _touch(_s: &ProviderSpec) {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_fail_sets_both_status_and_message() {
+        // 各登录分支的 Err 侧都走 Session::fail。旧写法手抄两行，
+        // 漏写 status 的那一处会让前端永远显示「等待授权中」。
+        let mut s = Session {
+            id: "x".into(),
+            platform: "p".into(),
+            qr_image: String::new(),
+            qr_text: String::new(),
+            state: String::new(),
+            status: "pending".into(),
+            message: String::new(),
+            login_url: String::new(),
+            user_code: String::new(),
+        };
+        s.fail("设备码申请失败：网络错误".into());
+        assert_eq!(s.status, "error");
+        assert!(s.message.contains("设备码申请失败"), "{}", s.message);
+    }
+
     use super::*;
 
     /// 用户在表单里会写成各种样子：带空格、带横线、带 +86。上游只认 11 位纯数字，
