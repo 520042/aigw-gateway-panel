@@ -171,3 +171,11 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
 - **guard 性能**：每个 /v1 请求原本两次线性扫 KeyStore，现合成一次。
 - **测试基线**：workspace **335** 全绿（core 3 / crypto 21 / pool 29 / registry 13 / relay 151 / server 232 / store 82）；`cargo clippy` 未安装（需 `rustup component add clippy`），目前只能用 `cargo check` 当告警闸。
 - 环境：本机 `pwsh` 偶发启动失败（exit 3221225794），文件操作用 Node fs 更稳。
+
+## 2026-10-26 持续优化（第二轮）
+- **新增模块**：`dialect.rs`（三方协议互转 + 9 条用例）。`lib.rs` 16074 → 15421 行。
+- **/v1/models 三处过滤改 Cow**：无链/无 key/无 ?platform= 时零分配；白名单匹配不再逐条 `format!("{id}@{owner}")`。
+- **Retry-After 感知**：`RelayError::retry_after_hint()` 解析 JSON/文本两种形态，夹 [1,3600]；`Pool::report_with_hint` 采纳并夹 [1,900]，有提示不涨 strikes。
+- **在途已满换号**：`chat_core` 从「死等同一账号 15s」改为「等 1.5s → sticky.unbind + tried.push + 重选」，全平台无别号才退回 15s 预算。★ 换号必须解绑粘性，否则死循环。
+- 测试基线 **352**（core 3 / crypto 21 / pool 33 / registry 13 / relay 153 / server 243 / store 82）。
+- ★ 提交信息必须用 `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))`；Out-File utf8 会带 BOM 把中文打成问号。
