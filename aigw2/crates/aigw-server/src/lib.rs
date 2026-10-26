@@ -3515,6 +3515,30 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
 
+/// 跳转类登录的回调端口体检。
+///
+/// 跳转登录（Claude/Codex/Antigravity 等）靠本机回调端口接收授权码。端口被别的程序
+/// 占着时，自动捕获**注定失败**，而用户在面板上只会看到「等待授权中」反复转圈 ——
+/// 必须当场把「端口没绑上 + 该怎么做」写进响应，否则这是个无解的界面状态。
+///
+/// 抽成纯函数是为了能直接测：`callback_port_status()` 依赖真实端口占用情况，
+/// 测试环境里结果不确定；而「哪些算失败、失败时话怎么说」才是要锁住的语义。
+fn callback_warning(ports: &[(u16, bool, String)]) -> Option<String> {
+    let failed: Vec<String> = ports
+        .iter()
+        .filter(|(_, ok, _)| !ok)
+        .map(|(p, _, e)| format!("{p}（{e}）"))
+        .collect();
+    if failed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "本机回调端口没绑上：{}。自动捕获授权回调不可用 —— 请在浏览器里完成授权后，把跳转后地址栏的完整 URL 粘贴到下方输入框，点「提交回调」。",
+        failed.join("、")
+    ))
+}
+
+
 /// 登录会话（批2）：POST /api/auth
 ///   {"action":"start","platform":"wb-gateway"|"minimax"|"apk-yuanbao"|...}
 ///   {"action":"poll","id":"ls-..."}
@@ -3537,22 +3561,9 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
             // 必须当场说清楚，别让用户等一个永远不会到的回调。
             if out.get("login_url").and_then(|x| x.as_str()).map(|u| !u.is_empty()).unwrap_or(false) {
                 let ports = aigw_relay::auth_login::callback_port_status();
-                let failed: Vec<Value> = ports
-                    .iter()
-                    .filter(|(_, ok, _)| !ok)
-                    .map(|(p, _, err)| json!({"port": p, "error": err}))
-                    .collect();
-                if !failed.is_empty() {
-                    let list = ports
-                        .iter()
-                        .filter(|(_, ok, _)| !ok)
-                        .map(|(p, _, e)| format!("{p}（{e}）"))
-                        .collect::<Vec<String>>()
-                        .join("、");
+                if let Some(warn) = callback_warning(&ports) {
                     if let Some(o) = out.as_object_mut() {
-                        o.insert("callback_warning".to_string(), json!(format!(
-                            "本机回调端口没绑上：{list}。自动捕获授权回调不可用 —— 请在浏览器里完成授权后，把跳转后地址栏的完整 URL 粘贴到下方输入框，点「提交回调」。"
-                        )));
+                        o.insert("callback_warning".to_string(), json!(warn));
                     }
                 }
             }
@@ -7434,6 +7445,23 @@ stream_dialect = "sse_delta"
         // 只有空白等同于缺失（前端表单常提交空串）
         assert!(required_str(&v, "empty").is_err());
     }
+
+    #[test]
+    fn callback_warning_lists_only_failed_ports() {
+        // 全部绑上 → 不吭声（正常情况不该往响应里塞警告）
+        assert!(callback_warning(&[(1455, true, String::new())]).is_none());
+        // 有一个被占 → 要点名端口 + 原因，并给出「粘贴回调 URL」的替代路径
+        let w = callback_warning(&[
+            (1455, true, String::new()),
+            (54545, false, "端口被占用".to_string()),
+        ])
+        .expect("有失败端口时必须给警告");
+        assert!(w.contains("54545"), "警告要点名失败端口：{w}");
+        assert!(w.contains("端口被占用"), "警告要带失败原因：{w}");
+        assert!(!w.contains("1455（"), "绑上的端口不该出现在警告里：{w}");
+        assert!(w.contains("粘贴"), "必须给出替代路径（手动粘贴回调 URL）：{w}");
+    }
+
 
     #[test]
     fn pick_preferred_prefers_usable_over_routable() {
