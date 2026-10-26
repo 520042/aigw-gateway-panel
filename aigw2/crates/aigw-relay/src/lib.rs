@@ -27,6 +27,7 @@ pub mod auth_login;
 pub mod proxy;
 pub mod wb;
 pub mod wb_growth;
+pub mod sanitize;
 
 /// 该 `upstream_kind` 是否有专门的 adapter 实现（false 表示走 OpenAI 兼容透传）。
 ///
@@ -405,6 +406,21 @@ impl OutClient {
         if spec.signer == "wb" {
             return self.wb_nonstream(spec, secret, domain, body).await;
         }
+        // ★ 2026-10-26（P2）：非流式路径同样做指纹脱敏（与流式共用同一套规则）。
+        let owned;
+        let body = match serde_json::from_slice::<Value>(body) {
+            Ok(mut v) => {
+                let sc = sanitize::sanitize_request_body(&mut v);
+                if sc.is_empty() {
+                    body
+                } else {
+                    tracing::debug!(changed = ?sc, "出站请求体已做指纹脱敏（非流式）");
+                    owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
+                    owned.as_slice()
+                }
+            }
+            Err(_) => body,
+        };
         match spec.upstream_kind.as_str() {
             "chatglm" => glm::chat_nonstream(&self.http, spec, secret, body).await,
             "doubao" => doubao::chat_nonstream(&self.http, spec, secret, body).await,
@@ -532,18 +548,34 @@ impl OutClient {
         // ★ WorkBuddy 的流式也要先过一遍请求体归一：上游对 tool_choice 对象形态回
         //   400（"cannot unmarshal object into Go struct field Request.tool_choice of
         //   type string"），而这是**流式**路径才暴露的 —— 只归一非流式会留个洞。
+        // ★ 2026-10-26（P2）：同一次改写里做客户端指纹脱敏（Claude Code / Codex CLI
+        //   的身份自证句会让上游判「非授权客户端」直接 400）。对所有平台生效——
+        //   哪些上游会拦是随时变的，出站前统一清掉最省心。
         let owned;
-        let body = if spec.signer == "wb" {
+        let body = {
             match serde_json::from_slice::<Value>(body) {
                 Ok(mut v) => {
-                    prepare_wb_body(&mut v);
-                    owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
-                    owned.as_slice()
+                    let mut dirty = false;
+                    if spec.signer == "wb" {
+                        let ch = prepare_wb_body(&mut v);
+                        if !ch.is_empty() {
+                            dirty = true;
+                        }
+                    }
+                    let sc = sanitize::sanitize_request_body(&mut v);
+                    if !sc.is_empty() {
+                        tracing::debug!(changed = ?sc, "出站请求体已做指纹脱敏");
+                        dirty = true;
+                    }
+                    if dirty {
+                        owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
+                        owned.as_slice()
+                    } else {
+                        body
+                    }
                 }
                 Err(_) => body,
             }
-        } else {
-            body
         };
         match spec.upstream_kind.as_str() {
             "chatglm" => {

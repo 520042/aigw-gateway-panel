@@ -213,6 +213,76 @@ fn map_checkin_status(code: i64) -> &'static str {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// ★ 2026-10-26（P2）：联网搜索（对齐 workbuddy2api internal/upstream/search.go）
+// ─────────────────────────────────────────────────────────────
+
+/// 默认返回条数（官方硬编码值）。
+pub const SEARCH_DEFAULT_MAX: i64 = 5;
+/// 服务端实际返回上限（实测约 10，超过只是被截断不报错）。
+pub const SEARCH_MAX_CAP: i64 = 10;
+/// query 最短长度（官方 zod schema 的 query.min(2)）。
+pub const SEARCH_MIN_QUERY: usize = 2;
+
+/// 联网搜索：`POST {base}/agenttool/v1/search`。
+///
+/// 请求体固定 `{query, type:"text2text", max_results}`——`type` 是官方硬编码，
+/// 服务端只接受这个小写值。返回上游原始 JSON（`{query, results[], total_results}`）。
+pub async fn search(
+    http: &Client,
+    base: &str,
+    token: &str,
+    query: &str,
+    max_results: i64,
+) -> Result<Value, String> {
+    let q = query.trim();
+    if q.chars().count() < SEARCH_MIN_QUERY {
+        return Err(format!("search query must be at least {SEARCH_MIN_QUERY} characters"));
+    }
+    let n = if max_results <= 0 {
+        SEARCH_DEFAULT_MAX
+    } else {
+        max_results.min(SEARCH_MAX_CAP)
+    };
+    let resp = http
+        .post(format!("{base}/agenttool/v1/search"))
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json;charset=UTF-8")
+        .header("User-Agent", WB_CLI_UA)
+        .header("X-Agent-Intent", "craft")
+        .header("X-Agent-Runtime", "other")
+        .json(&serde_json::json!({
+            "query": q,
+            "type": "text2text",
+            "max_results": n,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("搜索请求失败：{e}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).map_err(|_| {
+        format!(
+            "搜索返回非 JSON（可能登录态失效）：{}",
+            text.chars().take(120).collect::<String>()
+        )
+    })?;
+    if !(200..300).contains(&status) {
+        return Err(format!("搜索 HTTP {status}：{}", text.chars().take(160).collect::<String>()));
+    }
+    // 业务码校验：2xx 但 code != 0 同样算失败
+    if let Some(code) = v.get("code").and_then(|x| x.as_i64()) {
+        if code != 0 {
+            return Err(format!("搜索业务错误 code={code}"));
+        }
+    }
+    // 扁平结构（官方响应就在顶层）或包一层 data 两种形态都兼容
+    Ok(v.get("data").cloned().unwrap_or(v))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

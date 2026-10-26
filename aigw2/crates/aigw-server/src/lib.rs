@@ -1711,6 +1711,13 @@ pub fn build_app(st: AppState) -> Router {
             "/v1/messages/count_tokens",
             post(count_tokens).layer(DefaultBodyLimit::max(MAX_CHAT_BODY)),
         )
+        // ★ 2026-10-26（P2）：联网搜索。Anthropic Messages 兼容形态，
+        //   Claude Code / DSH 等客户端的搜索 provider 可零改动接入
+        //   （对齐 workbuddy2api internal/server/search.go）。
+        .route(
+            "/v1/search/messages",
+            post(search_messages).layer(DefaultBodyLimit::max(MAX_CHAT_BODY)),
+        )
         // 请求体上限（全局）：旧实现只给 /v1/chat/completions 设了 32MB，
         // /api/* 走 axum 默认 2MB —— 用「⬆ 恢复备份」贴一个几 MB 的备份包直接 413（且是纯文本非 JSON）。
         .layer(DefaultBodyLimit::max(MAX_CHAT_BODY))
@@ -7919,10 +7926,136 @@ fn estimate_tokens(text: &str) -> i64 {
     (cjk + (other + 3) / 4).max(1)
 }
 
+/// ★ 2026-10-26（P2）：联网搜索（Anthropic Messages 兼容形态）。
+///
+/// 入站（Claude Code / DSH 的搜索 provider 直接可用）：
+/// ```json
+/// {"query": "关键词", "max_results": 5}
+/// ```
+/// 出站：`POST {wbBase}/agenttool/v1/search`（复用账号池选号 + 在途租约）。
+/// 响应：保持上游扁平形态 `{query, results:[{title,url,snippet}], total_results}`，
+/// 同时附一份 Anthropic content-block 形态（`content: [{type:"text", text:"…"}]`），
+/// 两种客户端都能直接吃。
+async fn search_messages(
+    State(st): State<AppState>,
+    key: Option<Extension<AccessKeyCtx>>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let key = key.map(|e| e.0 .0);
+    let raw = match body {
+        Ok(b) => b,
+        Err(e) => {
+            let status = e.status().as_u16();
+            return anthropic_error(status, &format!("请求体读取失败：{e}"));
+        }
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&raw) else {
+        return anthropic_error(400, "invalid JSON body");
+    };
+    // query 三种来源：query / messages[].content（Anthropic Messages 形态）/ input
+    let query = v
+        .get("query")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            v.get("messages")
+                .and_then(|m| m.as_array())
+                .and_then(|arr| arr.last())
+                .and_then(|m| m.get("content"))
+                .and_then(|c| match c {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Array(a) => a
+                        .iter()
+                        .find_map(|x| x.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())),
+                    _ => None,
+                })
+        })
+        .or_else(|| v.get("input").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    let max_results = v
+        .get("max_results")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(aigw_relay::wb::SEARCH_DEFAULT_MAX);
+    // 白名单：搜索也认模型（可选），有 key 限制时按 model 判一次
+    if let (Some(k), Some(model)) = (
+        key.as_ref(),
+        v.get("model").and_then(|x| x.as_str()),
+    ) {
+        if !k.allows(model) {
+            return anthropic_error(403, &key_model_denied_message(k, model));
+        }
+    }
+    // 搜索目前只有 wb 族上游（/agenttool/v1/search）
+    let platform = v
+        .get("platform")
+        .and_then(|x| x.as_str())
+        .unwrap_or("wb-gateway");
+    let Some(base) = aigw_relay::wb::wb_checkin_base(platform) else {
+        return anthropic_error(
+            501,
+            "联网搜索目前仅支持 WorkBuddy / CodeBuddy 族上游（/agenttool/v1/search）",
+        );
+    };
+    let accounts = st.accounts.secrets_for(platform);
+    if accounts.is_empty() {
+        return anthropic_error(
+            503,
+            &format!("{platform} 还没有账号，先到「接入源」登录后再用搜索"),
+        );
+    }
+    // 选号：走号池（快过期积分优先 + 冷却/在途治理都在里面）
+    let ids: Vec<String> = accounts.iter().map(|(id, _)| id.clone()).collect();
+    let pick = st.pool.pick(platform, &ids, "search").or_else(|| ids.first().cloned());
+    let Some(acc) = pick else {
+        return anthropic_error(503, "所有账号当前都在冷却/在飞打满，稍后重试");
+    };
+    let secret = accounts
+        .iter()
+        .find(|(id, _)| id == &acc)
+        .map(|(_, s)| s.clone())
+        .unwrap_or_default();
+    let http = aigw_relay::auth_login::auth_http();
+    let started = std::time::Instant::now();
+    match aigw_relay::wb::search(&http, base, &secret, &query, max_results).await {
+        Ok(mut d) => {
+            st.pool.mark_health(&acc, true, "");
+            let ms = started.elapsed().as_millis() as i64;
+            tracing::info!(account = %acc, query = %query, ms, "搜索成功");
+            // Anthropic content-block 形态：把结果拼成一段可读文本，
+            // 让只认 content 数组的客户端也能直接用。
+            let results = d.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+            let mut text = String::new();
+            for (i, r) in results.iter().enumerate() {
+                let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("");
+                let url = r.get("url").and_then(|x| x.as_str()).unwrap_or("");
+                let snip = r.get("snippet").and_then(|x| x.as_str()).unwrap_or("");
+                text.push_str(&format!("{}. {}\n{}\n", i + 1, title, url));
+                if !snip.is_empty() {
+                    text.push_str(&format!("{}\n", snip));
+                }
+                text.push('\n');
+            }
+            if let Some(o) = d.as_object_mut() {
+                o.insert(
+                    "content".to_string(),
+                    json!([{"type": "text", "text": text.trim_end()}]),
+                );
+                o.insert("account".to_string(), json!(acc));
+                o.insert("elapsed_ms".to_string(), json!(ms));
+                o.insert("type".to_string(), json!("search_result"));
+            }
+            Json(d).into_response()
+        }
+        Err(e) => {
+            st.pool.mark_health(&acc, false, "搜索失败");
+            anthropic_error(502, &format!("搜索上游失败：{e}"))
+        }
+    }
+}
+
 /// /v1/messages/count_tokens：Claude Code 等客户端在发送前会调它做预算。
 /// 这是本地估算（不消耗上游额度），把 Anthropic 请求转成 OpenAI 形状后按字符估算。
-async fn count_tokens(
-    State(_st): State<AppState>,
+async fn count_tokens(    State(_st): State<AppState>,
     key: Option<Extension<AccessKeyCtx>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
