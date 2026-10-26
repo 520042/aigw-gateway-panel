@@ -3934,21 +3934,48 @@ fn is_secret_file(name: &str) -> bool {
 }
 
 async fn backup_export(State(st): State<AppState>) -> Json<Value> {
-    let dd = aigw_relay::proxy::default_data_dir();
-    // ★ 导出前先把 WAL 并回主库：WAL 模式下新写入只在 panel.db-wal 里，主库可能
-    //   长期停在 4KB 空壳（实测 4096 vs 1.8MB）。不 checkpoint 就备份 = 备份出
-    //   一个没有任何用量台账的空库，恢复回去还以为「备份好了」。
-    let ck = st.store.checkpoint();
-    collect_backup(&dd, false, st.store.is_db(), ck)
+    backup_export_impl(st, false).await
 }
 
 /// 完整导出（含明文凭据）。仅供「备份数据」按钮使用：面板本身与备份文件都在同一台
 /// 机器的同一用户下，账号文件本来就是明文，这里不额外扩大攻击面；默认的
 /// `GET /api/backup` 仍然脱敏，避免随手一取就泄露。
 async fn backup_export_full(State(st): State<AppState>) -> Json<Value> {
+    backup_export_impl(st, true).await
+}
+
+/// 备份导出的公共实现（脱敏 / 含凭据只差一个开关）。
+///
+/// ★ 整段跑在 `spawn_blocking` 里：`collect_backup` 要 `read_dir` + 逐个
+///   `metadata`/`read`（凭据文件动辄几十 KB 到几 MB），再加上 SQLite 的 WAL
+///   checkpoint —— 这些都是阻塞调用。旧实现直接在 async handler 里做，备份期间
+///   会把 tokio worker 线程占住：同一个 worker 上排队的**所有** /v1 对话请求一起
+///   卡住，用户看到的是「点一下备份，全站对话停摆」。数据目录典型几十 MB，
+///   在机械盘上能到秒级。
+async fn backup_export_impl(st: AppState, include_secrets: bool) -> Json<Value> {
     let dd = aigw_relay::proxy::default_data_dir();
-    let ck = st.store.checkpoint();
-    collect_backup(&dd, true, st.store.is_db(), ck)
+    // ★ 导出前先把 WAL 并回主库：WAL 模式下新写入只在 panel.db-wal 里，主库可能
+    //   长期停在 4KB 空壳（实测 4096 vs 1.8MB）。不 checkpoint 就备份 = 备份出
+    //   一个没有任何用量台账的空库，恢复回去还以为「备份好了」。
+    let is_db = st.store.is_db();
+    let store = st.store.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        let ck = store.checkpoint();
+        collect_backup(&dd, include_secrets, is_db, ck)
+    })
+    .await;
+    match out {
+        Ok(v) => v,
+        Err(e) => {
+            // panic 被捕获时不能装作备份成功（前端会提示「已导出 N 个文件」）
+            tracing::error!("备份导出任务异常：{e}");
+            Json(json!({
+                "ok": false,
+                "message": format!("备份导出失败（内部任务异常）：{e}"),
+                "files": [],
+            }))
+        }
+    }
 }
 
 fn collect_backup(
@@ -4081,12 +4108,21 @@ fn is_db_file_name(name: &str) -> bool {
 ///   {"files":[{"name":"accounts.json","bytes":"<b64>"}]}
 async fn backup_restore(_st: State<AppState>, body: Bytes) -> Response {
     let dd = aigw_relay::proxy::default_data_dir();
-    restore_into(&dd, &body)
-}
-
-/// 恢复实现（目录可注入，便于测试；不碰全局 data 目录）。
-fn restore_into(dd: &std::path::Path, body: &[u8]) -> Response {
-    restore_into_at(dd, body, now_ms())
+    // ★ 与导出同理：恢复要写几十个文件（每个都先落 .bak 副本再覆盖），
+    //   放 async handler 里做会把 tokio worker 占住，全站对话跟着卡。
+    let ts = now_ms();
+    let data = body.to_vec();
+    match tokio::task::spawn_blocking(move || restore_into_at(&dd, &data, ts)).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("备份恢复任务异常：{e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "message": format!("恢复失败（内部任务异常）：{e}")})),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// 真正的恢复逻辑，时间戳由调用方给（测试要能构造「同名回滚副本已存在」的场景）。
@@ -8336,6 +8372,11 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    /// 恢复实现（目录可注入；生产路径已改为 spawn_blocking 直调 restore_into_at）。
+    fn restore_into(dd: &std::path::Path, body: &[u8]) -> Response {
+        restore_into_at(dd, body, now_ms())
+    }
 
     async fn body_string(resp: Response) -> String {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
