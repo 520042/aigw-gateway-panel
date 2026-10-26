@@ -87,7 +87,13 @@ pub struct AppState {
     /// 会话粘性路由（对齐 workbuddy2api StickyRouter + loomy「最后一条 user」修正）
     pub sticky: Arc<aigw_pool::StickyRouter>,
     /// live 模型缓存：(时间, (spec_id, model) 索引, 响应体)
-    pub models_cache: Arc<Mutex<Option<(Instant, Vec<(String, String)>, Value)>>>,
+    /// 整表模型清单缓存：(生成时刻, (平台, 模型) 索引, 响应体)。
+    ///
+    /// ★ 响应体用 `Arc<Value>` 而不是 `Value`：这个缓存的读路径是「每个客户端
+    ///   拉一次 /v1/models」，而写入之后内容就不再变。用裸 `Value` 时命中一次就要
+    ///   深拷贝整棵 JSON 树（148 个模型对象 + 数组 + 对象包装），且**拷贝发生在持锁
+    ///   期间** —— 并发拉清单会在这把锁上排队。换成 Arc 后命中只是引用计数 +1。
+    pub models_cache: Arc<Mutex<Option<(Instant, Vec<(String, String)>, std::sync::Arc<Value>)>>>,
     /// 单平台 live 模型缓存：spec_id → (拉取时刻, 模型清单)。失败也缓存（空清单）。
     pub models_cache_per: Arc<Mutex<std::collections::HashMap<String, ModelsEntry>>>,
     /// 整表刷新单飞锁：并发请求只让一个去拉上游，其余等结果。
@@ -779,7 +785,7 @@ impl AppState {
             // 访问上游，但仍要现场组装并抢 models_lock。
             let (body, index) = assemble_models(&st);
             let mut g = st.models_cache.lock().unwrap_or_else(|e| e.into_inner());
-            *g = Some((Instant::now(), index, body));
+            *g = Some((Instant::now(), index, std::sync::Arc::new(body)));
             tracing::info!("模型清单预热完成");
         }
     }
@@ -5105,13 +5111,14 @@ async fn models(st: State<AppState>, req: Request) -> Response {
     // 不过滤的后果不是安全问题（chat 侧早已 403），而是**可用性**问题：客户端
     // 拿到 148 个模型，逐个试过去 147 个 403，日志里全是对不上号的报错。
     let key = req.extensions().get::<AccessKeyCtx>().cloned();
-    // ① 整表缓存命中
-    if let Some((at, _, body)) = st
+    // ① 整表缓存命中：锁内只取一份 Arc 快照，过滤与序列化都在锁外做
+    let cached = st
         .models_cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
+        .as_ref()
+        .map(|(at, _, body)| (*at, body.clone()));
+    if let Some((at, body)) = cached {
         if at.elapsed() < MODELS_TTL_ALL {
             return (
                 [(header::CONTENT_TYPE, "application/json")],
@@ -5129,12 +5136,13 @@ async fn models(st: State<AppState>, req: Request) -> Response {
     //    旧实现没有这层，N 个并发请求会各自串行跑 56 个平台，直接把进程压死。
     let _guard = st.models_lock.clone().lock_owned().await;
     // 拿到锁后再查一次：可能已被上一个持锁者刷新
-    if let Some((at, _, body)) = st
+    let cached = st
         .models_cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
+        .as_ref()
+        .map(|(at, _, body)| (*at, body.clone()));
+    if let Some((at, body)) = cached {
         if at.elapsed() < MODELS_TTL_ALL {
             return (
                 [(header::CONTENT_TYPE, "application/json")],
@@ -5167,6 +5175,8 @@ async fn models(st: State<AppState>, req: Request) -> Response {
 
     // ⑤ 组装（抽成独立函数，便于测试与复用）
     let (body, index) = assemble_models(&st);
+    // 包成 Arc 后缓存与本次响应用的是**同一个** Value：写回时不再 clone 一遍
+    let body = std::sync::Arc::new(body);
     let mut g = st.models_cache.lock().unwrap_or_else(|e| e.into_inner());
     *g = Some((Instant::now(), index, body.clone()));
     (
@@ -11908,7 +11918,11 @@ stream_dialect = "sse_delta"
         let st = state(two_platforms());
         {
             let mut g = st.models_cache.lock().unwrap();
-            *g = Some((Instant::now(), Vec::new(), serde_json::json!({"data": []})));
+            *g = Some((
+                Instant::now(),
+                Vec::new(),
+                std::sync::Arc::new(serde_json::json!({"data": []})),
+            ));
         }
         st.models_cache_per
             .lock()
