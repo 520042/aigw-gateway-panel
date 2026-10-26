@@ -5117,7 +5117,7 @@ async fn models(st: State<AppState>, req: Request) -> Response {
                 [(header::CONTENT_TYPE, "application/json")],
                 filter_models_by_platform(
                     &st,
-                    &filter_models_for_key(&merge_combo_models(&st, &body), key.as_ref()),
+                    filter_models_for_key(merge_combo_models(&st, &body), key.as_ref()),
                     want_platform.as_deref(),
                 )
                 .to_string(),
@@ -5140,7 +5140,7 @@ async fn models(st: State<AppState>, req: Request) -> Response {
                 [(header::CONTENT_TYPE, "application/json")],
                 filter_models_by_platform(
                     &st,
-                    &filter_models_for_key(&merge_combo_models(&st, &body), key.as_ref()),
+                    filter_models_for_key(merge_combo_models(&st, &body), key.as_ref()),
                     want_platform.as_deref(),
                 )
                 .to_string(),
@@ -5173,7 +5173,9 @@ async fn models(st: State<AppState>, req: Request) -> Response {
         [(header::CONTENT_TYPE, "application/json")],
         filter_models_by_platform(
                     &st,
-                    &filter_models_for_key(&merge_combo_models(&st, &body), key.as_ref()), want_platform.as_deref())
+                    filter_models_for_key(merge_combo_models(&st, &body), key.as_ref()),
+                    want_platform.as_deref(),
+                )
             .to_string(),
     )
         .into_response()
@@ -5186,14 +5188,17 @@ async fn models(st: State<AppState>, req: Request) -> Response {
 ///
 /// `owned_by` 用 `combo`：平台筛选（`?platform=combo`）因此能把所有链单独列出来，
 /// 也不会与任何真实平台 id 撞（平台 id 不允许以裸 `combo` 充当链前缀）。
-fn merge_combo_models(st: &AppState, body: &Value) -> Value {
+fn merge_combo_models<'a>(st: &AppState, body: &'a Value) -> std::borrow::Cow<'a, Value> {
+    // ★ 返回 Cow 而不是 Value：最常见的路径（没配链）原本要整表深拷贝一次
+    //   （148 个模型对象），而 /v1/models 每次请求都要走一遍「合并 → 按 key 裁 → 按平台裁」。
+    //   没有启用的链时直接借用原始 body，一次分配都不做。
     let combos = st.combos.rows();
     if combos.is_empty() {
-        return body.clone();
+        return std::borrow::Cow::Borrowed(body);
     }
     let mut out = body.clone();
     let Some(arr) = out.get_mut("data").and_then(|d| d.as_array_mut()) else {
-        return out;
+        return std::borrow::Cow::Owned(out);
     };
     // 只有启用的链才发布：停用的链在 chat 侧是 404，出现在清单里会让客户端选到一个死条目
     for c in combos.iter().filter(|c| c.enabled) {
@@ -5205,7 +5210,7 @@ fn merge_combo_models(st: &AppState, body: &Value) -> Value {
             "name": c.name,
         }));
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// `?platform=<id>` 的附加说明：这个平台叫什么、开没开、有没有凭据、声明了多少模型。
@@ -5261,22 +5266,27 @@ fn platform_note(st: &AppState, plat: &str, models_count: usize) -> Value {
 /// 平台 id 不认识时返回**空清单**而不是整表：`?platform=typo` 回 148 条会让人以为
 /// 「这个平台确实有 148 个模型」。空清单配 `object:"list"` 语义上就是「没有」，
 /// 客户端把它当「该平台暂无模型」处理即可；顶层另附 `platform` 段说明缘由。
-fn filter_models_by_platform(st: &AppState, body: &Value, platform: Option<&str>) -> Value {
-    let Some(plat) = platform else { return body.clone() };
+fn filter_models_by_platform<'a>(
+    st: &AppState,
+    body: std::borrow::Cow<'a, Value>,
+    platform: Option<&str>,
+) -> std::borrow::Cow<'a, Value> {
+    // 不带 ?platform= 时是绝大多数请求：直接借用，不必深拷整表
+    let Some(plat) = platform else { return body };
     let Some(arr) = body.get("data").and_then(|d| d.as_array()) else {
-        return body.clone();
+        return body;
     };
     let kept: Vec<Value> = arr
         .iter()
         .filter(|m| m.get("owned_by").and_then(|o| o.as_str()) == Some(plat))
         .cloned()
         .collect();
-    let mut out = body.clone();
+    let mut out = body.into_owned();
     if let Some(o) = out.as_object_mut() {
         o.insert("data".to_string(), json!(kept));
         o.insert("platform".to_string(), platform_note(st, plat, kept.len()));
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// 按访问密钥的白名单裁剪 `/v1/models` 的响应。
@@ -5285,31 +5295,38 @@ fn filter_models_by_platform(st: &AppState, body: &Value, platform: Option<&str>
 /// 白名单匹配规则与 chat 侧一致（裸名放行同名的所有 `模型@平台` 组合），但这里**不能用
 /// `allows()` 逐个判**：`allows()` 要的是调用时的模型串，而清单里的 id 是裸名，
 /// 用 `allows()` 判会漏掉「白名单写的是 `模型@平台`」的情形。所以两侧各展一次。
-fn filter_models_for_key(body: &Value, key: Option<&AccessKeyCtx>) -> Value {
-    let Some(k) = key else { return body.clone() };
+fn filter_models_for_key<'a>(
+    body: std::borrow::Cow<'a, Value>,
+    key: Option<&AccessKeyCtx>,
+) -> std::borrow::Cow<'a, Value> {
+    // 没有 key / 没有白名单 = 全量放行，直接借传进来的 body（不能再拷一遍）
+    let Some(k) = key else { return body };
     if k.0.allow_models.is_empty() {
-        return body.clone();
+        return body;
     }
     let allow = &k.0.allow_models;
     let Some(arr) = body.get("data").and_then(|d| d.as_array()) else {
-        return body.clone();
+        return body;
     };
     let kept: Vec<Value> = arr
         .iter()
         .filter(|m| {
             let id = m.get("id").and_then(|x| x.as_str()).unwrap_or("");
             let owner = m.get("owned_by").and_then(|x| x.as_str()).unwrap_or("");
+            // ★ 不再为每条模型 format!("{id}@{owner}")：那条只在白名单里**确实写了**
+            //   带 @ 的条目时才可能命中，绝大多数 key 不带白名单。把拼接挪进 any 里做，
+            //   148 个模型的清单从「148 次分配」降为「命中才分配」。
             allow.iter().any(|a| {
                 a == id
                     || (!a.contains('@') && a == aigw_store::bare_model(id))
-                    || *a == format!("{id}@{owner}")
+                    || (a.contains('@') && a == &format!("{id}@{owner}"))
             })
         })
         .cloned()
         .collect();
-    let mut out = body.clone();
+    let mut out = body.into_owned();
     out["data"] = json!(kept);
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 
@@ -8801,6 +8818,101 @@ stream_dialect = "sse_delta"
         let body = body_string(res).await;
         assert!(body.contains("\"m-1\""), "body={body}");
         assert!(body.contains("\"owned_by\":\"demo\""), "body={body}");
+    }
+
+    #[tokio::test]
+    async fn models_filtering_is_identity_when_no_key_and_no_platform() {
+        // ★ 三处过滤（合并模型链 → 按访问密钥白名单裁 → 按 ?platform= 裁）现在都用
+        //   Cow 借用而不是深拷贝整表。最容易犯的错是「该原样返回的时候却改坏了结构」，
+        //   所以这里拿两个平台、不带任何过滤参数请求两次，断言结果完全一致且条目齐全。
+        let a = spec_toml(
+            r#"
+id = "pa"
+name = "PA"
+enabled = true
+auth = "anon"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["shared", "only-a"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let b = spec_toml(
+            r#"
+id = "pb"
+name = "PB"
+enabled = true
+auth = "anon"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["shared", "only-b"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let app = build_app(state(vec![a, b]));
+        let res = app.oneshot(req("/v1/models")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_string(res).await;
+        let v: Value = serde_json::from_str(&body).expect("必须是 JSON");
+        let ids: Vec<&str> = v["data"]
+            .as_array()
+            .expect("data 必须是数组")
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        // 同名模型只出现一次（owned_by 归第一个平台），另两个各出现一次
+        assert_eq!(ids.iter().filter(|i| **i == "shared").count(), 1, "ids={ids:?}");
+        assert!(ids.contains(&"only-a"), "ids={ids:?}");
+        assert!(ids.contains(&"only-b"), "ids={ids:?}");
+        assert_eq!(ids.len(), 3, "不该有重复或丢失：{ids:?}");
+        assert_eq!(v["object"], "list");
+    }
+
+    #[tokio::test]
+    async fn models_platform_filter_keeps_only_that_platform() {
+        // ?platform= 走的是 Cow 的 owned 分支；确认它既裁对、也带上了 platform 说明
+        let a = spec_toml(
+            r#"
+id = "pa"
+name = "PA"
+enabled = true
+auth = "anon"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["shared", "only-a"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let b = spec_toml(
+            r#"
+id = "pb"
+name = "PB"
+enabled = true
+auth = "anon"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["shared", "only-b"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let app = build_app(state(vec![a, b]));
+        let res = app.oneshot(req("/v1/models?platform=pb")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_string(res).await;
+        let v: Value = serde_json::from_str(&body).expect("必须是 JSON");
+        let ids: Vec<&str> = v["data"]
+            .as_array()
+            .expect("data 必须是数组")
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"only-b"), "ids={ids:?}");
+        assert!(!ids.contains(&"only-a"), "不该包含别的平台的模型：{ids:?}");
+        assert!(v.get("platform").is_some(), "缺少 platform 说明字段");
     }
 
     #[tokio::test]
