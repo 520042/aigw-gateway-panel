@@ -277,3 +277,9 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
 - **`LoginEngine::start` 290 → 47 行**：244 行的 19 分支 if/else 链抽成自由函数 `start_dispatch(client, platform, specs, &mut sess)`。约定：不返回错误，失败就地 `sess.fail()`（要原样呈现给面板）。
 - ★ Rust 结构坑：把自由函数插进 `impl LoginEngine {` 内部（缩进 4 格）→ 编译报 `cannot find function`。自由函数必须在 impl 之外。
 - 测试基线 **565**。
+
+## 2026-10-26 第十七轮（poll 分派拆分）
+- **`LoginEngine::poll` 221 → 89 行**：凭据轮询分派抽成自由函数 `poll_secret(client, &sess) -> Result<String,String>`（136 行）。约定：**不修改会话状态**，只回答「拿到凭据了吗」。
+- 返回值沿用 `Ok("token\u{1}domain")` 哨兵拼接（wb 族要 domain，为一条分支改 Result 类型不划算）。
+- ★ 坑：抽出后函数尾是原赋值语句的 `};` → 缺返回值，编译报 `expected Result, found ()`。补 `secret_raw` 即好。
+- 测试基线 **565**。
