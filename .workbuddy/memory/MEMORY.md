@@ -209,3 +209,10 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
 - ★ 坑2：搬 AppState 时把 `#[derive(Clone)]` 留在原文件，AppState 不再 Clone → axum State extractor 全线失效，报 40+ 条 Handler trait 未满足（错误信息完全指向路由，根因在结构体）。
 - ★ 坑3：本仓库 .rs 文件是 **CRLF**，写替换串必须用 `\r?\n` 或按行数组 splice，否则静默不命中。
 - 测试基线 **560**。
+
+## 2026-10-26 第七轮（chat_core 拆分）
+- **`attempt_once`**：`chat_core` 换号循环体里 160 行的「流式/非流式两条分支 + 首帧体检 + 记账 + 自愈重试」抽成独立函数，`chat_core` **435 → 279 行**。
+- ★ 坑：`let account2 = account.clone()` 对 `&str` 是 Copy（仍是借用），抽成独立函数后 `tokio::spawn` 的 `'static` 要求立刻报 E0521。改 `to_string()`。
+- ★ 修：两条分支的凭据自愈重试返回口径不一致（`return ret` 是 `Result<CoreOut, CoreErr>`，本层要三元组）。统一成「只有成功才返回，失败落回原错误分类」。
+- ★ 坑：改动本仓库 `.rs` 必须按**行数组 splice**；多行 `String.replace` 在 CRLF 下静默不命中，而且很容易多删/少删一个 `}`。
+- 测试基线 **560**。
