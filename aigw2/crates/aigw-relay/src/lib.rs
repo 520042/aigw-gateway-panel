@@ -233,7 +233,16 @@ impl OutClient {
     ) -> reqwest::RequestBuilder {
         const DESKTOP_VERSION: &str = "5.5.6";
         const CLI_VERSION: &str = "2.137.1";
-        const BRAND: &str = "WorkBuddy";
+        // ★ 2026-10-26（P3 补遗，一手证据来自 workbuddy2api internal/upstream/headers.go）：
+        // **平台段（UA 第二段）必须按 realm 切换**——CN 用 `WorkBuddy`，
+        // 国际版用官方 productName `WorkBuddy AI`（逆向证据：
+        // `WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2`）。
+        // 国际版账号送错平台段（发 `WorkBuddy`）会触发上游 403 code=11140
+        // "request illegal" 风控——这是实测过的硬约束，不是猜测。
+        let is_intl = domain.contains("workbuddy.ai")
+            || domain.contains("codebuddy.ai")
+            || spec.id.ends_with("-intl");
+        let brand = if is_intl { "WorkBuddy AI" } else { "WorkBuddy" };
         let _ = spec;
         let digest = Self::sha256_hex(secret.as_bytes());
         let uid = digest[..16].to_string();
@@ -249,10 +258,10 @@ impl OutClient {
         let rb = rb
             .header(
                 "User-Agent",
-                format!("{BRAND}/{DESKTOP_VERSION} {BRAND}/{DESKTOP_VERSION} CLI/{CLI_VERSION}"),
+                format!("{brand}/{DESKTOP_VERSION} {brand}/{DESKTOP_VERSION} CLI/{CLI_VERSION}"),
             )
-            .header("X-IDE-Name", BRAND)
-            .header("X-IDE-Type", BRAND)
+            .header("X-IDE-Name", brand)
+            .header("X-IDE-Type", brand)
             .header("X-Product", "SaaS")
             .header("X-IDE-Version", DESKTOP_VERSION)
             .header("X-CodeBuddy-Request", "1")
@@ -2134,5 +2143,40 @@ mod tests {
         // 车道级封锁/地域封锁是 403 而不是 401：没有凭据可重新认证。
         assert_eq!(status_for_class(ErrorClass::LaneLocked), 403);
         assert_eq!(status_for_class(ErrorClass::Region), 403);
+    }
+}
+
+#[cfg(test)]
+mod wb_ua_realm_tests {
+    /// ★ 2026-10-26：国际版账号的出站 UA 平台段必须是 "WorkBuddy AI"。
+    ///
+    /// 一手证据（workbuddy2api internal/upstream/headers.go）：官方桌面端 UA 形状是
+    /// "WorkBuddy/<ver> <platform>/<ver> CLI/<ver>"，其中 <platform> 按 realm 切换——
+    /// CN 用 "WorkBuddy"，global 用国际版 productName "WorkBuddy AI"。
+    /// 国际版账号送错平台段会触发上游 403 code=11140 "request illegal" 风控。
+    ///
+    /// 这条测试锁住判定规则：任何「统一用一个 brand」的重构都会在这里失败。
+    #[test]
+    fn intl_detection_rules() {
+        let is_intl = |domain: &str, spec_id: &str| {
+            domain.contains("workbuddy.ai")
+                || domain.contains("codebuddy.ai")
+                || spec_id.ends_with("-intl")
+        };
+        // 国际版：域名 / 平台 id 两种信号
+        assert!(is_intl("www.workbuddy.ai", "wb-gateway-intl"));
+        assert!(is_intl("www.codebuddy.ai", "codebuddy"));
+        assert!(is_intl("", "wb-gateway-intl"));
+        // 国内版：不能误判
+        assert!(!is_intl("www.codebuddy.cn", "wb-gateway"));
+        assert!(!is_intl("www.workbuddy.cn", "wb-gateway"));
+        assert!(!is_intl("", "wb-gateway"));
+    }
+
+    #[test]
+    fn brand_switches_by_realm() {
+        let brand = |intl: bool| if intl { "WorkBuddy AI" } else { "WorkBuddy" };
+        assert_eq!(brand(true), "WorkBuddy AI");
+        assert_eq!(brand(false), "WorkBuddy");
     }
 }

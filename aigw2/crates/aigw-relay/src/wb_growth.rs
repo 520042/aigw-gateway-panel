@@ -129,7 +129,7 @@ fn msg_id(uid: &str, salt: &str) -> String {
 }
 
 /// 一次完整「桌面端成功对话」事件链（点亮 RichMeow_Chat）。
-fn chat_sequence(uid: &str, conv: &str, req: &str, msg: &str, model: &str) -> Vec<Value> {
+fn chat_sequence(_uid: &str, conv: &str, req: &str, msg: &str, model: &str) -> Vec<Value> {
     let ts = unix_ms();
     vec![
         json!({"eventCode":"agent_task_created","conversationId":conv,"requestId":req,"timestamp":ts}),
