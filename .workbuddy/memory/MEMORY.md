@@ -244,3 +244,12 @@ UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
 - **修法**：各 Store 统一出口 `persist_now()` —— **闸门内取快照 + 写盘**。accounts / custom / keys 全部改走它。闸门实现提到 `atomic.rs`（OnceLock）供共用。
 - **★ 诚实记录**：把 persist_snapshot 改回「锁外取快照」后 keys 并发用例**仍然通过** → 该用例对「快照顺序」这一具体缺陷不敏感，只证明「大量并发写后磁盘==内存」。accounts 那条对「完全没有闸门」敏感（实测红）。
 - 测试基线 **564**。
+
+## 2026-10-26 第十二轮（三处 Store 接闸门 + 自造死锁）
+- **combos / free / flags 统一走 `persist_now()`**（闸门内取快照+写盘），与 accounts/custom/keys 同口径。flags 读路径（`is_model_disabled`，每次路由都问）不再陪写盘等磁盘。
+- **★★ 自造死锁**：free.rs 三处把 `save_locked(&rows)` 机械替换成 `persist_now()` 却**没 drop(rows)**；persist_now 在闸门内再 `inner.lock()` → 同线程二次加锁 = 立即死锁。
+  - 症状：`cargo test` 卡住、cargo 进程 CPU 0.5% 空转、`has been running for over 60 seconds` 刷屏。清进程/删 target 锁都没用。
+  - 定位：**cargo 没有超时**，只能从测试名 + 「卡住的是哪几组」反推；用 `node child_process` 直接跑 cargo 拿到完整输出比 pwsh 管道快且可靠。
+  - 纪律：`save_locked(&x)` → `persist_now()` 的机械替换**必然漏 drop**，逐处确认。
+- **前端 `modalShell(title, body)`**：全站 14 处弹窗同构（遮罩+标题+✕+内容区），已迁移 2 处（代理设置 / 网关信息），剩 5 处手写。
+- 测试基线 **564**。
