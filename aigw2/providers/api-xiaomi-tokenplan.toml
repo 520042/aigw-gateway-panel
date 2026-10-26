@@ -1,0 +1,25 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 xiaomi-tokenplan）
+id = "api-xiaomi-tokenplan"
+name = "Xiaomi MiMo Token Plan"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://token-plan-sgp.xiaomimimo.com/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "mimo-v2.5-pro",
+    "mimo-v2.5-pro-claude",
+    "mimo-v2.5",
+    "mimo-v2-pro",
+    "mimo-v2-omni",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://mimo.xiaomi.com"
+
+notes = "Token Plan subscription (keys start with tp-) and are cluster-specific; TTS ids omitted (9router notice)."

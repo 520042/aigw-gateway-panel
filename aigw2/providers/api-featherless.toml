@@ -1,0 +1,28 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 featherless）
+id = "api-featherless"
+name = "Featherless AI"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.featherless.ai/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "deepseek-ai/DeepSeek-V4-Pro",
+    "deepseek-ai/DeepSeek-V4-Flash",
+    "zai-org/GLM-5.2",
+    "zai-org/GLM-5.1",
+    "moonshotai/Kimi-K2.7-Code",
+    "moonshotai/Kimi-K2.6",
+    "moonshotai/Kimi-K2.5",
+    "Qwen/Qwen3-32B",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://featherless.ai/account/api-keys"
+
+notes = "FCC asks for tool_use + available_on_current_plan rows; pagination is numbered."

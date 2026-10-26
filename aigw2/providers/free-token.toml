@@ -3,12 +3,27 @@
 id = "free-token"
 name = "Token 能量站（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://factory.pub/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-fable-5",
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

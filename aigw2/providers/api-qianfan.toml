@@ -3,12 +3,22 @@
 id = "api-qianfan"
 name = "百度千帆 API"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://qianfan.baidubce.com/v2"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "glm-5.2",
+    "glm-5.1",
+    "kimi-k2.6",
+    "qwen3.5-397b-a17b",
+    "qwen3.5-27b",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

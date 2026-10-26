@@ -4,6 +4,7 @@
 id = "codearts"
 name = "华为云 CodeArts"
 enabled = true
+region = "cn"
 auth = "api_key"
 base_url = "https://snap-access.cn-north-4.myhuaweicloud.com"
 format = "openai"

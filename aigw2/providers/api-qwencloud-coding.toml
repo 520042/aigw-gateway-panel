@@ -1,0 +1,27 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 qwencloud_coding）
+id = "api-qwencloud-coding"
+name = "QwenCloud Coding Plan"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://coding-intl.dashscope.aliyuncs.com/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "qwen3.5-plus",
+    "kimi-k2.5",
+    "glm-5",
+    "MiniMax-M2.5",
+    "qwen3-coder-next",
+    "qwen3-coder-plus",
+    "glm-4.7",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://home.qwencloud.com/api-keys"
+
+notes = "QwenCloud Coding Plan endpoint (9router alicode-intl, same base URL as FCC)."

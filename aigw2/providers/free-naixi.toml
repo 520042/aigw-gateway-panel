@@ -3,6 +3,7 @@
 id = "free-naixi"
 name = "奶昔 New API（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://newapi.naixi.net/v1"
@@ -14,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://newapi.naixi.net/login"
 
-notes = "开户送 $5，签到送 1-2 刀/日；模型广场自选；需奶昔 SSO 账号"
+notes = "2026-10-22 探测：/api/pricing 连接失败（域名不可达）；无模型清单可填。"

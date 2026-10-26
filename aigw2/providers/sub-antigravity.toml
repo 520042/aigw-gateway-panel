@@ -1,17 +1,29 @@
 # 订阅反代 —— Google Antigravity（OAuth oauth_google）
-# 一手来源：旧版 catalog platforms/sub-antigravity
-# 登录：v2 登录引擎（设备码/PKCE）后续接入；当前可手动粘贴 token 走 @sub-* 路由
+# 一手来源：CLIProxyAPI internal/runtime/executor/antigravity_executor_request.go（buildRequest / geminiToAntigravity）
+# 登录：v2 登录引擎 PKCE（localhost:51121 回调），也可手动粘贴 OAuth access token
 id = "sub-antigravity"
 name = "Google Antigravity"
 enabled = true
+region = "intl"
 login_url = "https://antigravity.google.com"
 
 auth = "api_key"
-base_url = "https://cloudcode-pa.googleapis.com"
+base_url = "https://daily-cloudcode-pa.googleapis.com"
 format = "openai"
 
-models = []
-models_policy = "live"
+models = [
+  "gemini-3-pro-high",
+  "gemini-3-pro-low",
+  "gemini-3-flash",
+  "gemini-3.1-pro-high",
+  "gemini-3.1-pro-low",
+  "gemini-3.1-flash-lite",
+  "claude-sonnet-4-6",
+  "claude-opus-4-6-thinking",
+  "gpt-oss-120b-medium",
+]
+models_policy = "static"
 stream_dialect = "sse_delta"
+upstream_kind = "cloudcode"
 
-notes = "Google Gemini 订阅登录。Google OAuth 流程：点「接入」生成授权链接 → 浏览器登录授权 → 地址栏跳 localhost:51121/callback?code=…（页面打不开是正常的）→ 把 code= 后面那段粘贴到下方即完成登录，token 自动入库。"
+notes = "Google Antigravity / Cloud Code（Gemini 协议，非 OpenAI 兼容）。走 /v1internal:streamGenerateContent?alt=sse，项目号由 loadCodeAssist 自动获取（取不到时请在凭据 JSON 里带 project_id）。Google OAuth 流程：点「接入」生成授权链接 → 浏览器登录授权 → 地址栏跳 localhost:51121/callback?code=…（页面打不开是正常的）→ 把 code= 后面那段粘贴到下方即完成登录。⚠ Google 系接口在国内需代理：设置页「网络代理」改成 global 或 bypass_cn 并填代理地址，direct 会连不上 cloudcode-pa.googleapis.com。"

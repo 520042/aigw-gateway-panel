@@ -1,0 +1,42 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 tokenrouter）
+id = "api-tokenrouter"
+name = "TokenRouter"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.tokenrouter.com/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "anthropic/claude-haiku-4.5",
+    "anthropic/claude-sonnet-4.6",
+    "anthropic/claude-opus-4.8",
+    "anthropic/claude-opus-4.8-fast",
+    "openai/gpt-5.4",
+    "openai/gpt-5.4-mini",
+    "openai/gpt-5.4-pro",
+    "openai/gpt-5.5",
+    "openai/gpt-5.6-sol",
+    "google/gemini-3.5-flash",
+    "google/gemini-3.6-flash",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+    "qwen/qwen3-coder-next",
+    "qwen/qwen3.7-max",
+    "qwen/qwen3.8-max",
+    "moonshotai/kimi-k2.7-code",
+    "moonshotai/kimi-k3-free",
+    "z-ai/glm-5.3-free",
+    "z-ai/glm-5.2",
+    "z-ai/glm-5-turbo",
+    "x-ai/grok-4.5",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://www.tokenrouter.com/"
+
+notes = "Multi-vendor gateway with free slugs."

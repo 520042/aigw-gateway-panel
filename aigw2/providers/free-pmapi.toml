@@ -3,6 +3,7 @@
 id = "free-pmapi"
 name = "PM-API（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://xn--wnup5g6so4wn.de5.net/v1"
@@ -14,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://xn--wnup5g6so4wn.de5.net/sign-up?aff=9b8a"
 
-notes = "完全免费无签到；240 个；—"
+notes = "2026-10-22 探测：/api/pricing 返回 530（源站不可用）；无模型清单可填。"

@@ -1,15 +1,43 @@
-# Qoder 直连模型端点 —— OpenAI 兼容透传（bearer）
-# 一手来源：catalog relay_specs/web-qoder（api2-v2.qoder.sh /model/v1/chat/completions）+ qoder2api-hub
+# Qoder（直连模型端点，国际站） —— 原生 COSY 协议（qoder adapter）
+# 一手来源：_refs/qoder2api-hub-main（qoder_proxy.py）+ catalog relay_specs/web-qoder
 id = "web-qoder"
 name = "Qoder（直连模型端点）"
 enabled = true
+region = "intl"
 
 auth = "api_key"
-base_url = "https://api2-v2.qoder.sh"
+base_url = "https://api1.qoder.sh"
 format = "openai"
 
-models = ["qwen3.8-flash"]
+models = [
+    "Auto",
+    "Ultimate",
+    "Performance",
+    "Efficient",
+    "Sonus",
+    "Cantus",
+    "Qwen3.8-Max",
+    "Qwen3.8-Flash",
+    "Qwen3.7-Max",
+    "Qwen3.7-Plus",
+    "Kimi-K3",
+    "Kimi-K2.8-Preview",
+    "GLM-5.3",
+    "GLM-5.3-Flash",
+    "DeepSeek-V4-Pro",
+    "DeepSeek-Flash",
+    "MiniMax-M3",
+]
 models_policy = "static"
 stream_dialect = "sse_delta"
+upstream_kind = "qoder"
 
-notes = "qwen3.8-flash 免费；其余模型走 trial credits。凭据为 Qoder 桌面端 accessToken（Qoder2Api 设备登录获取）。"
+biz_err = ["statusCodeValue", "quota", "unauthorized"]
+
+login_url = "https://qoder.com/"
+hosts = ["qoder.sh", "qoder.com"]
+
+notes = "★ 与 apk-qoder 同一套原生链路，凭据同为 Qoder accessToken（dt- 开头）。Auto 走 trial credits 时最省。"
+
+[headers]
+x-qoder-region = "intl"

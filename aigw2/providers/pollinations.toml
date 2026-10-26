@@ -4,14 +4,21 @@
 id = "pollinations"
 name = "Pollinations（免密车道）"
 enabled = true
+region = "intl"
 
 auth = "anon"
 base_url = "https://text.pollinations.ai"
 chat_path = "/openai"
 format = "openai"
 
-models = ["openai", "openai-fast", "openai-large"]
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "openai",
+    "openai-fast",
+    "gpt-oss-20b",
+    "ovh-reasoning",
+]
 models_policy = "static"
 stream_dialect = "sse_delta"
 
-notes = "免 Key 免注册；429 为匿名速率限制（换模型/稍后再试）。M3 若接入则扩模型清单与 referrer 策略。"
+notes = "免 Key 免注册。2026-10 实测上游 /models 只剩 openai-fast（GPT-OSS 20B），别名 openai / gpt-oss / gpt-oss-20b / ovh-reasoning 均可调用；openai-large 已下线（404）。匿名限速约 1 次/30 秒/IP，429 时换模型或稍等。"

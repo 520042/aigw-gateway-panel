@@ -1,0 +1,25 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-cherryin"
+name = "CherryIN API"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://open.cherryin.net/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "deepseek/deepseek-v3.2",
+    "qwen/qwen3.5-397b-a17b",
+    "qwen/qwen3.5-122b-a10b",
+    "qwen/qwen3.5-35b-a3b(free)",
+    "qwen/qwen3.5-9b(free)",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://open.cherryin.ai/console/token"
+
+notes = "Cherry Studio 官方聚合网关；带 (free) 后缀的模型免费，适合不限量试跑。"

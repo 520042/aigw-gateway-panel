@@ -3,6 +3,7 @@
 id = "api-baichuan"
 name = "百川智能 API"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://api.baichuan-ai.com/v1"
@@ -14,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://platform.baichuan-ai.com/"
 
-notes = "在百川开放平台「API Keys」创建后粘贴"
+notes = "未找到公开模型清单接口（2026-10-22 探测），模型名需按控制台填写；此处留空避免臆造。"

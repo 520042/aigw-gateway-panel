@@ -21,7 +21,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::mpsc;
+use tokio::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 
 const BOT_ID: &str = "7338286299411103781";
@@ -391,7 +391,10 @@ pub async fn chat_stream(
     for (k, v) in headers(secret) {
         rb = rb.header(k, v);
     }
+    // 非流式必须给**总时长**：只靠 client 的 read_timeout（300s）兜底时，
+    // 上游每隔几十秒吐一个字节就能一直挂着，用户端没有任何反馈。
     let resp = rb
+        .timeout(crate::NONSTREAM_TOTAL)
         .body(req_body)
         .send()
         .await
@@ -402,10 +405,11 @@ pub async fn chat_stream(
         return Err(err(status, t.chars().take(400).collect::<String>(), ErrorClass::from_status(status)));
     }
 
-    let (tx, rx) = mpsc::channel::<StreamStat>();
+    let (tx, rx) = mpsc::channel::<StreamStat>(1);
     let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     let secret_owned = secret.to_string();
     let model_owned = model.clone();
+    let in_bytes = body.len();
     tokio::spawn(async move {
         let chat_id = format!("chatcmpl-{:024x}", nanos());
         let mk = |delta: Value, finish: Option<&str>| -> String {
@@ -421,8 +425,10 @@ pub async fn chat_stream(
             )
         };
         let mut stat = StreamStat::default();
+        let mut out_chars: usize = 0;
         let mut buf = String::new();
         let mut sent_role = false;
+        let mut dec = crate::Utf8Decoder::new();
         let mut cid_out = String::new();
         let mut stream = resp.bytes_stream();
         'outer: while let Some(item) = stream.next().await {
@@ -434,7 +440,8 @@ pub async fn chat_stream(
                     break;
                 }
             };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            let text = dec.push(&chunk);
+            buf.push_str(&text);
             let mut out = String::new();
             while let Some(pos) = buf.find('\n') {
                 let line: String = buf.drain(..=pos).collect();
@@ -449,7 +456,10 @@ pub async fn chat_stream(
                     out.push_str(&mk(json!({"reasoning_content": th}), None));
                 }
                 if !t.is_empty() {
+                    out_chars += t.chars().count() + th.chars().count();
                     out.push_str(&mk(json!({"content": t}), None));
+                } else {
+                    out_chars += th.chars().count();
                 }
                 if !c.is_empty() {
                     cid_out = c;
@@ -483,7 +493,10 @@ pub async fn chat_stream(
         }
         tail.push_str("data: [DONE]\n\n");
         let _ = bytes_tx.send(Ok(Bytes::from(tail))).await;
-        let _ = tx.send(stat);
+        let (tin, tout) = crate::estimate_stream_tokens(in_bytes, out_chars);
+        stat.tokens_in = tin;
+        stat.tokens_out = tout;
+        let _ = tx.send(stat).await;
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(bytes_rx);
     Ok((Box::pin(stream), rx))

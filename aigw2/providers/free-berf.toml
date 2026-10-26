@@ -3,12 +3,23 @@
 id = "free-berf"
 name = "BER分公益站（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://ai.berf1.cn/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "grok-4.7",
+    "deepseek-v4-flash",
+    "deepseek-v4.1-flash",
+    "deepseek-v3.2",
+    "hy3",
+    "step-5-preview",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

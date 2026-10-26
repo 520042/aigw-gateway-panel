@@ -4,14 +4,28 @@
 id = "sub-codex"
 name = "OpenAI Codex"
 enabled = true
+region = "intl"
 login_url = "https://chatgpt.com/auth/login"
 
 auth = "api_key"
 base_url = "https://api.openai.com/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-6.1-sol",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 
-notes = "ChatGPT Plus/Pro 订阅登录。PKCE OAuth 流程，登录后自动获取 access_token，网关直接反代。"
+notes = "ChatGPT Plus/Pro 订阅登录。PKCE OAuth 流程，登录后自动获取 access_token，网关直接反代。模型清单取自 Codex 订阅侧的真实目录（gpt-6-astra / gpt-6-sol / gpt-6-luna / gpt-6.1-sol / gpt-5.6-* / gpt-5.5 / gpt-5.4 / gpt-5.3-codex-spark）。注意：这类模型名只在 chatgpt.com/backend-api/codex 端点有效，若用 api.openai.com/v1 报 404，说明 base_url 需要改成 Codex 后端地址。"

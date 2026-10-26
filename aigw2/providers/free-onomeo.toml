@@ -3,6 +3,7 @@
 id = "free-onomeo"
 name = "onomeo（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://onomeo.com/v1"
@@ -14,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://onomeo.com/?ref=AC-U4P69Q"
 
-notes = "签到积分：首日 5000，第 7 天起 10000/日；35 免费 + 9 付费；免费账号 5h/20 次"
+notes = "2026-10-22 探测：/api/pricing 返回 404（接口不存在，非 new-api 站点）；无模型清单可填。"

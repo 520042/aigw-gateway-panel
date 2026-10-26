@@ -3,12 +3,23 @@
 id = "api-cloudflare"
 name = "Cloudflare Workers AI"
 enabled = true
+region = "intl"
 
 auth = "api_key"
 base_url = "https://api.cloudflare.com/client/v4/accounts/self/ai/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+    "@cf/moonshotai/kimi-k2.6",
+    "@cf/zai-org/glm-4.7-flash",
+    "@cf/qwen/qwq-32b",
+    "@cf/qwen/qwen2.5-coder-32b-instruct",
+    "@cf/meta/llama-3.1-8b-instruct-fp8-fast",
+    "@cf/mistralai/mistral-small-3.1-24b-instruct",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

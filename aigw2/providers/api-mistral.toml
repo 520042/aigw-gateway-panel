@@ -1,0 +1,19 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-mistral"
+name = "Mistral AI"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.mistral.ai/v1"
+format = "openai"
+
+# 未找到稳定的公开模型清单，留空避免臆造（models_policy=live 时以实时 /models 为准）
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://console.mistral.ai/api-keys/"
+
+notes = "Mistral 官方 API（含免费实验层 mistral-small-latest 等）；模型以 /models 实时为准。"

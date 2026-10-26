@@ -1,0 +1,28 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 llm7）
+id = "api-llm7"
+name = "LLM7.io"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.llm7.io/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "gpt-5.5",
+    "claude-opus-5",
+    "deepseek-v4-flash",
+    "grok-4.5",
+    "kimi-k3",
+    "default",
+    "fast",
+    "pro",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://dash.llm7.io/"
+
+notes = "FCC also pins the default/fast/pro aliases; the listing is filtered to streaming tool models."

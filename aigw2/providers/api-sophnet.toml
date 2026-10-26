@@ -1,0 +1,22 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-sophnet"
+name = "SophNet 算力科技"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://www.sophnet.com/api/open-apis/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "DeepSeek-R1-0528",
+    "DeepSeek-v3",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://sophnet.com/#/project/key"
+
+notes = "国内算力平台，OpenAI 兼容；模型以控制台开通清单为准。"

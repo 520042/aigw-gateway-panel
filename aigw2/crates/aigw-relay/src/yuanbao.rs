@@ -15,7 +15,7 @@ use aigw_registry::ProviderSpec;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use std::sync::mpsc;
+use tokio::sync::mpsc;
 
 const AGENT_ID: &str = "naQivTmsDa";
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
@@ -230,14 +230,18 @@ pub async fn chat_nonstream(
     let status = resp.status().as_u16();
     let mut buf = String::new();
     let mut text = String::new();
+    let mut dec = crate::Utf8Decoder::new();
     let mut thinking = String::new();
     let mut finish = "stop".to_string();
     let mut stream = resp.bytes_stream();
     while let Some(item) = stream.next().await {
         let b = item.map_err(|e| er(0, format!("上游流中断：{e}"), ErrorClass::Transient))?;
-        buf.push_str(&String::from_utf8_lossy(&b));
-        while let Some(pos) = buf.find("\n\n") {
-            let frame: String = buf.drain(..pos + 2).collect();
+        {
+            let text = dec.push(&b);
+            buf.push_str(&text);
+        }
+        while let Some((pos, sep)) = crate::find_frame_end(&buf) {
+            let frame: String = buf.drain(..pos + sep).collect();
             if let Some((et, v)) = parse_sse_frame(&frame) {
                 if et == "message" {
                     match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
@@ -326,6 +330,7 @@ pub async fn chat_stream(
         rb = rb.header(k, v);
     }
     let resp = rb
+        .timeout(crate::NONSTREAM_TOTAL)
         .body(o.body.to_string())
         .send()
         .await
@@ -336,9 +341,10 @@ pub async fn chat_stream(
         return Err(er(status, t.chars().take(400).collect::<String>(), ErrorClass::from_status(status)));
     }
 
-    let (tx, rx) = mpsc::channel::<StreamStat>();
+    let (tx, rx) = mpsc::channel::<StreamStat>(1);
     let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     let model_owned = model.clone();
+    let in_bytes = body.len();
     tokio::spawn(async move {
         let chat_id = format!("chatcmpl-{:024x}", nanos());
         let mk = |delta: Value, finish: Option<&str>| -> String {
@@ -354,7 +360,9 @@ pub async fn chat_stream(
             )
         };
         let mut stat = StreamStat::default();
+        let mut out_chars: usize = 0;
         let mut buf = String::new();
+        let mut dec = crate::Utf8Decoder::new();
         let mut sent_role = false;
         let mut sent_thinking = false;
         let mut got_content = false;
@@ -368,10 +376,11 @@ pub async fn chat_stream(
                     break;
                 }
             };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            let text = dec.push(&chunk);
+            buf.push_str(&text);
             let mut out = String::new();
-            while let Some(pos) = buf.find("\n\n") {
-                let frame: String = buf.drain(..pos + 2).collect();
+            while let Some((pos, sep)) = crate::find_frame_end(&buf) {
+                let frame: String = buf.drain(..pos + sep).collect();
                 if let Some((et, v)) = parse_sse_frame(&frame) {
                     if et == "message" {
                         match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
@@ -384,6 +393,7 @@ pub async fn chat_stream(
                                         out.push_str(&mk(json!({"role": "assistant", "content": ""}), None));
                                         sent_role = true;
                                     }
+                                    out_chars += c.chars().count();
                                     if !sent_thinking {
                                         out.push_str(&mk(json!({"reasoning_content": c}), None));
                                         sent_thinking = true;
@@ -401,6 +411,7 @@ pub async fn chat_stream(
                                         out.push_str(&mk(json!({"role": "assistant", "content": ""}), None));
                                         sent_role = true;
                                     }
+                                    out_chars += c.chars().count();
                                     out.push_str(&mk(json!({"content": c}), None));
                                 }
                             }
@@ -436,7 +447,10 @@ pub async fn chat_stream(
         }
         tail.push_str("data: [DONE]\n\n");
         let _ = bytes_tx.send(Ok(Bytes::from(tail))).await;
-        let _ = tx.send(stat);
+        let (tin, tout) = crate::estimate_stream_tokens(in_bytes, out_chars);
+        stat.tokens_in = tin;
+        stat.tokens_out = tout;
+        let _ = tx.send(stat).await;
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(bytes_rx);
     Ok((Box::pin(stream), rx))

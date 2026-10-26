@@ -1,0 +1,21 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 nararoute）
+id = "api-nararoute"
+name = "NaraRoute"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://router.bynara.id/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "kimi-k3-free",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://router.bynara.id/keys"
+
+notes = "Multi-vendor gateway; reasoning is surfaced as a boolean in the listing (FCC profile)."

@@ -3,6 +3,7 @@
 id = "free-nuomiaomiao"
 name = "糯喵喵 AI 驿站（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://ai.yangwj.me/v1"
@@ -14,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://ai.yangwj.me/sign-up?aff=gs6u"
 
-notes = "每日签到；47 个；—"
+notes = "2026-10-22 探测：/api/pricing 返回 530（源站不可用 Cloudflare HTML）；无模型清单可填。"

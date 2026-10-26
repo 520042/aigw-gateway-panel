@@ -3,6 +3,7 @@
 id = "free-huan"
 name = "Huan API（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://ai.huan666.de/v1"
@@ -14,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://ai.huan666.de/sign-up?aff=npLD"
 
-notes = "每日签到；17 个；—"
+notes = "2026-10-22 探测：/api/pricing 返回 521（Cloudflare 源站错误），站点当前不可用；无模型清单可填。"

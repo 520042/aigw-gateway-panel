@@ -4,13 +4,24 @@
 id = "sub-kimi"
 name = "Kimi Code 国内站"
 enabled = true
+region = "cn"
 login_url = "https://kimi.moonshot.cn"
 
 auth = "api_key"
 base_url = "https://api.kimi.com/coding/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "kimi-k3",
+    "kimi-for-coding",
+    "kimi-k2.7-code",
+    "kimi-k2.7-code-highspeed",
+    "kimi-k2.6",
+    "kimi-k2.5",
+    "kimi-k2.5-thinking",
+    "kimi-latest",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

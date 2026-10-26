@@ -1,15 +1,29 @@
-# WorkBuddy 账号 · 国际站（扫码 · 面板原生直连） —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/wb-gateway-intl
+# WorkBuddy 账号 · 国际站（扫码 / 设备授权 · 面板原生直连） —— v2 声明式接入
+# 一手来源：旧版 catalog platforms/wb-gateway-intl + 实测 workbuddy.ai 设备授权链路
 id = "wb-gateway-intl"
-name = "WorkBuddy 账号 · 国际站（扫码 · 面板原生直连）"
+name = "WorkBuddy 国际站"
 enabled = true
+region = "intl"
 
-auth = "api_key"
-base_url = "https://www.workbuddy.ai"
+# 登录走 workbuddy.ai 的 /v2/plugin/auth/state?platform=workbuddy（实测 200 返回授权页），
+# 对话与国内版同一个中继：copilot.tencent.com/v2/chat/completions（实测无凭据 401，
+# 说明路由存在、只是要 Bearer）。两边产品同源，模型族一致。
+auth = "o_auth_device"
+base_url = "https://copilot.tencent.com"
+chat_path = "/v2/chat/completions"
 format = "openai"
+signer = "wb"
 
-models = []
-models_policy = "live"
+# 与国内站同一套模型族（hy4-preview / deepseek-v4.x / glm-5.x / kimi / minimax）。
+# 国际站 /v1/models 是 404，只能靠静态声明；真实能否调通取决于账号所在站点。
+models = [
+    "auto", "hy4-preview", "hy3", "hy3-x",
+    "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
+    "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5v-turbo",
+    "kimi-k3-1", "kimi-k2.8-preview", "kimi-k2.7", "kimi-k2.6",
+    "minimax-m3",
+]
+models_policy = "static"
 stream_dialect = "sse_delta"
 
-notes = "国际站账号，扫码走 copilot.tencent.com 国际授权；同样由面板原生直连，不需要网关 EXE"
+notes = "国际站（workbuddy.cn 的海外站 workbuddy.ai）。设备授权：POST /v2/plugin/auth/state?platform=workbuddy → authUrl 打开后登录 → 面板取 token（GET /v2/plugin/auth/token?state=）。对话端点与国内版同为 copilot.tencent.com/v2/chat/completions，请求头需要 signer=wb 那一整族（UA / X-User-Id / X-Domain 等），已由 relay 注入。"

@@ -18,21 +18,15 @@ use md5::{Digest, Md5};
 /// 智谱清言签名密钥（glm_auth.py 一手常量）。
 pub const GLM_SIGN_SECRET: &str = "8a1317a7468aa3ad86e997d08f3f31cb";
 
-/// 随机 32 位 hex nonce（替代 uuid4().hex，无 uuid 依赖；纳秒+进程内计数器）。
+/// 随机 32 位 hex nonce（替代 uuid4().hex，无 uuid 依赖）。
 pub fn nonce_hex32() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static C: AtomicU64 = AtomicU64::new(0);
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let c = C.fetch_add(1, Ordering::Relaxed);
-    let s = format!("{n:x}{c:x}");
-    if s.len() >= 32 {
-        s[..32].to_string()
-    } else {
-        format!("{:0<32}", s)
-    }
+    use rand::RngCore;
+    // ★ 旧实现是「纳秒 + 进程内计数器」再 `{:0<32}` 右补 '0'：尾部恒定是 0，而且
+    //   不是 CSPRNG（同一纳秒窗口内的取值可枚举）。它被用作上游签名的 nonce，
+    //   这里直接取 16 字节 CSPRNG 转 hex。
+    let mut buf = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut buf);
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 复刻 glm2api `build_sign()`：毫秒时间戳，**倒数第二位是校验位**。
@@ -46,6 +40,14 @@ pub fn glm_build_sign() -> (String, String, String) {
 /// 给定毫秒时间戳的确定性版本（测试友好）。
 pub fn glm_build_sign_at(now_ms: u128) -> (String, String, String) {
     let now = format!("{now_ms}");
+    // 倒数第二位当校验位：至少要有 3 位才能找到「倒数第二」。
+    // 生产时间戳是 13 位毫秒，但入参是裸 u128，测试或误传 0..=99 时会
+    // 在 now.len()-2 处 usize 下溢 panic（debug 构建直接 abort）。
+    let now = if now.len() < 3 {
+        format!("{:0>3}", now)
+    } else {
+        now
+    };
     let digits: Vec<i64> = now
         .chars()
         .filter_map(|c| c.to_digit(10).map(|d| d as i64))
@@ -113,5 +115,31 @@ mod tests {
         let n = nonce_hex32();
         assert_eq!(n.len(), 32);
         assert!(n.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn glm_sign_tolerates_short_timestamps() {
+        // 旧实现 now.len()-2 在 1~2 位入参上 usize 下溢 panic
+        for v in [0u128, 5, 42] {
+            let (ts, nonce, sign) = glm_build_sign_at(v);
+            assert!(ts.chars().all(|c| c.is_ascii_digit()), "ts={ts}");
+            assert_eq!(nonce.len(), 32);
+            assert_eq!(sign.len(), 32);
+        }
+        // 正常 13 位仍然只替换倒数第二位、长度不变
+        let (ts, _, _) = glm_build_sign_at(1_700_000_000_123);
+        assert_eq!(ts.len(), 13);
+        assert_eq!(&ts[..11], "17000000001");
+    }
+
+    #[test]
+    fn nonce_is_32_hex_and_not_padded() {
+        let a = nonce_hex32();
+        let b = nonce_hex32();
+        assert_eq!(a.len(), 32, "nonce 必须是 32 位 hex：{a}");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "nonce 含非 hex 字符：{a}");
+        assert_ne!(a, b, "两次 nonce 撞了");
+        // 旧实现右补 '0'，低 8 位恒为 0；CSPRNG 版本不该出现这种固定尾部
+        assert!(!a.ends_with("00000000"), "nonce 尾部全 0，说明还在用补零实现：{a}");
     }
 }

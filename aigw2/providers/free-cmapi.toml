@@ -3,12 +3,22 @@
 id = "free-cmapi"
 name = "CM-API 公益站（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://api.chengmo.cc.cd/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "gemini-3.7-flash",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "deepseek-v4.1-flash",
+    "kimi-k3",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

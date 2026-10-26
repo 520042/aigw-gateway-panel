@@ -15,7 +15,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::mpsc;
+use tokio::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -141,6 +141,12 @@ pub fn diff_snap(prev: &str, cur: &str) -> Option<String> {
     }
 }
 
+/// 按**字符**截断（不能按字节切：上游错误体常是中文，
+/// `&text[..n]` 会落在 UTF-8 字符中间 panic 掉 tokio worker）。
+fn head(text: &str, n: usize) -> String {
+    text.chars().take(n).collect()
+}
+
 async fn access_token(
     spec: &ProviderSpec,
     http: &reqwest::Client,
@@ -178,13 +184,13 @@ async fn access_token(
         return Err(RelayError {
             status: 401,
             class: ErrorClass::Auth,
-            body: format!("刷新 token HTTP {status}：{}", &text[..text.len().min(200)]),
+            body: format!("刷新 token HTTP {status}：{}", head(&text, 200)),
         });
     }
     let d: Value = serde_json::from_str(&text).map_err(|_| RelayError {
         status: 401,
         class: ErrorClass::Auth,
-        body: format!("刷新 token 返回非 JSON：{}", &text[..text.len().min(200)]),
+        body: format!("刷新 token 返回非 JSON：{}", head(&text, 200)),
     })?;
     let at = d
         .pointer("/data/access_token")
@@ -195,7 +201,7 @@ async fn access_token(
         return Err(RelayError {
             status: 401,
             class: ErrorClass::Auth,
-            body: format!("刷新 token 未返回 access_token：{}", &text[..text.len().min(200)]),
+            body: format!("刷新 token 未返回 access_token：{}", head(&text, 200)),
         });
     }
     tok_cache()
@@ -341,12 +347,14 @@ pub async fn chat_stream(
     let at = access_token(spec, http, secret).await?;
     let resp = post_stream(http, spec, &at, &glm_body).await?;
 
-    let (tx, rx) = mpsc::channel::<StreamStat>();
+    let (tx, rx) = mpsc::channel::<StreamStat>(1);
     let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+    let in_bytes = body.len();
     tokio::spawn(async move {
         let mut parser = SseParser::new();
         let mut prev = String::new();
         let mut stat = StreamStat::default();
+        let mut out_chars: usize = 0;
         let chunk_id = format!("chatcmpl-glm-{}", std::process::id());
         let mut stream = resp.bytes_stream();
         let emit = |bytes_tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
@@ -369,6 +377,7 @@ pub async fn chat_stream(
                         if let SseEvent::Data(v) = ev {
                             if let Some(cur) = parts_content(&v) {
                                 if let Some(delta) = diff_snap(&prev, &cur) {
+                                    out_chars += delta.chars().count();
                                     if !emit(&bytes_tx, &delta, None) {
                                         stat.error = Some(ErrorClass::Transient);
                                         stat.error_msg = "downstream closed".into();
@@ -396,7 +405,10 @@ pub async fn chat_stream(
             stat.finish_reason = Some("stop".into());
             stat.saw_done = true;
         }
-        let _ = tx.send(stat);
+        let (tin, tout) = crate::estimate_stream_tokens(in_bytes, out_chars);
+        stat.tokens_in = tin;
+        stat.tokens_out = tout;
+        let _ = tx.send(stat).await;
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(bytes_rx);
     Ok((stream, rx))
@@ -446,6 +458,17 @@ mod tests {
         ]});
         assert_eq!(parts_content(&v).as_deref(), Some("第一段第二段"));
         assert_eq!(parts_content(&json!({"parts": []})), None);
+    }
+
+    #[test]
+    fn head_never_splits_multibyte_chars() {
+        // 中文错误体：按字节切第 200 位会落在字符中间 panic，head() 必须安全。
+        let zh = "登录已过期".repeat(100);
+        let h = head(&zh, 200);
+        assert_eq!(h.chars().count(), 200);
+        assert!(zh.starts_with(&h));
+        assert_eq!(head("abc", 10), "abc");
+        assert_eq!(head("", 10), "");
     }
 
     #[test]

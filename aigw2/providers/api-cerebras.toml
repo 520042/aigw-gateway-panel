@@ -3,12 +3,21 @@
 id = "api-cerebras"
 name = "Cerebras"
 enabled = true
+region = "intl"
 
 auth = "api_key"
 base_url = "https://api.cerebras.ai/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "gpt-oss-120b",
+    "zai-glm-4.7",
+    "llama-3.3-70b",
+    "llama-4-scout-17b-16e-instruct",
+    "qwen-3-235b-a22b-instruct-2507",
+    "qwen-3-32b",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

@@ -7590,7 +7590,6 @@ async fn anthropic_passthrough(
     body["model"] = json!(upstream_model);
     let is_stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
     let raw = serde_json::to_vec(&body).unwrap_or_default();
-    let started = std::time::Instant::now();
     // 凭据：custom 条目从 CustomStore 取（open 时已解 dpapi 为明文）
     let secret = st
         .custom

@@ -1,0 +1,27 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 byteplus）
+id = "api-byteplus"
+name = "BytePlus Ark"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://ark.ap-southeast.bytepluses.com/api/coding/v3"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "seed-2-0-pro-260328",
+    "seed-2-0-code-preview-260328",
+    "seed-2-0-mini-260215",
+    "seed-2-0-lite-260228",
+    "kimi-k2-thinking-251104",
+    "glm-4-7-251222",
+    "gpt-oss-120b-250805",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://console.byteplus.com/ark/region:ark+ap-southeast-1/apiKey"
+
+notes = "Free credits for new accounts (9router notice); Seed 2.0, Kimi K2 Thinking, GLM 4.7 and GPT-OSS-120B.（免费额度通道）"

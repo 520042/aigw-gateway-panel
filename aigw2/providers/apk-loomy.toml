@@ -7,14 +7,26 @@
 id = "apk-loomy"
 name = "Loomy 讯飞（模型网关）"
 enabled = true
+region = "cn"
 
-auth = "api_key"
+# 短信登录（手机号 + 验证码）：与微信扫码二选一，前端抽屉两个都提供。
+# 扫码要求该微信已绑定讯飞账号；短信登录对「只有手机号号」的用户是唯一通路。
+auth = "sms_code"
+login_methods = ["sms", "pwd", "qr"]
 base_url = "https://loomyad.xunfei.cn/api/v1"
 format = "openai"
 chat_path = "/chat/completions"
 models_path = "/models"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "GLM-5.3-Flash",
+    "Kimi-k2.6",
+    "MiniMax-M3",
+    "deepseek-v4-flash-0731",
+    "qwen-3.8-max",
+    "qwen3.8-flash",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

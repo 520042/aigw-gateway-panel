@@ -5,6 +5,7 @@
 id = "apk-metaso"
 name = "秘塔 AI 搜索"
 enabled = true
+region = "cn"
 
 # cookie 车道，但允许留空（留空走匿名指纹；粘贴 uid-sid 走登录额度）
 auth = "cookie"

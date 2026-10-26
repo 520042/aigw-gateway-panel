@@ -3,12 +3,19 @@
 id = "api-stepfun"
 name = "阶跃星辰 API"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://api.stepfun.com/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "step-3-7-flash",
+    "step-3-5-flash",
+    "step-2-16k",
+    "step-1-32k",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

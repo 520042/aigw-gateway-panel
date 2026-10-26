@@ -4,13 +4,22 @@
 id = "sub-grok"
 name = "xAI Grok"
 enabled = true
+region = "intl"
 login_url = "https://grok.com"
 
 auth = "api_key"
 base_url = "https://api.x.ai/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "grok-4.6",
+    "grok-4.5",
+    "grok-4",
+    "grok-4-fast-reasoning",
+    "grok-code-fast-1",
+    "grok-3",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

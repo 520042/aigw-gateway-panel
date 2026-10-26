@@ -3,12 +3,19 @@
 id = "api-minimax"
 name = "MiniMax API"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://api.minimax.chat/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "MiniMax-M3",
+    "MiniMax-M2.7",
+    "MiniMax-M2.5",
+    "MiniMax-M2.1",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

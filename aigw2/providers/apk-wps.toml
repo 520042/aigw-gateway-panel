@@ -4,6 +4,7 @@
 id = "apk-wps"
 name = "WPS AI（金山办公）"
 enabled = true
+region = "cn"
 
 auth = "cookie"
 base_url = "https://www.wps.cn"

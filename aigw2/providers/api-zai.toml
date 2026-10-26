@@ -1,0 +1,30 @@
+# Z.AI（智谱国际站）—— OpenAI 兼容透传（api_key）
+# 与 api-zhipu（open.bigmodel.cn 国内站）是两套独立账号体系：key 不通用。
+id = "api-zai"
+name = "Z.AI 国际站 API（GLM）"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.z.ai/api/paas/v4"
+format = "openai"
+
+# paas/v4 的 /models 不在公认契约里（文档只给 chat/completions），保守用静态清单。
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "glm-5.1",
+    "glm-5-turbo",
+    "glm-5",
+    "glm-4.7",
+    "glm-4.6v",
+    "glm-4.7-flash",
+]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+login_url = "https://z.ai/manage-apikey/apikey-list"
+
+notes = "在 z.ai → API Keys 生成后粘贴（国内站请用 api-zhipu，key 不通用）。glm-4.5-flash 免费。"

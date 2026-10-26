@@ -3,6 +3,7 @@
 id = "codex"
 name = "Codex（自有 Key）"
 enabled = true
+region = "intl"
 
 auth = "api_key"
 base_url = "https://api.openai.com/v1"

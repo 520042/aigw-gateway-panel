@@ -7,8 +7,15 @@ edition.workspace = true
 aigw-core = { path = "../aigw-core" }
 rusqlite = { workspace = true }
 serde = { workspace = true }
+base64 = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 tempfile = "3"

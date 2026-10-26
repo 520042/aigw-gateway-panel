@@ -1,0 +1,27 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-tokenhub"
+name = "腾讯 TokenHub（MaaS）"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://tokenhub.tencentmaas.com/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "glm-5.2",
+    "glm-5.1",
+    "kimi-k2.6",
+    "minimax-m3",
+    "qwen3.5-plus",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://console.cloud.tencent.com/tokenhub/apikey"
+
+notes = "腾讯云 MaaS 聚合：DeepSeek / 混元 / GLM / Kimi / MiniMax / Qwen 统一 Key，按 token 计费。"

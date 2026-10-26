@@ -1,0 +1,24 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-moonshot-global"
+name = "Kimi 国际站（Moonshot AI）"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.moonshot.ai/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "kimi-k2.5",
+    "kimi-k2.6",
+    "kimi-k2.7-code",
+    "kimi-k2.7-code-highspeed",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://platform.moonshot.ai/console/api-keys"
+
+notes = "国际站，和国内站（api-moonshot，platform.moonshot.cn）账号与 Key 不通用；国内直连通常要代理。"

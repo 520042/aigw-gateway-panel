@@ -1,0 +1,22 @@
+# 本机 our-free-model 网关 —— 作为一等接入源（原来的「自定义 API」桥改成正式平台）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model（forward 转发网关，默认 127.0.0.1:18899）
+# 为什么做成 providers 而不是「自定义 API」：providers 是文件形态、随包发布、可版本化；
+# 自定义 API 是运行时数据（data/custom.json），一次误发的 curl 就能把它重建出来。
+id = "our-free-model"
+name = "Our Free Model（本机转发网关 · EAC 协付 / Kilo / 免费车道）"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "http://127.0.0.1:18899/v1"
+format = "openai"
+
+# 模型清单一律走 live（本机网关的 /v1/models 会随订阅与车道变化，不写死）
+models = []
+models_policy = "live"
+models_path = "/models"
+stream_dialect = "sse_delta"
+
+login_url = "http://127.0.0.1:18899/"
+
+notes = "需要先在面板给它填 Key：取 C:/Users/liang.zhao/.dsh/our-free-model/settings.json 里的 forwardKey（ofm- 开头）。本机网关没起时这个平台会显示「没有可用凭据 / 连接失败」，不会影响其它平台。"

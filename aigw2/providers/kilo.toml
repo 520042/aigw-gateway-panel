@@ -4,12 +4,21 @@
 id = "kilo"
 name = "Kilo Gateway（免凭据免费池）"
 enabled = true
+region = "intl"
 
 auth = "anon"
 base_url = "https://api.kilo.ai/api/gateway"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "kilo-auto/free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "kwaipilot/kat-coder-pro-v2.5:free",
+    "kilo-auto/frontier",
+    "kilo-auto/balanced",
+]
 models_policy = "live"
 models_path = "/models"
 models_filter = "isFree"

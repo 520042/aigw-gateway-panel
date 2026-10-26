@@ -3,12 +3,20 @@
 id = "free-pomelo"
 name = "Pomelo（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://api.67.si/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "grok-4.7",
+    "qwen3.8-max",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "openai/gpt-oss-120b",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

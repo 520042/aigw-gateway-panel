@@ -1,15 +1,37 @@
-# Trae 直连端点 —— OpenAI 兼容透传（bearer）
-# 一手来源：catalog relay_specs/apk-trae（api.trae.cn /api/v1/chat/completions）
+# Trae（字节 SOLO 通道）—— 原生协议 adapter（upstream_kind = "trae"）
+# 一手来源：_refs/JeffHu0912-trae2api（Go 纯协议实现，无客户端依赖）
+# 链路：POST {agent}/api/agent/v3/llm_utils_chat，Authorization: Cloud-IDE-JWT <token>
+#       响应是 SOLO 自定义 SSE（event: output / token_usage / done / error）
 id = "apk-trae"
-name = "Trae（直连端点）"
+name = "Trae SOLO（跳转登录）"
 enabled = true
+region = "cn"
 
 auth = "api_key"
-base_url = "https://api.trae.cn"
+base_url = "https://trae-api-cn.mchost.guru"
 format = "openai"
 
-models = []
-models_policy = "none"
+models = [
+    "DeepSeek-V4-Pro",
+    "DeepSeek-V4-Flash",
+    "Doubao-Seed-Code",
+    "Doubao-Seed-2.1-Pro",
+    "GLM-5.3",
+    "GLM-5.3-Flash",
+    "glm-5.2",
+    "Kimi-K3",
+    "Kimi-K2.7-Code",
+    "MiniMax-M3",
+    "Qwen3.8-Max",
+    "Qwen3.8-Flash",
+    "Gemini-3.1-Pro-Preview",
+]
+models_policy = "static"
 stream_dialect = "sse_delta"
+upstream_kind = "trae"
+biz_err = ["session expired", "invalid token", "unauthorized"]
 
-notes = "凭据为 Trae 客户端 token（hook/导入）；协议细节见调研文档 wangqi233/trae2api 的 PROTOCOL.md。"
+login_url = "https://www.trae.cn"
+hosts = ["trae-api-cn.mchost.guru", "trae.cn", "trae.com.cn"]
+
+notes = "★ 走 SOLO 通道（原 api.trae.cn 的 OpenAI 透传是错的，Trae 并不提供 OpenAI 兼容端点）。先在接入源点「跳转登录」走 18080 回调，登录后自动拿 Cloud-IDE-JWT。model 写 模型名@apk-trae。"

@@ -1,0 +1,19 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-xirang"
+name = "天翼云 息壤"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://wishub-x1.ctyun.cn/v1"
+format = "openai"
+
+# 未找到稳定的公开模型清单，留空避免臆造（models_policy=live 时以实时 /models 为准）
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://huiju.ctyun.cn/service/serviceGroup"
+
+notes = "天翼云息壤 MaaS，OpenAI 兼容；未找到公开模型清单，按控制台填。"

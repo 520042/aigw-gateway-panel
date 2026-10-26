@@ -1,18 +1,37 @@
-# Trae 直连（Trae2api-cn 逆向） —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/web-trae
+# Trae（字节 SOLO 通道）—— 原生协议 adapter（upstream_kind = "trae"）
+# 一手来源：_refs/JeffHu0912-trae2api（Go 纯协议实现，无客户端依赖）
+# 链路：POST {agent}/api/agent/v3/llm_utils_chat，Authorization: Cloud-IDE-JWT <token>
+#       响应是 SOLO 自定义 SSE（event: output / token_usage / done / error）
 id = "web-trae"
-name = "Trae 直连（Trae2api-cn 逆向）"
+name = "Trae SOLO（粘贴 Token）"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://trae-api-cn.mchost.guru"
 format = "openai"
 
-models = []
-models_policy = "live"
+models = [
+    "DeepSeek-V4-Pro",
+    "DeepSeek-V4-Flash",
+    "Doubao-Seed-Code",
+    "Doubao-Seed-2.1-Pro",
+    "GLM-5.3",
+    "GLM-5.3-Flash",
+    "glm-5.2",
+    "Kimi-K3",
+    "Kimi-K2.7-Code",
+    "MiniMax-M3",
+    "Qwen3.8-Max",
+    "Qwen3.8-Flash",
+    "Gemini-3.1-Pro-Preview",
+]
+models_policy = "static"
 stream_dialect = "sse_delta"
+upstream_kind = "trae"
+biz_err = ["session expired", "invalid token", "unauthorized"]
 
-login_url = "https://www.trae.com.cn"
+login_url = "https://www.trae.cn"
 hosts = ["trae-api-cn.mchost.guru", "trae.cn", "trae.com.cn"]
 
-notes = "★ 直连 Trae 国内版，无需手机开 App。取 x-ide-token：桌面端登录一次后，从 Trae 的 leveldb/Electron LocalStorage 取 ideToken（或用 OAuth refresh 换）。对话 model 写 模型id@web-trae（gpt-4o / claude-3-7-sonnet / deepseek-v3 / deepseek-r1 等）。★ 嫌手动抠麻烦？在「腾讯/原生登录」页点「读取本机 Trae 登录态」（/api/tencent?action=trae_local）可一键自动提取并落库（需面板与本机 Trae 同一台电脑）。"
+notes = '★ 与 apk-trae 同一条 SOLO 链路，区别只是凭据来源：这里粘 accessToken（Cloud-IDE-JWT），也可粘 {"accessToken":"…","refreshToken":"…","uid":"…"} 便于自动续期。从客户端 storage.json 的 auth.accessToken 取。'

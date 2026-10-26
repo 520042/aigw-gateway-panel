@@ -1,5 +1,6 @@
 # Cline（VSCode 插件账号 · WorkOS OAuth 设备码）——参考 cline2api 号池
 id = "cline"
+region = "intl"
 name = "Cline（WorkOS 设备码）"
 base_url = "https://api.cline.bot/api/v1"
 chat_path = "/chat/completions"

@@ -1,18 +1,30 @@
 # Antigravity / Google Cloud Code —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/apk-antigravity
+# 一手来源：CLIProxyAPI antigravity executor + AIClient2API antigravity-core.js 模型目录
 id = "apk-antigravity"
 name = "Antigravity / Google Cloud Code"
 enabled = true
+region = "intl"
 
 auth = "cookie"
-base_url = "https://cloudcode-pa.googleapis.com"
+base_url = "https://daily-cloudcode-pa.googleapis.com"
 format = "openai"
 
-models = []
-models_policy = "none"
+models = [
+  "gemini-3-pro-high",
+  "gemini-3-pro-low",
+  "gemini-3-flash",
+  "gemini-3.1-pro-high",
+  "gemini-3.1-pro-low",
+  "gemini-3.1-flash-lite",
+  "claude-sonnet-4-6",
+  "claude-opus-4-6-thinking",
+  "gpt-oss-120b-medium",
+]
+models_policy = "static"
 stream_dialect = "sse_delta"
+upstream_kind = "cloudcode"
 
 login_url = "https://accounts.google.com/"
 hosts = ["google.com", "googleapis.com"]
 
-notes = "Google 官方 Antigravity（APK 内 UA antigravity/1.15.8，pluginType=GEMINI）。需 Google 账号，取 oauth2 token 或 Cookie。⚠ 2026-10-06 实测：accounts.google.com 在服务端无头浏览器里抓不到二维码——Google 官方说明 QR 登录是「用已登录手机给电脑做二次验证」，且明确写了「电脑端可能无法扫描」，遇风控/VPN 更会直接隐藏 QR 选项退回密码登录。故本平台**不支持远程扫码**，请在自己电脑浏览器登录后手动粘贴 Cookie（或 oauth2 token）"
+notes = "Google 官方 Antigravity（APK 内 UA antigravity/1.15.8，pluginType=GEMINI）。对话走 Gemini 协议 adapter（upstream_kind=cloudcode）。桌面端 Antigravity 用 OAuth，不是扫码：请在自己电脑登录后手动粘贴 oauth2 access token（可附 project_id）。⚠ Google 明确 QR 登录只用于「已登录手机给电脑做二次验证」，本平台不支持远程扫码。⚠ Google 系接口在国内需代理：设置页「网络代理」改成 global 或 bypass_cn 并填代理地址，direct 会连不上 cloudcode-pa.googleapis.com。"

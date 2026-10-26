@@ -1,0 +1,26 @@
+# Qwen AI 国际版（chat.qwen.ai）—— 纯 HTTP 网页协议 adapter（无浏览器）
+# 一手来源：xiaoY233/Chat2API 的 src/main/proxy/adapters/qwen-ai.ts
+# 凭据是浏览器登录态：Bearer token（Local Storage 的 token）+ 完整 Cookie。
+# 只粘 token 不粘 Cookie 时上游常回 Bad_Request，所以两种形态都支持：
+#   - 整段 Cookie（里面必然带 token=…）
+#   - JSON {"token":"…","cookies":"…"}
+id = "web-qwen"
+name = "Qwen AI 国际版（网页）"
+enabled = true
+region = "intl"
+
+auth = "cookie"
+base_url = "https://chat.qwen.ai"
+format = "openai"
+
+models = ["qwen3.7-max", "qwen3.6-plus", "qwen3.6-35b-a3b", "qwen3.6-27b", "qwen3-coder-plus"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+upstream_kind = "qwen-web"
+biz_err = ["Bad_Request", "Unauthorized"]
+
+login_url = "https://chat.qwen.ai/"
+hosts = ["chat.qwen.ai"]
+
+notes = "网页版对话（非 OpenAI 兼容）：后台自动建会话再走 /api/v2/chat/completions，思考流映射成 reasoning_content。获取凭据：登录 chat.qwen.ai → DevTools → Application → Local Storage 复制 token，同时从 Network 任意请求复制完整 Cookie，一起粘贴。"

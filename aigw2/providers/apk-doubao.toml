@@ -5,8 +5,10 @@
 id = "apk-doubao"
 name = "豆包 网页版"
 enabled = true
+region = "cn"
 
-auth = "cookie"
+auth = "qr_scan"
+login_methods = ["qr", "paste"]
 base_url = "https://www.doubao.com"
 format = "openai"
 chat_path = "/samantha/chat/completion"

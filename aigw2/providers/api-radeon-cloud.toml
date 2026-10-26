@@ -1,0 +1,26 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-radeon-cloud"
+name = "AMD Radeon Cloud"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://developer.amd.com.cn/radeon/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "DeepSeek-V4-Pro",
+    "DeepSeek-V4-Flash",
+    "GLM-5.2",
+    "gpt-oss-120b",
+    "Kimi-K2.6",
+    "Qwen3.6-35B-A3B",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://developer.amd.com.cn/radeon/tokenfactory"
+
+notes = "AMD 开发者云模型服务；国内可访问。"

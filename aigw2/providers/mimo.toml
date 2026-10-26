@@ -1,0 +1,22 @@
+# 小米 MiMo（AISTUDIO 网页版）—— 纯 HTTP 私有协议 adapter（无浏览器）
+# 一手来源：xiaoY233/Chat2API 的 src/main/proxy/adapters/mimo.ts
+# 凭据是浏览器的三个 Cookie：serviceToken / userId / xiaomichatbot_ph（粘贴整段 Cookie 即可）
+id = "mimo"
+name = "小米 MiMo（AISTUDIO 网页）"
+enabled = true
+region = "cn"
+
+auth = "cookie"
+base_url = "https://aistudio.xiaomimimo.com"
+format = "openai"
+
+models = ["MiMo-V2.5-Pro", "MiMo-V2.5", "MiMo-V2-Flash"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+upstream_kind = "mimo"
+
+login_url = "https://aistudio.xiaomimimo.com/"
+hosts = ["aistudio.xiaomimimo.com"]
+
+notes = "网页版对话（非 OpenAI 兼容）：后台先 POST /open-apis/chat/conversation/save 建会话，再 POST /open-apis/bot/chat 拿 SSE；思考内容以 <think> 标签混在正文里，会被剥掉。获取凭据：登录 aistudio.xiaomimimo.com → F12 → Network 任意请求 → 复制整段 Cookie（含 serviceToken / userId / xiaomichatbot_ph）。"

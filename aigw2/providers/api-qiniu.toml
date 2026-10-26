@@ -1,0 +1,21 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-qiniu"
+name = "七牛云 AI 推理"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://api.qnaigc.com/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "mimo-v2-flash",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://portal.qiniu.com/ai-inference/api-key"
+
+notes = "七牛云 AI 推理；模型以控制台为准，实况拿 /models 即可。"

@@ -1,0 +1,25 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-lanyun"
+name = "蓝耘（LANYUN）MaaS"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://maas-api.lanyun.net/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "deepseek-v3.1",
+    "/maas/deepseek-ai/DeepSeek-V3.2",
+    "/maas/zhipuai/GLM-5",
+    "MiniMax-M2.1",
+    "qwen3-32b",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://maas.lanyun.net/#/system/apiKey"
+
+notes = "国内 GPU 云 MaaS；部分模型名带 /maas/ 前缀，以控制台模型广场为准。"

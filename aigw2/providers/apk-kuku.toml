@@ -5,8 +5,10 @@
 id = "apk-kuku"
 name = "库库 AI（百度文库）"
 enabled = true
+region = "cn"
 
-auth = "cookie"
+auth = "qr_scan"
+login_methods = ["qr", "paste"]
 base_url = "https://kuku.baidu.com"
 format = "openai"
 

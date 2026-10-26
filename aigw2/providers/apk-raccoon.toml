@@ -1,18 +1,31 @@
-# 小浣熊（商汤）—— 网页版 llm v2，本就是 OpenAI 兼容格式（cookie 透明转发）
-# 一手来源：aigw-panel-rs catalog relay_specs/apk-raccoon（xiaohuanxiong.com/api/web/llm/v2）
-# 凭据：登录 xiaohuanxiong.com 后的 Cookie（secret 整串放 Cookie 头）
+# 小浣熊（商汤）—— 网页版 llm v2，本就是 OpenAI 兼容格式（Bearer access_token 直连）
+# 一手来源：_refs/Ebony-Vinyl-dsh-our-free-model/vendor/channel-pack/src/raccoon*.ts
+# 凭据：微信小程序扫码换到的 access_token（Bearer，约 3h 有效）；实测上游不认整段 Cookie（只设 INGRESSCOOKIE）
 id = "apk-raccoon"
 name = "小浣熊（网页版）"
 enabled = true
+region = "cn"
 
-auth = "cookie"
+auth = "qr_scan"
+login_methods = ["qr", "paste"]
 base_url = "https://xiaohuanxiong.com"
 format = "openai"
 chat_path = "/api/web/llm/v2/chat/completions"
-models_path = "/api/web/llm/v2/models"
+# 验活走 user_info：带有效 Bearer 返回 200（旧的 /api/web/llm/v2/models 实测 404，导致账号永远 unusable）
+models_path = "/api/web/auth/v1/user_info"
 
-models = []
-models_policy = "live"
+# 模型清单先做静态白名单：真实清单接口是 /api/web/llm/v2/model_catalog（需鉴权，信封形状未核实），
+# 这 6 个 id 来自参考实现 2026-09-26 的实测可见清单，顺序照抄远端返回顺序。
+# 注意：不含 Raccoon-Auto（客户端 i18n 的「自动选模」入口，发给上游会 404）。
+models = [
+  "sn-sensenova-6-8-flash",
+  "sn-sensenova-6-8-flash-lite",
+  "sn-glm-5-3",
+  "sn-kimi-k3",
+  "sn-glm-5-3-flash",
+  "sn-deepseek-v4-1-flash",
+]
+models_policy = "static"
 stream_dialect = "sse_delta"
 
 biz_err = ["登录", "失效", "未登录", "请登录", "401"]
@@ -20,4 +33,9 @@ biz_err = ["登录", "失效", "未登录", "请登录", "401"]
 login_url = "https://xiaohuanxiong.com/"
 hosts = ["xiaohuanxiong.com"]
 
-notes = "凭据为小浣熊网页登录 Cookie。模型清单实时拉取；对话走标准 OpenAI 协议透明转发。"
+notes = "凭据为微信小程序（商汤小浣熊）扫码换到的 access_token，Bearer 转发，约 3 小时有效、过期需重新扫码；桌面端两个 X-Client-* 头必须带，否则上游按未授权处理。"
+
+[headers]
+"X-Client-Platform" = "desktop-windows"
+"X-Client-Version" = "v1.0.35"
+"User-Agent" = "Raccoon Work/1.0.35 (Windows)"

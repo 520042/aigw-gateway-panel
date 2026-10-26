@@ -1,17 +1,21 @@
-# 订阅反代 —— Devin（OAuth oauth_pkce）
-# 一手来源：旧版 catalog platforms/sub-devin
-# 登录：v2 登录引擎（设备码/PKCE）后续接入；当前可手动粘贴 token 走 @sub-* 路由
+# 订阅反代 —— Devin（Cognition）
+# Devin 不是 chat completions 协议，而是「会话型 Agent」：一次调用 = 开一个云端会话，
+# 由 Devin 干活，完成后从会话消息里取回复（见 aigw2/crates/aigw-relay/src/devin.rs）。
+# 上游实测 2026-10-22：GET https://api.devin.ai/v1/sessions → 403（端点存在，需鉴权）。
 id = "sub-devin"
-name = "Devin"
+name = "Devin（Cognition 会话型 Agent）"
 enabled = true
+region = "intl"
 login_url = "https://app.devin.ai/login"
 
 auth = "api_key"
 base_url = "https://api.devin.ai/v1"
 format = "openai"
 
-models = []
-models_policy = "live"
+models = ["devin"]
+models_policy = "static"
 stream_dialect = "sse_delta"
+upstream_kind = "devin"
+biz_err = ["unauthorized", "invalid_token", "session limit"]
 
-notes = "Devin 订阅登录。PKCE OAuth 流程，登录后自动获取 session_token，网关直接反代。"
+notes = '会话型 Agent：模型名固定 devin，调用写 devin@sub-devin。面板会 POST /v1/sessions 建会话并轮询到 finished，再把最后一条 devin_message 当回复返回；流式是会话跑完后按 48 字符切块吐出（上游本身不流式）。⚠ 每次请求都会新建一个 Devin 会话并消耗额度，别拿它当普通聊天模型刷。凭据：app.devin.ai → Settings → API Keys 的 token（也接受 {"token":"…","org_id":"…"}）。'

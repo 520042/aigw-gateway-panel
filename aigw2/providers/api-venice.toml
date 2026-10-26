@@ -1,0 +1,29 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 venice）
+id = "api-venice"
+name = "Venice AI"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.venice.ai/api/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "venice-uncensored-1-2",
+    "zai-org-glm-5",
+    "qwen3-235b-a22b-instruct-2507",
+    "qwen3-coder-480b-a35b-instruct-turbo",
+    "qwen3-vl-235b-a22b",
+    "deepseek-v4-pro",
+    "llama-3.3-70b",
+    "hermes-3-llama-3.1-405b",
+    "mistral-small-3-2-24b-instruct",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://venice.ai/settings/api"
+
+notes = "Private inference plus uncensored models (9router notice). Embedding and image ids omitted."

@@ -3,12 +3,21 @@
 id = "api-deepseek"
 name = "DeepSeek 官方 API"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://api.deepseek.com/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "deepseek-v4-pro",
+    "deepseek-v4-pro-max",
+    "deepseek-v4.1-flash",
+    "deepseek-v4-flash",
+    "deepseek-chat",
+    "deepseek-reasoner",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

@@ -1,0 +1,21 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 novita）
+id = "api-novita"
+name = "Novita AI"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.novita.ai/openai/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "deepseek/deepseek-v4-flash-0731",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://novita.ai/settings/key-management"
+
+notes = "FCC README example id."

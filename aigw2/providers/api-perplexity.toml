@@ -1,0 +1,21 @@
+# Perplexity 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/xiaoY233-Chat2API/docs/providers/perplexity.md + 官方文档
+id = "api-perplexity"
+name = "Perplexity 官方 API"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.perplexity.ai"
+format = "openai"
+
+# Perplexity 没有 /models 端点（只有 chat/completions），清单必须静态。
+# sonar 系列在返回的 choices[].message.content 之外还带 citations/search_results，
+# 属于「多出来的字段」——透传不会破坏 OpenAI 客户端解析。
+models = ["sonar", "sonar-pro", "sonar-reasoning", "sonar-reasoning-pro", "sonar-deep-research"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+login_url = "https://www.perplexity.ai/settings/api"
+
+notes = "在 perplexity.ai → Settings → API 生成 key 后粘贴。免费额度按账号等级发放（Pro 每月 $5 credit）。"

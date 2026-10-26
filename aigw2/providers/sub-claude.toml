@@ -4,13 +4,19 @@
 id = "sub-claude"
 name = "Anthropic Claude Code"
 enabled = true
+region = "intl"
 login_url = "https://claude.ai/login"
 
 auth = "api_key"
 base_url = "https://api.anthropic.com/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "claude-sonnet-4-20250514",
+    "claude-opus-4-20250514",
+    "claude-3-5-sonnet-20241022",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

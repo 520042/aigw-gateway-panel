@@ -6,12 +6,14 @@
 id = "lobster"
 name = "网易 Lobster AI（有道龙虾）"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://lobsterai-server.youdao.com/api/proxy/v1"
 format = "openai"
 
-models = ["DeepSeek-V4.1-Flash", "DeepSeek-V4-Pro", "glm-5.3", "kimi-k2.7-code", "qwen3.8-max"]
+# 上游模型名一律「裸小写」（实测：大写 DeepSeek-V4.1-Flash / DeepSeek-V4-Pro 会被判 40300「不支持的模型」）
+models = ["glm-5.3", "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k2.7-code", "qwen3.8-max"]
 models_policy = "static"
 stream_dialect = "sse_delta"
 

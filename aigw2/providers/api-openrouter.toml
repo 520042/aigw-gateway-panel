@@ -3,12 +3,25 @@
 id = "api-openrouter"
 name = "OpenRouter API"
 enabled = true
+region = "intl"
 
 auth = "api_key"
 base_url = "https://openrouter.ai/api/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "minimax/minimax-m3.1-flash:free",
+    "cohere/north-mini-code:free",
+    "thinkingmachines/inkling:free",
+    "poolside/laguna-s-2.1:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "liquid/lfm-2.5-2.6b:free",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

@@ -24,6 +24,10 @@ pub enum AuthKind {
     OAuthDevice,
     /// 扫码登录（copilot 原生、豆包）。
     QrScan,
+    /// 手机号 + 短信验证码（讯飞 Loomy、Trae 手机登录）。与扫码同级：
+    /// 都是「用户在抽屉里做一步交互、上游发一个短期凭据回来」，但短信要多一次
+    /// 往返（先发码拿 msgid，再交验证码换 session），前端需要两步表单。
+    SmsCode,
     /// Cookie / 会话（元宝、web 反代系）。
     Cookie,
     /// 本地客户端凭据解密（Trae storage.json、ZCode credentials.json 信封）。
@@ -65,6 +69,15 @@ pub struct ProviderSpec {
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub auth: AuthKind,
+    /// 这个平台**实际支持的全部登录方式**（qr / sms / pwd / device / paste / cookie），
+    /// 空表示「按 auth 推导」（见 `login_methods()`）。
+    ///
+    /// 为什么需要它：一个平台常常同时有多种通路 —— Loomy 既有微信扫码又有手机号短信/密码；
+    /// 只用 `auth` 单值表达会强迫二选一，于是「relay 实现了扫码、toml 却写 sms_code」
+    /// 这种状态就会出现，前端抽屉只画手填框，扫码入口根本到不了（实测踩过）。
+    /// 这里显式列出来，前端和测试都有据可依。
+    #[serde(default)]
+    pub login_methods: Vec<String>,
     /// 上游 API 根地址（不带尾斜杠），如 `https://opencode.ai/zen/v1`。
     pub base_url: String,
     /// 线协议：openai | anthropic | responses。
@@ -73,6 +86,12 @@ pub struct ProviderSpec {
     #[serde(default)]
     pub models: Vec<String>,
     pub models_policy: ModelsPolicy,
+    /// 声明流的方言（sse_delta | json_full | …）。
+    ///
+    /// ★ 目前**仅用于登记/展示**：relay 走的是「字节原样透传」，不做按方言的
+    /// 事件归一（`crates/aigw-relay/src/lib.rs` 里 0 处引用本字段）。写进 toml
+    /// 不会改变行为，换成 anthropic 方言也不会被翻译——真正决定能不能用的是
+    /// `format`（只有 openai 被接受）。保留字段是为了将来接 Responses/Anthropic 归一。
     pub stream_dialect: StreamDialect,
     /// 固定请求头（如 anon-zen 的 `Authorization: Bearer public` + UA）。
     #[serde(default)]
@@ -109,6 +128,14 @@ pub struct ProviderSpec {
     /// 目前仅 WPS 灵犀、360 纳米（仅登录/验活，官方逆向需浏览器或只有付费 API）。
     #[serde(default = "default_true")]
     pub chat_supported: bool,
+    /// 站点区域：`cn`（国内站）| `intl`（国际站/海外，国内直连通常要代理）| `global`（同一入口、全球可达）。
+    ///
+    /// ★ 有国内/国际**双站点**的平台（Kimi、MiniMax、智谱 ↔ Z.AI、Qoder、Trae、WorkBuddy）
+    /// 必须分别声明：两边的**账号与 Key 不通用**、登录入口也不同。前端据此打「国内 / 国际」
+    /// 徽章、给出「该挂代理 / 该直连」的提示，并让上游连不上时**直接说清是代理问题**而不是
+    /// 让人去怀疑凭据。
+    #[serde(default = "default_region")]
+    pub region: String,
 }
 
 impl ProviderSpec {
@@ -129,6 +156,27 @@ impl ProviderSpec {
             &self.models_path
         }
     }
+
+    /// 这个平台支持的登录方式（前端抽屉据此决定画哪些选项卡、测试据此核对 relay 覆盖）。
+    ///
+    /// 显式声明优先；没写就按 `auth` 推导出唯一一种 —— 老 toml 不用改。
+    pub fn login_methods(&self) -> Vec<&str> {
+        if !self.login_methods.is_empty() {
+            return self.login_methods.iter().map(|s| s.as_str()).collect();
+        }
+        match self.auth {
+            AuthKind::QrScan => vec!["qr"],
+            AuthKind::SmsCode => vec!["sms"],
+            AuthKind::OAuthDevice => vec!["device"],
+            AuthKind::ApiKey | AuthKind::Cookie | AuthKind::ClientFile => vec!["paste"],
+            AuthKind::Anon => vec![],
+        }
+    }
+
+    /// 是否支持扫码登录。
+    pub fn supports_qr(&self) -> bool {
+        self.login_methods().contains(&"qr")
+    }
 }
 
 fn default_true() -> bool {
@@ -137,6 +185,10 @@ fn default_true() -> bool {
 
 fn default_upstream_kind() -> String {
     "openai".into()
+}
+
+fn default_region() -> String {
+    "global".into()
 }
 
 /// 校验 spec 合法性；返回第一条不合法原因。
@@ -169,13 +221,20 @@ pub fn validate(spec: &ProviderSpec) -> Result<(), String> {
         "openai" | "anthropic" | "responses" => {}
         other => return Err(format!("format 非法：{other}（openai|anthropic|responses）")),
     }
-    match spec.upstream_kind.as_str() {
-        "openai" | "chatglm" | "doubao" | "yuanbao" | "kuku" | "metaso" => {}
-        other => return Err(format!("upstream_kind 非法：{other}（openai|chatglm|doubao|yuanbao|kuku|metaso）")),
+    match spec.region.as_str() {
+        "cn" | "intl" | "global" => {}
+        other => return Err(format!("region 非法：{other}（cn|intl|global）")),
+    }
+    if !KNOWN_UPSTREAM_KINDS.contains(&spec.upstream_kind.as_str()) {
+        return Err(format!(
+            "upstream_kind 非法：{}（可选：{}）",
+            spec.upstream_kind,
+            KNOWN_UPSTREAM_KINDS.join("|")
+        ));
     }
     match spec.signer.as_str() {
-        "" | "glm" | "codearts" | "loomy" => {}
-        other => return Err(format!("signer 非法：{other}（空|glm|codearts|loomy）")),
+        "" | "glm" | "codearts" | "loomy" | "wb" => {}
+        other => return Err(format!("signer 非法：{other}（空|glm|codearts|loomy|wb）")),
     }
     if spec.upstream_kind == "chatglm" && spec.signer != "glm" {
         return Err("upstream_kind=chatglm 要求 signer=glm".into());
@@ -188,6 +247,30 @@ pub fn validate(spec: &ProviderSpec) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// 所有已实现的 upstream_kind。
+///
+/// **新增 adapter 必须同时改两处**：这里的白名单 + `aigw-relay` 的 `has_adapter`。
+/// 只改一边的后果分别是「toml 被静默跳过」和「静默走 OpenAI 透传」，
+/// 后者更隐蔽，所以 `aigw-relay` 有一条测试反向校验本表。
+pub const KNOWN_UPSTREAM_KINDS: &[&str] = &[
+    "openai",
+    "chatglm",
+    "doubao",
+    "yuanbao",
+    "kuku",
+    "metaso",
+    "qwen-web",
+    "mimo",
+    "kiro",
+    "deepseek-web",
+    "opencode",
+    "cloudcode",
+    "qoder",
+    "trae",
+    "coze",
+    "devin",
+];
 
 /// 从字符串解析并校验（测试与加载器共用）。
 pub fn parse_spec(raw: &str) -> Result<ProviderSpec, String> {
@@ -202,8 +285,34 @@ pub fn load_file(path: &Path) -> Result<ProviderSpec, String> {
     parse_spec(&raw)
 }
 
-/// 加载目录下全部 *.toml spec；任一非法则报 [`RegistryError::Multi`]（含逐文件原因）。
+/// 加载目录下全部 *.toml spec，**跳过非法文件并逐条告警**（不再整表失败）。
+///
+/// 为什么改：旧实现「任一非法即 `RegistryError::Multi`」会让 main 用空表启动，
+/// 一个写错的 toml（或新增 upstream_kind/signer 未同步白名单）就能把 122 个平台
+/// 静默打成 0 个，且只有一条 warn，排查成本极高。现在坏文件只丢自己。
+///
+/// 只有目录本身不可读才返回 Err（那是真的环境故障）。
 pub fn load_dir(dir: &Path) -> Result<Vec<ProviderSpec>, RegistryError> {
+    let (specs, errors) = load_dir_lenient(dir)?;
+    if !errors.is_empty() {
+        for (file, reason) in &errors {
+            tracing::warn!("registry 跳过非法 spec {file}：{reason}");
+        }
+        tracing::warn!(
+            "registry：{} 个 spec 加载成功，{} 个非法被跳过（服务继续启动）",
+            specs.len(),
+            errors.len()
+        );
+    }
+    Ok(specs)
+}
+
+/// 加载目录，返回 (合法 spec, 逐文件错误)。目录不可读才 Err。
+///
+/// 供 `/api/health` 等面向上层展示「哪些 spec 被跳过了」。
+pub fn load_dir_lenient(
+    dir: &Path,
+) -> Result<(Vec<ProviderSpec>, Vec<(String, String)>), RegistryError> {
     let entries = std::fs::read_dir(dir).map_err(RegistryError::Io)?;
     let mut specs = Vec::new();
     let mut errors: Vec<(String, String)> = Vec::new();
@@ -222,11 +331,8 @@ pub fn load_dir(dir: &Path) -> Result<Vec<ProviderSpec>, RegistryError> {
             Err(reason) => errors.push((fname, reason)),
         }
     }
-    if !errors.is_empty() {
-        return Err(RegistryError::Multi(errors));
-    }
     specs.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(specs)
+    Ok((specs, errors))
 }
 
 /// 用 settings 表替换 spec 内的 `@word` 占位符（旧版语义：`@lobster` → settings.lobster_server）。
@@ -299,6 +405,18 @@ stream_dialect = "sse_delta"
     }
 
     #[test]
+    fn region_defaults_to_global_and_rejects_unknown() {
+        // 没写 region 的老 toml 必须继续能加载（默认 global），否则升级会让 80 个
+        // provider 全被 load_dir_lenient 跳过——平台数直接从 127 掉到 0。
+        let s = parse_spec(VALID).unwrap();
+        assert_eq!(s.region, "global");
+        // 写了但拼错要**报错**而不是静默 global：区域错了会给出完全相反的代理建议
+        let raw = VALID.replace("stream_dialect", "region = \"jp\"\nstream_dialect");
+        let err = parse_spec(&raw).unwrap_err().to_string();
+        assert!(err.contains("region 非法"), "err={err}");
+    }
+
+    #[test]
     fn parse_anon_zen_style() {
         // 与 providers/anon-zen.toml 同构（headers 表 + 空 models + live 策略）
         let raw = r#"
@@ -351,7 +469,8 @@ User-Agent = "opencode/1.18.31"
     }
 
     #[test]
-    fn load_dir_reports_each_bad_file() {
+    fn load_dir_skips_bad_file_and_keeps_rest() {
+        // 容错语义：坏文件只丢自己，好文件照常加载（旧行为是整表失败 → 空表启动）
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a-good.toml"), VALID).unwrap();
         std::fs::write(
@@ -360,15 +479,24 @@ User-Agent = "opencode/1.18.31"
         )
         .unwrap();
         std::fs::write(tmp.path().join("c-bad.toml"), "id = \"x\"\nname = \"坏\"").unwrap();
-        // 非法 spec：缺其余必填字段
-        let err = load_dir(tmp.path()).unwrap_err();
-        match err {
-            RegistryError::Multi(list) => {
-                assert_eq!(list.len(), 1);
-                assert_eq!(list[0].0, "c-bad.toml");
-            }
-            other => panic!("期望 Multi，得到 {other:?}"),
-        }
+        let specs = load_dir(tmp.path()).expect("坏文件不应导致整表失败");
+        assert_eq!(specs.len(), 2, "两个好文件应保留：{:?}", specs.iter().map(|s| &s.id).collect::<Vec<_>>());
+        assert!(specs.iter().any(|s| s.id == "demo"));
+        assert!(specs.iter().any(|s| s.id == "beta"));
+    }
+
+    #[test]
+    fn load_dir_lenient_reports_each_bad_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a-good.toml"), VALID).unwrap();
+        std::fs::write(tmp.path().join("c-bad.toml"), "id = \"x\"\nname = \"坏\"").unwrap();
+        std::fs::write(tmp.path().join("d-bad.toml"), "id = \"y\"").unwrap();
+        let (specs, errors) = load_dir_lenient(tmp.path()).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(errors.len(), 2);
+        let names: Vec<&str> = errors.iter().map(|(f, _)| f.as_str()).collect();
+        assert!(names.contains(&"c-bad.toml"));
+        assert!(names.contains(&"d-bad.toml"));
     }
 
     #[test]
@@ -386,6 +514,82 @@ User-Agent = "opencode/1.18.31"
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].id, "alpha");
         assert_eq!(specs[1].id, "zeta");
+    }
+
+    /// 仓库里真正随包发布的 `providers/*.toml` 必须全部合法。
+    ///
+    /// 为什么必须有这条：`load_dir` 是 lenient 的（坏文件只 warn 后跳过），
+    /// 所以一个漏写的必填字段（真实事故：anon-zen.toml 少了 `models_policy`）
+    /// 会让整个平台**静默消失** —— 服务照常启动、`/api/platforms` 只是少一行，
+    /// 直到用户发现某个模型 404 才暴露。这条测试把「静默跳过」变成 CI 红灯。
+    #[test]
+    fn shipped_providers_are_all_valid() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("providers");
+        if !dir.is_dir() {
+            // 打包环境（只带编译产物、不带源码树）跳过，不算失败。
+            eprintln!("跳过：找不到 {}（非源码树环境）", dir.display());
+            return;
+        }
+        let (specs, errors) = load_dir_lenient(&dir).expect("providers 目录应可读");
+        assert!(
+            specs.len() >= 50,
+            "随包 spec 数量异常偏少（{}），可能整目录解析失败",
+            specs.len()
+        );
+        assert!(
+            errors.is_empty(),
+            "有 {} 个随包 spec 非法（会被静默跳过）：{:?}",
+            errors.len(),
+            errors
+        );
+    }
+
+    /// 扫码平台的两半必须对上：toml 说 `auth = "qr_scan"` 的平台，relay 里必须有真的
+    /// 「出码 + 轮询」实现；否则面板会给用户画一个永远扫不出结果的二维码。
+    /// 反之 relay 有实现、toml 却写成 cookie 的平台也会掉进「填 Cookie」分支，
+    /// 扫码入口根本到不了（2026-10 的 Loomy 就是这个坑，排查花了很久）。
+    #[test]
+    fn qr_scan_platforms_have_a_matching_relay_implementation() {
+        // relay 的 LoginEngine::start 里真正实现了扫码轮询的平台 id。
+        // 改动这里必须同时改 aigw-relay/src/auth_login.rs 的分派分支。
+        const IMPLEMENTED: &[&str] = &["apk-doubao", "apk-kuku", "apk-loomy", "apk-raccoon"];
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("providers");
+        if !dir.is_dir() {
+            eprintln!("跳过：找不到 {}（非源码树环境）", dir.display());
+            return;
+        }
+        let (specs, _) = load_dir_lenient(&dir).expect("providers 目录应可读");
+        let mut qr: Vec<String> = specs
+            .iter()
+            .filter(|s| s.supports_qr())
+            .map(|s| s.id.clone())
+            .collect();
+        qr.sort();
+        assert!(!qr.is_empty(), "至少要有一个扫码平台，否则前端「仅看扫码」筛选永远是 0");
+        for id in &qr {
+            assert!(
+                IMPLEMENTED.contains(&id.as_str()),
+                "{id} 声明了 auth=qr_scan，但 relay 里没有对应的扫码实现（会出一个扫不出结果的码）"
+            );
+        }
+        // 反方向：有实现却没声明 qr 的平台，抽屉里根本走不到扫码分支。
+        for id in IMPLEMENTED {
+            let s = specs.iter().find(|s| s.id == *id);
+            let Some(s) = s else { continue };
+            assert!(
+                s.supports_qr(),
+                "{id} 在 relay 里有扫码实现，toml 却没列 qr（auth={:?}，login_methods={:?}）—— \
+                 用户会在抽屉里只看到手填框",
+                s.auth,
+                s.login_methods
+            );
+        }
     }
 
     #[test]

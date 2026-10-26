@@ -3,12 +3,22 @@
 id = "api-modelscope"
 name = "魔搭 ModelScope API"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://api-inference.modelscope.cn/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "Qwen/Qwen3-235B-A22B-Thinking-2507",
+    "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "Qwen/Qwen3-30B-A3B-Thinking-2507",
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "ZhipuAI/GLM-4.6",
+    "ZhipuAI/GLM-4.5",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

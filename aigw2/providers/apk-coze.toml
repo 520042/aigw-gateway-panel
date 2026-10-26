@@ -1,18 +1,24 @@
-# 扣子 Coze（api.coze.cn 官方 API） —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/apk-coze
+# 扣子（Coze）开放平台 —— 原生 v3 chat 协议（coze adapter）
+# 实测 2026-10-22：POST https://api.coze.cn/v1/chat/completions → 404 code=4000
+#   「The requested API endpoint POST /v1/chat/completions does not exist」；
+#   POST https://api.coze.cn/v3/chat 存在（200）。⇒ 扣子不是 OpenAI 兼容端点，
+#   对话对象是「你自己发布的 bot」，因此模型名 = bot_id。
 id = "apk-coze"
-name = "扣子 Coze（api.coze.cn 官方 API）"
+name = "扣子 Coze（开放平台 bot）"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://api.coze.cn"
 format = "openai"
-
-models = []
-models_policy = "live"
+chat_path = "/v3/chat"
+models_path = "/v1/workspaces"
+models_policy = "none"
 stream_dialect = "sse_delta"
+upstream_kind = "coze"
+biz_err = ["authentication is invalid", "token is invalid", "permission denied"]
 
-login_url = "https://www.coze.cn/"
-hosts = ["coze.cn"]
+login_url = "https://www.coze.cn/open/oauth/pats"
+hosts = ["api.coze.cn", "coze.cn"]
 
-notes = "唯一有完整开放 API 的国内 Agent 平台。在扣子控制台「个人访问令牌」生成 pat_ 开头的 PAT，粘到下面即可（浏览器 Cookie 会被 401 拒绝）"
+notes = '★ 凭据填扣子开放平台的个人访问令牌 PAT（pat_ 开头）。模型名写 **你的 bot_id**：调用时用 模型位置填 <bot_id>@apk-coze（也可直接写 bot:<bot_id>）。bot 需先在扣子里「发布 → 发布为 API 服务」。国际站把 base_url 换成 https://api.coze.com。'

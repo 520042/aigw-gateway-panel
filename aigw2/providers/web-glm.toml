@@ -6,6 +6,7 @@
 id = "web-glm"
 name = "智谱清言（glm2api 逆向）"
 enabled = true
+region = "cn"
 
 auth = "cookie"
 base_url = "https://chatglm.cn/chatglm"

@@ -1,0 +1,15 @@
+id = "sub-kiro"
+name = "Kiro（AWS CodeWhisperer / Amazon Q）"
+enabled = true
+region = "intl"
+auth = "cookie"
+base_url = "https://q.us-east-1.amazonaws.com"
+format = "openai"
+models = ["claude-sonnet-4.5", "claude-sonnet-4-5", "claude-opus-4.5", "claude-opus-4-5", "claude-haiku-4.5", "claude-haiku-4-5", "claude-sonnet-4.5-thinking"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+upstream_kind = "kiro"
+biz_err = ["UnauthorizedException", "AccessDeniedException"]
+login_url = "https://kiro.dev/"
+hosts = ["q.us-east-1.amazonaws.com"]
+notes = "凭据从 Kiro 客户端导出（JSON：accessToken / refreshToken / region / authMethod / profileArn）；AWS Event Stream 帧由本 adapter 解析，token 数按字节估算。"

@@ -3,6 +3,7 @@
 id = "free-agentrouter"
 name = "AgentRouter（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://agentrouter.org/v1"
@@ -14,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://agentrouter.org/register?aff=jnrM"
 
-notes = "注册赠 $100，签到送 $25；Claude/GPT/GLM/DeepSeek；GitHub 注册满 5 年"
+notes = "2026-10-22 探测：/api/pricing 与网页均连接失败（域名不可达），站点可能已下线；无模型清单可填。"

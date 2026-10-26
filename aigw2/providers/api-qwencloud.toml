@@ -1,0 +1,26 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 qwencloud）
+id = "api-qwencloud"
+name = "QwenCloud Token Plan"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+models = [
+    "qwen3.8-max-preview",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-flash",
+    "glm-5.2",
+    "deepseek-v4-pro",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://home.qwencloud.com/api-keys"
+
+notes = "QwenCloud Token Plan endpoint (9router alitp-intl, same base URL as FCC)."

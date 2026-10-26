@@ -19,7 +19,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use rand::Rng;
 use serde_json::{json, Value};
-use std::sync::mpsc;
+use tokio::sync::mpsc;
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -249,7 +249,8 @@ fn parse_frame(v: &Value) -> Result<(String, String, Option<Value>), Option<Rela
                     4001 => ErrorClass::Quota,
                     _ => ErrorClass::Transient,
                 };
-                return Err(Some(er(502, format!("秘塔错误 code={} {}", code, msg), class)));
+                let st = crate::status_for_class(class);
+                return Err(Some(er(st, format!("秘塔错误 code={} {}", code, msg), class)));
             }
             _ => return Ok((String::new(), String::new(), None)), // conversation_init 等
         }
@@ -334,8 +335,12 @@ pub async fn chat_nonstream(
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     while let Some(item) = stream.next().await {
+    let mut dec = crate::Utf8Decoder::new();
         let b = item.map_err(|e| er(0, format!("上游流中断: {e}"), ErrorClass::Transient))?;
-        buf.push_str(&String::from_utf8_lossy(&b));
+        {
+            let text = dec.push(&b);
+            buf.push_str(&text);
+        }
         while let Some(pos) = buf.find('\n') {
             let line: String = buf.drain(..=pos).collect();
             let raw = line.trim();
@@ -407,6 +412,7 @@ pub async fn chat_stream(
     }
     let meta = fetch_meta(http, spec, secret).await?;
     let resp = post_chat(http, spec, &meta, build_chat_body(&query, &meta.token, mode, engine))
+        .timeout(crate::NONSTREAM_TOTAL)
         .send()
         .await
         .map_err(|e| er(0, format!("network: {e}"), ErrorClass::Transient))?;
@@ -416,9 +422,10 @@ pub async fn chat_stream(
         return Err(er(status, t.chars().take(400).collect::<String>(), ErrorClass::from_status(status)));
     }
 
-    let (tx, rx) = mpsc::channel::<StreamStat>();
+    let (tx, rx) = mpsc::channel::<StreamStat>(1);
     let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     let model_owned = model.clone();
+    let in_bytes = body.len();
     tokio::spawn(async move {
         let chat_id = format!("chatcmpl-{}", temp_uuid());
         let mk = |delta: Value, finish: Option<&str>| -> String {
@@ -434,7 +441,9 @@ pub async fn chat_stream(
             )
         };
         let mut stat = StreamStat::default();
+        let mut out_chars: usize = 0;
         let mut buf = String::new();
+        let mut dec = crate::Utf8Decoder::new();
         let mut sent_role = false;
         let mut got_content = false;
         let mut stream = resp.bytes_stream();
@@ -447,7 +456,8 @@ pub async fn chat_stream(
                     break;
                 }
             };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            let text = dec.push(&chunk);
+            buf.push_str(&text);
             let mut out = String::new();
             while let Some(pos) = buf.find('\n') {
                 let line: String = buf.drain(..=pos).collect();
@@ -469,6 +479,7 @@ pub async fn chat_stream(
                         if !r.is_empty() {
                             out.push_str(&mk(json!({"reasoning_content": r}), None));
                         }
+                        out_chars += c.chars().count() + r.chars().count();
                         if !c.is_empty() {
                             got_content = true;
                             out.push_str(&mk(json!({"content": c}), None));
@@ -509,7 +520,10 @@ pub async fn chat_stream(
         }
         tail.push_str("data: [DONE]\n\n");
         let _ = bytes_tx.send(Ok(Bytes::from(tail))).await;
-        let _ = tx.send(stat);
+        let (tin, tout) = crate::estimate_stream_tokens(in_bytes, out_chars);
+        stat.tokens_in = tin;
+        stat.tokens_out = tout;
+        let _ = tx.send(stat).await;
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(bytes_rx);
     Ok((Box::pin(stream), rx))

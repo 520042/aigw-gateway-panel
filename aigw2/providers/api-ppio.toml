@@ -1,0 +1,27 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-ppio"
+name = "PPIO 派欧云 API"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://api.ppinfra.com/v3/openai"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "deepseek/deepseek-v3.2",
+    "deepseek/deepseek-v3.1",
+    "zai-org/glm-5",
+    "zai-org/glm-4.7",
+    "moonshotai/kimi-k2.5",
+    "minimax/minimax-m2.5",
+    "qwen/qwen3.5-122b-a10b",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://ppio.com/settings/key-management"
+
+notes = "国内聚合云：DeepSeek / GLM / Kimi / MiniMax / Qwen 一个 Key。模型名带厂商前缀。"

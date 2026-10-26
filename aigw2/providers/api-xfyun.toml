@@ -3,6 +3,7 @@
 id = "api-xfyun"
 name = "讯飞星辰 MaaS API"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://spark-api-open.xf-yun.com/v1"
@@ -14,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://console.xfyun.cn/"
 
-notes = "用星辰 MaaS 的 http key（Bearer 直用）；注意 spark-api.xf-yun.com 老星火是 HMAC 签名，不适用"
+notes = "讯飞星火 HTTP 接口的 model 字段不是 OpenAI 模型名（是 4.0Ultra / generalv3.5 / max-32k / lite 这类版本代号），需按控制台开通的版本填写；留空避免臆造。"

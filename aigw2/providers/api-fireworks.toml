@@ -1,0 +1,26 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-fireworks"
+name = "Fireworks AI"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.fireworks.ai/inference/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "accounts/fireworks/models/deepseek-v4-pro-0813",
+    "accounts/fireworks/models/glm-5p3",
+    "accounts/fireworks/models/kimi-k3",
+    "accounts/fireworks/models/gpt-oss-120b",
+    "accounts/fireworks/models/minimax-m3",
+    "accounts/fireworks/models/qwen3p8-max",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://fireworks.ai/account/api-keys"
+
+notes = "国际推理服务；模型名是 accounts/fireworks/models/... 全路径，面板直填即可。"

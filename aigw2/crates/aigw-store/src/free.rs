@@ -40,11 +40,36 @@ pub struct FreeStore {
 
 impl FreeStore {
     /// 从 data 目录加载（不存在则空表；路径为 data/free_sites.json）。
+    ///
+    /// 损坏不再静默重置：旧实现 `from_str(&raw).unwrap_or_default()` 在文件被写坏时
+    /// 直接空表启动，而后续任何一次 toggle/refresh/remove 的 `save_locked` 都会用
+    /// 内存里的空表**覆盖**原文件 —— 用户手动添加并启用过的公益站全部永久丢失，
+    /// 日志里一个字都没有。与 flags.rs / accounts.rs / custom.rs 对齐：先把坏文件
+    /// 留档成 `free_sites.json.bad-<ts>`，再空表启动并 warn（留档可人工抢救）。
     pub fn open(data_dir: &Path) -> FreeStore {
         let p = data_dir.join("free_sites.json");
         let rows: Vec<FreeSite> = match std::fs::read_to_string(&p) {
-            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-            Err(_) => Vec::new(),
+            Ok(raw) => match serde_json::from_str::<Vec<FreeSite>>(&raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let bad = data_dir.join(format!("free_sites.json.bad-{ts}"));
+                    let _ = std::fs::rename(&p, &bad);
+                    tracing::warn!(
+                        "free_sites.json 解析失败（{e}），已留档为 {} 并以空表启动",
+                        bad.display()
+                    );
+                    Vec::new()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                tracing::warn!("free_sites.json 读取失败（{e}），以空表启动");
+                Vec::new()
+            }
         };
         FreeStore {
             inner: Mutex::new(rows),
@@ -60,15 +85,11 @@ impl FreeStore {
         }
     }
 
+    /// 原子落盘（tmp + fsync + rename）。
     fn save_locked(&self, rows: &[FreeSite]) {
         if let Some(p) = &self.path {
-            if let Ok(mut f) = std::fs::File::create(p) {
-                use std::io::Write;
-                let _ = f.write_all(
-                    serde_json::to_string_pretty(rows)
-                        .unwrap_or_default()
-                        .as_bytes(),
-                );
+            if let Err(e) = crate::atomic::write_json_atomic(p, &rows) {
+                tracing::warn!("free_sites 落盘失败（{}）：{e}", p.display());
             }
         }
     }
@@ -108,6 +129,18 @@ impl FreeStore {
         }
         self.save_locked(&rows);
         (added, kept)
+    }
+
+    /// 启用/停用站点；返回是否命中。
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> bool {
+        let mut rows = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = rows.iter_mut().find(|r| r.id == id) {
+            r.enabled = enabled;
+            self.save_locked(&rows);
+            true
+        } else {
+            false
+        }
     }
 
     /// 删除站点；返回是否真的删了。
@@ -178,5 +211,27 @@ mod tests {
         assert_eq!(a.desc, "更新");
         assert!(st.remove("free-aaa"));
         assert_eq!(st.rows().len(), 2);
+    }
+
+    /// 损坏的 free_sites.json 必须留档，不能静默空表启动。
+    ///
+    /// 旧实现 `from_str(&raw).unwrap_or_default()` 会把用户的站点表读成空，
+    /// 下一次 save_locked 就把它覆盖掉 —— 手动添加并启用过的公益站全部蒸发。
+    #[test]
+    fn corrupt_file_is_archived_not_silently_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("free_sites.json");
+        std::fs::write(&p, "{ this is not json").unwrap();
+        let st = FreeStore::open(dir.path());
+        assert!(st.rows().is_empty(), "坏文件应空表启动");
+        // 坏文件必须被改名留档（可人工抢救），而不是留在原位等着被覆盖
+        let bad: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("free_sites.json.bad-"))
+            .collect();
+        assert_eq!(bad.len(), 1, "坏文件应留档为 free_sites.json.bad-<ts>：{bad:?}");
+        assert!(!p.exists(), "原文件应已被改名（否则下次落盘会覆盖证据）");
     }
 }

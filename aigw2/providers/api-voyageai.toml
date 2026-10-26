@@ -1,0 +1,21 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-voyageai"
+name = "Voyage AI"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.voyageai.com/v1"
+format = "openai"
+
+# 未找到稳定的公开模型清单，留空避免臆造（models_policy=live 时以实时 /models 为准）
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+chat_supported = false
+
+login_url = "https://dashboard.voyageai.com/organization/api-keys"
+
+notes = "Voyage 官方嵌入 / 重排模型；chat 端点不可用，仅供 /v1/embeddings。"

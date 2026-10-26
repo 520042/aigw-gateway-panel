@@ -1,0 +1,24 @@
+# 官方 API —— OpenAI 兼容透传（api_key）
+# 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
+id = "api-poe"
+name = "Poe API"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.poe.com/v1"
+format = "openai"
+
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "claude-sonnet-4.5",
+    "Claude-Opus-4.8",
+    "Gemini-3.1-Pro",
+    "GPT-5.4",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://poe.com/api/keys"
+
+notes = "Poe 订阅账号的 API Key：按订阅点数扣费，官方提供 OpenAI 兼容端点。"

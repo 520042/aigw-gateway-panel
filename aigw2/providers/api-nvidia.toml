@@ -3,12 +3,23 @@
 id = "api-nvidia"
 name = "NVIDIA NIM"
 enabled = true
+region = "intl"
 
 auth = "api_key"
 base_url = "https://integrate.api.nvidia.com/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "minimaxai/minimax-m2.7",
+    "minimaxai/minimax-m3",
+    "z-ai/glm-5.2",
+    "deepseek-ai/deepseek-v4-pro",
+    "deepseek-ai/deepseek-v4-flash",
+    "moonshotai/kimi-k2.6",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "nvidia/nemotron-3-super-120b-a12b",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

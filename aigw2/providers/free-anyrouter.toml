@@ -3,6 +3,7 @@
 id = "free-anyrouter"
 name = "AnyRouter（公益）"
 enabled = true
+region = "global"
 
 auth = "api_key"
 base_url = "https://anyrouter.top/v1"
@@ -14,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://anyrouter.top/register?aff=pG9m"
 
-notes = "注册赠 $100，签到送 $25；Claude 系 10+；Linux Do 信任等级≥2"
+notes = "2026-10-22 探测：/api/pricing 连接失败（域名不可达），站点可能已下线或需要代理；无模型清单可填。"

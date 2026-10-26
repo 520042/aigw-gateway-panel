@@ -42,7 +42,16 @@ cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 aes-gcm = "0.10"
 rsa = "0.9"
 base64 = "0.22"
+wasmi = "0.31"
 
 [profile.release]
 lto = "thin"
 strip = true
+
+# wasm 求解器（DeepSeek POW）跑在 dev profile 下是解释执行 + 无优化，
+# 7 万次候选要 15 秒；只把 wasmi 自身按 -O3 编译，安装包/开发构建都能回到百毫秒级。
+[profile.dev.package.wasmi]
+opt-level = 3
+
+[profile.dev.package.wasmi_core]
+opt-level = 3

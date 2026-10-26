@@ -3,6 +3,7 @@
 id = "kimi-code"
 name = "Kimi Coding（直连端点）"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://api.kimi.com/coding/v1"

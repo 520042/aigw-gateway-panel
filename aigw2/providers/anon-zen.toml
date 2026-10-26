@@ -1,22 +1,39 @@
-# 免密车道：OpenCode Zen 匿名通道 —— v2 第一份声明式 spec
-# 一手来源：aigw-panel-rs/src/platforms.json#anon-zen + server/free_lane_models.rs（实测）
-# 上游契约：GET {base_url}/models，Authorization: Bearer public，UA opencode/1.18.31
-#           → {"data":[{id,...}]}，86 个模型（-free / :free 后缀为免费款）
+# 免密车道：OpenCode Zen 匿名通道 —— v2 线缆（dsh-our-free-model upstream.js 蓝本）
+# 一手来源：_refs/Ebony-Vinyl/dsh-our-free-model/src/upstream.js（2026-10-22 全读后移植）
+# 上游契约：POST {base}/inference/v1/chat/completions（v1 的 /zen/v1 已停用，收到即 403 FreeTierError）
+#           UA opencode/latest/2.0.26/cli + Authorization Bearer public + x-opencode-* 会话头
+#           （不带 x-opencode-request：v1 头，v2 收到即 403）
+# 工具闸门：read/shell 必须逐字声明（opencode.rs 自动注入/改名冲突），tool_choice none 会被删除
+# 模型清单：2026-10-22 实测 GET /inference/v1/models 200 → 86 个模型，免费档（-free 后缀 / big-pickle）共 10 个
 id = "anon-zen"
-name = "Our Free Model（OpenCode Zen 匿名车道）"
+name = "Our Free Model（OpenCode Zen 免 Key 车道）"
 enabled = true
+region = "global"
 
 auth = "anon"
-base_url = "https://opencode.ai/zen/v1"
+base_url = "https://opencode.ai"
 format = "openai"
+upstream_kind = "opencode"
 
-# live 策略：模型实时拉取（M2 落地），失败回退本清单（当前为空）
-models = []
-models_policy = "live"
+# 静态免费清单：只列 2026-10-22 实测确实存在的免费档（400 Model is unavailable /
+# 410 ModelDeprecated 的 id 已剔除：space-bunny-free、step-5-preview-free、
+# ling-3.0-flash-fin-free、ling-3.1-flash-free、union-alpha、exo-free）。
+# 当时全部被 403 FreeTierError（车道级封锁）挡住 —— 这是上游准入策略，不是凭据问题。
+models = [
+  # 403 FreeTierError（车道级封锁，解除后即可用）
+  "big-pickle",
+  "flint-40b-free",
+  "mimo-v2.6-flash-free",
+  "nemotron-3.5-super-vl-free",
+  "nemotron-3.5-lightning-free",
+  "jev-1.13-free",
+  "deepseek-v4.1-flash-free",
+  "glm-5.3-flash-free",
+  "minimax-m3.1-flash-free",
+  # 403 RegionError（地域封锁，换出口 IP 才可用）
+  "beam-free",
+]
+models_policy = "static"
 stream_dialect = "sse_delta"
 
-[headers]
-Authorization = "Bearer public"
-User-Agent = "opencode/1.18.31"
-
-notes = "免登录免 Key。免费额度按会话计，短时打满会 429（换会话/稍后再用）；个别地区 403。M2 接 live 模型拉取与真实转发。"
+notes = "免 Key 免费车道（v2 线缆）：2026-10-22 实测 /inference/v1/models 公开可读且 POST 匿名请求需 v2 会话头+工具闸门。共享配额，429 FreeUsageLimitError 时 retry-after 可能长达 12 小时。当日 POST 全模型被 403 FreeTierError 车道级封锁（参考项目 issue #410/#399 同期同样被拒），网关按 lane 分类处理：只冻该模型 2 分钟、不拉黑账号、不提示重新登录。"

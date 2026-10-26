@@ -3,12 +3,16 @@
 id = "api-huggingface"
 name = "HuggingFace Inference"
 enabled = true
+region = "intl"
 
 auth = "api_key"
 base_url = "https://router.huggingface.co/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "Qwen/Qwen3-Coder-480B-A35B-Instruct:fastest",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

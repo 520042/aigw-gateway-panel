@@ -1,18 +1,27 @@
-# DeepSeek 网页版（deepseek-free-api 逆向） —— v2 声明式接入
-# 一手来源：旧版 catalog platforms/web-deepseek
+# DeepSeek 网页版（chat.deepseek.com 网页协议）—— 原生 adapter，无需 node/exe
+# 协议五步：users/current 取新 token → chat_session/create → create_pow_challenge
+#           → 内嵌 wasm 求 POW → chat/completion（补丁式 SSE）
 id = "web-deepseek"
-name = "DeepSeek 网页版（deepseek-free-api 逆向）"
+name = "DeepSeek 网页版（chat.deepseek.com）"
 enabled = true
+region = "global"
 
 auth = "api_key"
-base_url = "https://chat.deepseek.com"
+base_url = "https://chat.deepseek.com/api"
 format = "openai"
 
-models = []
-models_policy = "live"
+models = [
+    "deepseek-chat",
+    "deepseek-reasoner",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+]
+models_policy = "static"
 stream_dialect = "sse_delta"
+upstream_kind = "deepseek-web"
+biz_err = ["TOO_MANY_REQUESTS", "rate_limit"]
 
 login_url = "https://chat.deepseek.com"
 hosts = ["chat.deepseek.com"]
 
-notes = "★ 免 API Key，用免费网页额度。登录 chat.deepseek.com 后 F12 拿 LocalStorage 的 userToken 粘这里。对话 model 写 deepseek-chat@web-deepseek 或 deepseek-reasoner@web-deepseek（深度思考）。首次对话需系统装有 node（用于解 POW 校验）。"
+notes = "免 API Key，用网页额度。登录 chat.deepseek.com 后 F12 → Application → Local Storage 取 token 粘贴即可。模型名写 deepseek-chat@web-deepseek（普通）、deepseek-reasoner@web-deepseek（深度思考）；含 expert / v4-pro 会走专家模式。POW 由内置 wasm 求解，不需要 node 或外部程序。"

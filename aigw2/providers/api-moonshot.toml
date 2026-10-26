@@ -3,12 +3,22 @@
 id = "api-moonshot"
 name = "Kimi 月之暗面 API"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://api.moonshot.cn/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+models = [
+    "kimi-k2.5",
+    "kimi-k2.6",
+    "kimi-k2.7-code",
+    "kimi-k2.7-code-highspeed",
+    "kimi-k3",
+    "kimi-k3-fast",
+    "kimi-latest",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

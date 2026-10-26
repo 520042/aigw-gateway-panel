@@ -4,13 +4,23 @@
 id = "sub-kimi-ai"
 name = "Kimi Code 国际站"
 enabled = true
+region = "intl"
 login_url = "https://kimi.com/login"
 
 auth = "api_key"
 base_url = "https://api.kimi.ai/coding/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "kimi-k2.7-code",
+    "kimi-k2.7-code-highspeed",
+    "kimi-k3",
+    "kimi-k3-fast",
+    "kimi-k2.6",
+    "kimi-for-coding",
+    "kimi-latest",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 

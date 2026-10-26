@@ -1,17 +1,20 @@
 # 订阅反代 —— Meta Muse（OAuth oauth_device）
-# 一手来源：旧版 catalog platforms/sub-meta
-# 登录：v2 登录引擎（设备码/PKCE）后续接入；当前可手动粘贴 token 走 @sub-* 路由
+# 一手来源：旧版 catalog platforms/sub-meta + app/relays/meta.py（model="meta-muse"）
+# ⚠ 声明式 OpenAI 兼容：api.meta.ai 在本机网络始终不可达（2026-10-22 实测 curl 000），
+#   所以协议形状与模型清单都未能取证，只能按旧版记录声成 OpenAI 透传（需要代理才可能连通）。
 id = "sub-meta"
 name = "Meta Muse"
 enabled = true
+region = "intl"
 login_url = "https://muse.ai/login"
 
 auth = "api_key"
 base_url = "https://api.meta.ai/v1"
 format = "openai"
 
-models = []
-models_policy = "live"
+models = ["meta-muse"]
+models_policy = "static"
 stream_dialect = "sse_delta"
+biz_err = ["unauthorized", "invalid token"]
 
-notes = "Meta AI 订阅登录。设备码 OAuth 流程，登录后自动获取 access_token，网关直接反代。"
+notes = '声明式 OpenAI 透传（未取证）：api.meta.ai 在本机网络不可达（curl 000），协议与模型名按旧版记录推断为 OpenAI 兼容 + meta-muse。要走通先在设置页把网络代理改成 global/bypass_cn；模型名不对时上游会回 404 模型不存在，届时光看请求日志就能定位。'

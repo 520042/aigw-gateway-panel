@@ -21,7 +21,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::mpsc;
+use tokio::sync::mpsc;
 
 const APP_ID: &str = "123971023";
 const CLIENT_TYP: &str = "401";
@@ -192,7 +192,7 @@ fn check_envelope(v: &Value) -> Result<Option<Value>, RelayError> {
             1000004 | 200001 | -6 | -7 | -8 => ErrorClass::Auth,
             _ => ErrorClass::Transient,
         };
-        return Err(er(502, format!("库库业务错误 code={} {}", code, msg), class));
+        return Err(er(crate::status_for_class(class), format!("库库业务错误 code={} {}", code, msg), class));
     }
     Ok(v.get("data").cloned())
 }
@@ -496,7 +496,7 @@ pub async fn chat_nonstream(
     // 2) SSE
     let (text, thinking, usage, finish) = collect_sse(http, spec, &t, &bduss, &stoken).await?;
     if text.trim().is_empty() && thinking.trim().is_empty() {
-        return Err(er(502, "库库上游未返回内容（Cookie/STOKEN 可能失效）", ErrorClass::Auth));
+        return Err(er(401, "库库上游未返回内容（Cookie/STOKEN 可能失效）", ErrorClass::Auth));
     }
     let mut msg = json!({"role":"assistant","content":text});
     if !thinking.trim().is_empty() {
@@ -542,11 +542,15 @@ async fn collect_sse(
     let mut completed = false;
     let mut buf = String::new();
     let mut stream = resp.bytes_stream();
+    let mut dec = crate::Utf8Decoder::new();
     while let Some(item) = stream.next().await {
         let b = item.map_err(|e| er(0, format!("上游流中断：{e}"), ErrorClass::Transient))?;
-        buf.push_str(&String::from_utf8_lossy(&b));
-        while let Some(pos) = buf.find("\n\n") {
-            let block: String = buf.drain(..pos + 2).collect();
+        {
+            let text = dec.push(&b);
+            buf.push_str(&text);
+        }
+        while let Some((pos, sep)) = crate::find_frame_end(&buf) {
+            let block: String = buf.drain(..pos + sep).collect();
             let Some((event, v)) = parse_block(&block) else { continue };
             let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
             if event == "done" || typ == "TURN_DONE" || typ == "FINISH" {
@@ -624,9 +628,10 @@ pub async fn chat_stream(
         return Err(er(status, tx.chars().take(400).collect::<String>(), ErrorClass::from_status(status)));
     }
 
-    let (tx, rx) = mpsc::channel::<StreamStat>();
+    let (tx, rx) = mpsc::channel::<StreamStat>(1);
     let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     let model = t.model.clone();
+    let in_bytes = body.len();
     tokio::spawn(async move {
         let chat_id = format!("chatcmpl-{}", uuid_v4ish());
         let mk = |delta: Value, finish: Option<&str>| -> String {
@@ -642,7 +647,9 @@ pub async fn chat_stream(
             )
         };
         let mut stat = StreamStat::default();
+        let mut out_chars: usize = 0;
         let mut buf = String::new();
+        let mut dec = crate::Utf8Decoder::new();
         let mut sent_role = false;
         let mut stream = resp.bytes_stream();
         'outer: while let Some(item) = stream.next().await {
@@ -654,10 +661,11 @@ pub async fn chat_stream(
                     break;
                 }
             };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            let text = dec.push(&chunk);
+            buf.push_str(&text);
             let mut out = String::new();
-            while let Some(pos) = buf.find("\n\n") {
-                let block: String = buf.drain(..pos + 2).collect();
+            while let Some((pos, sep)) = crate::find_frame_end(&buf) {
+                let block: String = buf.drain(..pos + sep).collect();
                 let Some((event, v)) = parse_block(&block) else { continue };
                 let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
                 if typ == "COMMERCIAL" || typ == "COMMERCIAL_NOTICE" {
@@ -682,7 +690,10 @@ pub async fn chat_stream(
                     out.push_str(&mk(json!({"reasoning_content": cth}), None));
                 }
                 if !ctx.is_empty() {
+                    out_chars += ctx.chars().count() + cth.chars().count();
                     out.push_str(&mk(json!({"content": ctx}), None));
+                } else {
+                    out_chars += cth.chars().count();
                 }
                 let _ = event;
             }
@@ -713,7 +724,10 @@ pub async fn chat_stream(
         }
         tail.push_str("data: [DONE]\n\n");
         let _ = bytes_tx.send(Ok(Bytes::from(tail))).await;
-        let _ = tx.send(stat);
+        let (tin, tout) = crate::estimate_stream_tokens(in_bytes, out_chars);
+        stat.tokens_in = tin;
+        stat.tokens_out = tout;
+        let _ = tx.send(stat).await;
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(bytes_rx);
     Ok((Box::pin(stream), rx))

@@ -3,12 +3,16 @@
 id = "api-longcat"
 name = "美团 LongCat"
 enabled = true
+region = "cn"
 
 auth = "api_key"
 base_url = "https://longcat.chat/v1"
 format = "openai"
 
-models = []
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+models = [
+    "LongCat-2.0",
+]
 models_policy = "live"
 stream_dialect = "sse_delta"
 
