@@ -310,6 +310,152 @@ fn b64url_nopad(d: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(d)
 }
 
+/// 按会话状态取一次凭据（[`LoginEngine::poll`] 的主体）。
+///
+/// 分派依据是 `sess.state` 里 start 阶段写下的前缀（`kimi:` / `cline:` / `xai:` …），
+/// 少数平台按 `sess.platform` 判（Loomy / 小浣熊）。返回值统一成
+/// `Ok(<token>␁<domain>)`：wb 族要同时拿 token 与上游给的 domain，这里用哨兵字符
+/// 塞进同一个 String，由调用方拆开 —— 免为了那一条分支改整个 Result 类型。
+///
+/// 约定：**不修改会话状态**，只回答「现在拿到凭据了吗」。没拿到时返回 Err(给用户看的话)，
+/// 调用方会把它原样显示在「等待授权中」的提示里。
+async fn poll_secret(client: &OutClient, sess: &Session) -> Result<String, String> {
+    // 先按老口径拿 Result<String, String>，wb 分支另算（它要带上游给的 domain），
+    // 最后统一包成 (凭据, 域)。
+    let secret_raw: Result<String, String> = if let Some((base, origin, _)) = wb_base(&sess.platform) {
+        if sess.state.is_empty() {
+            Err("state 为空（start 未成功）".to_string())
+        } else {
+            // wb 族要既拿 token 又拿 domain，这里用哨兵分隔塞进同一个 String，
+            // 下面拆开 —— 免得专门为一条分支改整个 Result 类型。
+            wb_poll_token(client, &base, &origin, &sess.state)
+                .await
+                .map(|(t, d)| format!("{t}\u{1}{d}"))
+        }
+    } else if sess.platform == "minimax" {
+        // state = minimax:{device_code}:{verifier}:{user_code}（4 段）
+        // ★ 必须 splitn(4)：用 splitn(3) 时 parts[2] 会是 "{verifier}:{user_code}"，
+        // 拼进 code_verifier 后 S256 校验必败，MiniMax 登录 100% 拿不到 token。
+        let parts: Vec<&str> = sess.state.splitn(4, ':').collect();
+        if parts.len() < 3 {
+            Err("设备码会话不完整".to_string())
+        } else {
+            minimax_poll(&auth_http(), parts[1], parts[2]).await
+        }
+    } else if sess.state.starts_with("kimi:") {
+        let device_code = sess.state.trim_start_matches("kimi:").to_string();
+        match kimi_oauth_host(&sess.platform) {
+            Some(host) => kimi_poll(&auth_http(), host, &device_code).await,
+            None => Err("Kimi 平台映射缺失".to_string()),
+        }
+    } else if sess.state.starts_with("cline:") {
+        // cline:{device_code}:{interval} → WorkOS 三态轮询 → register 换皮
+        let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+        if parts.len() < 3 {
+            Err("Cline 会话不完整".to_string())
+        } else {
+            cline_poll(&auth_http(), parts[1], parts[2]).await
+        }
+    } else if sess.state.starts_with("xai:") {
+        // xai:{device_code}:{token_endpoint}
+        let rest = sess.state.trim_start_matches("xai:").to_string();
+        match rest.split_once(':') {
+            Some((d, t)) => xai_poll(&auth_http(), t, d).await,
+            None => Err("Grok 设备码会话不完整".to_string()),
+        }
+    } else if sess.state.starts_with("meta:") {
+        // meta:{device_code}:{interval} → 三态轮询 → mint API Key
+        let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+        if parts.len() < 3 {
+            Err("Meta 设备码会话不完整".to_string())
+        } else {
+            meta_poll(&auth_http(), parts[1], parts[2]).await
+        }
+    } else if sess.state.starts_with("codearts:") {
+        // codearts:{ticket_id}:{secret} → 轮询 ticket 端点 → AK:SK
+        let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+        if parts.len() < 3 {
+            Err("CodeArts 会话不完整".to_string())
+        } else {
+            codearts_poll(&auth_http(), parts[1], parts[2]).await
+        }
+    } else if sess.state.starts_with("qoder:") {
+        // qoder:{verifier}:{nonce} → 轮询 deviceToken/poll
+        let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+        if parts.len() < 3 {
+            Err("Qoder 会话不完整".to_string())
+        } else {
+            qoder_poll(&auth_http(), parts[1], parts[2]).await
+        }
+    } else if sess.state.starts_with("trae:") {
+        // trae:{trace_id} → 回调队列取 refreshToken → ExchangeToken
+        let trace = sess.state.trim_start_matches("trae:").to_string();
+        // 只认 state 精确等于 loginTraceID 的回调。旧实现额外匹配 s.is_empty()，
+        // 会把「回调里没带 loginTraceID」的其它平台条目抢走（而且取走后别人的会话就再也拿不到）。
+        // trace 本身为空时（sess.state == "trae:"）仍然能命中空 state 条目。
+        let code = take_callback(&trace);
+        match code {
+            Some(rt) => trae_exchange(&auth_http(), &rt).await,
+            None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
+        }
+    } else if sess.state.starts_with("codex:") || sess.state.starts_with("claude:")
+        || sess.state.starts_with("antigravity:") || sess.state.starts_with("devin:") {
+        // {prefix}:{verifier}:{state} → 从回调队列取 code → 换 token
+        let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
+        if parts.len() < 3 {
+            Err("PKCE 会话不完整".to_string())
+        } else {
+        let (kind, verifier, state) = (parts[0], parts[1], parts[2]);
+        let code = take_callback(state);
+        match code {
+            Some(code) => {
+                match kind {
+                    "codex" => codex_exchange(&auth_http(), &code, verifier).await,
+                    "claude" => claude_exchange(&auth_http(), &code, verifier, state).await,
+                    "antigravity" => antigravity_exchange(&auth_http(), &code, verifier).await,
+                    _ => devin_exchange(&auth_http(), &code, verifier).await,
+                }
+            }
+            None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
+        }
+        }
+    } else if sess.state.starts_with("lobster:") {
+        // lobster:{state}:{uuid}:{firstKF} → 回调队列取 code → exchange
+        let parts: Vec<&str> = sess.state.splitn(4, ':').collect();
+        if parts.len() < 4 {
+            Err("Lobster 会话不完整".to_string())
+        } else {
+            let state = parts[1];
+            let code = take_callback(state);
+            match code {
+                Some(code) => {
+                    lobster_exchange(&auth_http(), &code, parts[2], parts[3]).await
+                }
+                None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
+            }
+        }
+    } else if sess.state.starts_with("doubao:") {
+        // doubao:{base64 state} → 轮询 check_qrconnect → 整段登录 Cookie
+        let state = sess.state.trim_start_matches("doubao:").to_string();
+        doubao_qr_poll(&auth_http(), &state).await
+    } else if sess.state.starts_with("kukuqr:") {
+        // kukuqr:{base64 state} → 轮询 unicast → BDUSS/PTOKEN → STOKEN 交换 → 整段 Cookie
+        let state = sess.state.trim_start_matches("kukuqr:").to_string();
+        kuku_qr_poll(&auth_http_long(), &state).await
+    } else if sess.state.starts_with("loomyqr:") {
+        // loomyqr:{base64 state} → 微信长轮询 → 405 带 wx_code → 讯飞 bind/skip → session
+        let state = sess.state.trim_start_matches("loomyqr:").to_string();
+        loomy_qr_poll(&auth_http(), &state).await
+    } else if sess.state.starts_with("raccoonqr:") {
+        // raccoonqr:{32 位 hex code} → POST login_with_qrcode_code → access_token（Bearer）
+        let code = sess.state.trim_start_matches("raccoonqr:").to_string();
+        raccoon_qr_poll(&auth_http(), RACCOON_BASE, &code).await
+    } else {
+        Err("跳转登录会话：请粘贴 Cookie/凭据后走 save 动作入库（不自动轮询）".to_string())
+    };
+    secret_raw
+}
+
 /// 按平台分派登录方式（[`LoginEngine::start`] 的主体）。
 ///
 /// 抽出来的理由：这是 19 个分支、244 行的 if/else 链，每次加一个平台都要在这条链上
@@ -658,139 +804,7 @@ impl LoginEngine {
         if sess.status == "success" {
             return json!({"ok": true, "session": json!({"id": sess.id, "status": sess.status, "message": sess.message})});
         }
-        // 先按老口径拿 Result<String, String>，wb 分支另算（它要带上游给的 domain），
-        // 最后统一包成 (凭据, 域)。
-        let secret_raw: Result<String, String> = if let Some((base, origin, _)) = wb_base(&sess.platform) {
-            if sess.state.is_empty() {
-                Err("state 为空（start 未成功）".to_string())
-            } else {
-                // wb 族要既拿 token 又拿 domain，这里用哨兵分隔塞进同一个 String，
-                // 下面拆开 —— 免得专门为一条分支改整个 Result 类型。
-                wb_poll_token(client, &base, &origin, &sess.state)
-                    .await
-                    .map(|(t, d)| format!("{t}\u{1}{d}"))
-            }
-        } else if sess.platform == "minimax" {
-            // state = minimax:{device_code}:{verifier}:{user_code}（4 段）
-            // ★ 必须 splitn(4)：用 splitn(3) 时 parts[2] 会是 "{verifier}:{user_code}"，
-            // 拼进 code_verifier 后 S256 校验必败，MiniMax 登录 100% 拿不到 token。
-            let parts: Vec<&str> = sess.state.splitn(4, ':').collect();
-            if parts.len() < 3 {
-                Err("设备码会话不完整".to_string())
-            } else {
-                minimax_poll(&auth_http(), parts[1], parts[2]).await
-            }
-        } else if sess.state.starts_with("kimi:") {
-            let device_code = sess.state.trim_start_matches("kimi:").to_string();
-            match kimi_oauth_host(&sess.platform) {
-                Some(host) => kimi_poll(&auth_http(), host, &device_code).await,
-                None => Err("Kimi 平台映射缺失".to_string()),
-            }
-        } else if sess.state.starts_with("cline:") {
-            // cline:{device_code}:{interval} → WorkOS 三态轮询 → register 换皮
-            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
-            if parts.len() < 3 {
-                Err("Cline 会话不完整".to_string())
-            } else {
-                cline_poll(&auth_http(), parts[1], parts[2]).await
-            }
-        } else if sess.state.starts_with("xai:") {
-            // xai:{device_code}:{token_endpoint}
-            let rest = sess.state.trim_start_matches("xai:").to_string();
-            match rest.split_once(':') {
-                Some((d, t)) => xai_poll(&auth_http(), t, d).await,
-                None => Err("Grok 设备码会话不完整".to_string()),
-            }
-        } else if sess.state.starts_with("meta:") {
-            // meta:{device_code}:{interval} → 三态轮询 → mint API Key
-            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
-            if parts.len() < 3 {
-                Err("Meta 设备码会话不完整".to_string())
-            } else {
-                meta_poll(&auth_http(), parts[1], parts[2]).await
-            }
-        } else if sess.state.starts_with("codearts:") {
-            // codearts:{ticket_id}:{secret} → 轮询 ticket 端点 → AK:SK
-            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
-            if parts.len() < 3 {
-                Err("CodeArts 会话不完整".to_string())
-            } else {
-                codearts_poll(&auth_http(), parts[1], parts[2]).await
-            }
-        } else if sess.state.starts_with("qoder:") {
-            // qoder:{verifier}:{nonce} → 轮询 deviceToken/poll
-            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
-            if parts.len() < 3 {
-                Err("Qoder 会话不完整".to_string())
-            } else {
-                qoder_poll(&auth_http(), parts[1], parts[2]).await
-            }
-        } else if sess.state.starts_with("trae:") {
-            // trae:{trace_id} → 回调队列取 refreshToken → ExchangeToken
-            let trace = sess.state.trim_start_matches("trae:").to_string();
-            // 只认 state 精确等于 loginTraceID 的回调。旧实现额外匹配 s.is_empty()，
-            // 会把「回调里没带 loginTraceID」的其它平台条目抢走（而且取走后别人的会话就再也拿不到）。
-            // trace 本身为空时（sess.state == "trae:"）仍然能命中空 state 条目。
-            let code = take_callback(&trace);
-            match code {
-                Some(rt) => trae_exchange(&auth_http(), &rt).await,
-                None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
-            }
-        } else if sess.state.starts_with("codex:") || sess.state.starts_with("claude:")
-            || sess.state.starts_with("antigravity:") || sess.state.starts_with("devin:") {
-            // {prefix}:{verifier}:{state} → 从回调队列取 code → 换 token
-            let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
-            if parts.len() < 3 {
-                Err("PKCE 会话不完整".to_string())
-            } else {
-            let (kind, verifier, state) = (parts[0], parts[1], parts[2]);
-            let code = take_callback(state);
-            match code {
-                Some(code) => {
-                    match kind {
-                        "codex" => codex_exchange(&auth_http(), &code, verifier).await,
-                        "claude" => claude_exchange(&auth_http(), &code, verifier, state).await,
-                        "antigravity" => antigravity_exchange(&auth_http(), &code, verifier).await,
-                        _ => devin_exchange(&auth_http(), &code, verifier).await,
-                    }
-                }
-                None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
-            }
-            }
-        } else if sess.state.starts_with("lobster:") {
-            // lobster:{state}:{uuid}:{firstKF} → 回调队列取 code → exchange
-            let parts: Vec<&str> = sess.state.splitn(4, ':').collect();
-            if parts.len() < 4 {
-                Err("Lobster 会话不完整".to_string())
-            } else {
-                let state = parts[1];
-                let code = take_callback(state);
-                match code {
-                    Some(code) => {
-                        lobster_exchange(&auth_http(), &code, parts[2], parts[3]).await
-                    }
-                    None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
-                }
-            }
-        } else if sess.state.starts_with("doubao:") {
-            // doubao:{base64 state} → 轮询 check_qrconnect → 整段登录 Cookie
-            let state = sess.state.trim_start_matches("doubao:").to_string();
-            doubao_qr_poll(&auth_http(), &state).await
-        } else if sess.state.starts_with("kukuqr:") {
-            // kukuqr:{base64 state} → 轮询 unicast → BDUSS/PTOKEN → STOKEN 交换 → 整段 Cookie
-            let state = sess.state.trim_start_matches("kukuqr:").to_string();
-            kuku_qr_poll(&auth_http_long(), &state).await
-        } else if sess.state.starts_with("loomyqr:") {
-            // loomyqr:{base64 state} → 微信长轮询 → 405 带 wx_code → 讯飞 bind/skip → session
-            let state = sess.state.trim_start_matches("loomyqr:").to_string();
-            loomy_qr_poll(&auth_http(), &state).await
-        } else if sess.state.starts_with("raccoonqr:") {
-            // raccoonqr:{32 位 hex code} → POST login_with_qrcode_code → access_token（Bearer）
-            let code = sess.state.trim_start_matches("raccoonqr:").to_string();
-            raccoon_qr_poll(&auth_http(), RACCOON_BASE, &code).await
-        } else {
-            Err("跳转登录会话：请粘贴 Cookie/凭据后走 save 动作入库（不自动轮询）".to_string())
-        };
+        let secret_raw = poll_secret(client, &sess).await;
         // 拆哨兵：没有分隔符的就是普通 token（非 wb 平台没有域概念）。
         let secret: Result<(String, String), String> = secret_raw.map(|raw| match raw.split_once('\u{1}') {
             Some((t, d)) => (t.to_string(), d.to_string()),
