@@ -7047,6 +7047,8 @@ fn anthropic_stream(
         blocks_opened: 0,
         text_index: 0,
         text_open: false,
+        thinking_index: 0,
+        thinking_open: false,
         tool_open: None,
         tool_meta: Vec::new(),
         closed: false,
@@ -7095,6 +7097,15 @@ struct AnthState {
     /// 当前打开文本块的 index
     text_index: usize,
     text_open: bool,
+    /// 当前打开的 **思考块**（Anthropic 的 `type: "thinking"`）的 index。
+    ///
+    /// 为什么需要：上游 OpenAI 方言把模型的推理过程放在 `delta.reasoning_content`
+    /// 里（DeepSeek / GLM / Kimi / MiniMax 都是这个字段）。旧实现在 Anthropic 侧只取
+    /// `delta.content`，reasoning 被**整段丢掉** —— Claude Code 这类客户端在 thinking
+    /// 模式下看到的是「模型什么也没想就直接答了」。Trae2api 的做法是对
+    /// `reasoning_content|reasoning|thinking` 起一个独立块发 `thinking_delta`，这里对齐。
+    thinking_index: usize,
+    thinking_open: bool,
     /// 当前打开的工具块：(block index, tool id)
     tool_open: Option<(usize, String)>,
     /// 上游 tool_calls[i] 的 (id, name) 记忆（id/name 只在首帧出现）
@@ -7160,14 +7171,49 @@ impl AnthState {
     }
 
     fn close_blocks(&mut self) {
+        self.close_thinking_block();
         self.close_text_block();
         self.close_tool_block();
+    }
+
+    /// 打开思考块。Anthropic 要求 thinking 块**排在正文之前**（它模拟的是
+    /// 「先想再说」），所以这里不做任何块间顺序调整，只保证同一时刻只有一个块打开。
+    fn open_thinking_block(&mut self) {
+        if self.thinking_open {
+            return;
+        }
+        self.close_text_block();
+        self.close_tool_block();
+        let idx = self.blocks_opened;
+        self.blocks_opened += 1;
+        self.thinking_index = idx;
+        self.thinking_open = true;
+        self.event(
+            "content_block_start",
+            &json!({
+                "type": "content_block_start",
+                "index": idx,
+                "content_block": {"type": "thinking", "thinking": ""}
+            }),
+        );
+    }
+
+    fn close_thinking_block(&mut self) {
+        if self.thinking_open {
+            let idx = self.thinking_index;
+            self.event(
+                "content_block_stop",
+                &json!({"type": "content_block_stop", "index": idx}),
+            );
+            self.thinking_open = false;
+        }
     }
 
     fn open_text_block(&mut self) {
         if self.text_open {
             return;
         }
+        self.close_thinking_block();
         self.close_tool_block();
         let idx = self.blocks_opened;
         self.blocks_opened += 1;
@@ -7179,6 +7225,21 @@ impl AnthState {
                 "type": "content_block_start",
                 "index": idx,
                 "content_block": {"type": "text", "text": ""}
+            }),
+        );
+    }
+
+    /// 下发一段思考内容（上游 `delta.reasoning_content`）。
+    fn thinking_delta(&mut self, text: &str) {
+        self.ensure_started();
+        self.open_thinking_block();
+        let idx = self.thinking_index;
+        self.event(
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": idx,
+                "delta": {"type": "thinking_delta", "thinking": text}
             }),
         );
     }
@@ -7306,6 +7367,19 @@ impl AnthState {
                         .and_then(|c| c.as_array())
                         .and_then(|a| a.first());
                     if let Some(f) = first {
+                        // ★ 思考内容必须单独成块：上游把推理放在 reasoning_content
+                        //   （DeepSeek/GLM/Kimi/MiniMax 通用写法），旧实现只取 content，
+                        //   于是 thinking 模式下的推理过程整段消失。
+                        //   顺序按上游到达顺序走，正文来了自然关掉思考块。
+                        let reasoning = f
+                            .get("delta")
+                            .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
+                            .and_then(|c| c.as_str());
+                        if let Some(r) = reasoning {
+                            if !r.is_empty() {
+                                self.thinking_delta(r);
+                            }
+                        }
                         if let Some(text) = f
                             .get("delta")
                             .and_then(|d| d.get("content"))
@@ -15032,6 +15106,58 @@ stream_dialect = "sse_delta"
         assert_eq!(totals["tokensOut"], 2, "totals={totals}");
     }
 
+
+    #[tokio::test]
+    async fn messages_stream_maps_reasoning_content_to_thinking_block() {
+        // 上游把推理放在 delta.reasoning_content（DeepSeek / GLM / Kimi / MiniMax 通用写法）。
+        // 旧实现只取 delta.content，于是 Anthropic 客户端在 thinking 模式下看到的推理过程
+        // 整段消失。这里断言推理变成独立的 thinking 块，且正文仍是 text 块。
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先想一下\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"答案\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let base = spawn_mock(Box::leak(sse.to_string().into_boxed_str()), "text/event-stream").await;
+        let dir = tempfile::tempdir().unwrap();
+        let app = build_app(AppState::new(
+            vec![spec_for(&base)],
+            Arc::new(Store::open(dir.path())),
+            Pool::new(),
+            Arc::new(OutClient::new()),
+            Arc::new(AccountStore::empty()),
+            Arc::new(CustomStore::empty()),
+            Arc::new(FreeStore::empty()),
+        ));
+        let res = app
+            .oneshot(
+                Request::post("/v1/messages")
+                    .header("host", "127.0.0.1:8800")
+                    .body(Body::from(
+                        r#"{"model":"mock-1","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_string(res).await;
+        // 思考块：类型声明 + 增量内容
+        assert!(body.contains("\"type\":\"thinking\""), "缺少 thinking 块声明：{body}");
+        assert!(body.contains("\"type\":\"thinking_delta\""), "缺少 thinking_delta：{body}");
+        assert!(body.contains("先想一下"), "推理内容被丢弃：{body}");
+        // 正文仍在 text 块里
+        assert!(body.contains("\"type\":\"text_delta\""), "缺少 text_delta：{body}");
+        assert!(body.contains("答案"), "正文被丢弃：{body}");
+        // 顺序：thinking 块必须排在 text 块之前（先想再说）
+        let i_think = body.find("thinking_delta").expect("无 thinking_delta");
+        let i_text = body.find("text_delta").expect("无 text_delta");
+        assert!(i_think < i_text, "thinking 应在 text 之前：{body}");
+        // 块必须被关闭，否则客户端会一直等后续增量
+        let starts = body.matches("content_block_start").count();
+        let stops = body.matches("content_block_stop").count();
+        assert_eq!(starts, stops, "块开闭必须配对：starts={starts} stops={stops}\n{body}");
+    }
 
     #[tokio::test]
     async fn messages_stream_without_upstream_usage_estimates_output_tokens() {
