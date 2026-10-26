@@ -164,8 +164,12 @@ impl AccountStore {
         };
         if !plain.is_empty() {
             let encrypted = crate::secret::wrap(&plain[0]) != plain[0];
-            let accs = store.inner.lock().unwrap_or_else(|e| e.into_inner());
-            store.save_locked(&accs);
+            let snapshot = store
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            store.save_snapshot(&snapshot);
             if encrypted {
                 tracing::info!("accounts：启动时把 {} 个明文凭据换成 DPAPI 密文落盘", plain.len());
             } else {
@@ -195,7 +199,16 @@ impl AccountStore {
     }
 
     /// 原子落盘（tmp + fsync + rename）：进程中途崩溃不会留下半截 accounts.json。
-    fn save_locked(&self, accs: &[Account]) {
+    ///
+    /// ★ **调用方必须已经释放 `inner` 锁**。落盘的每一步都是阻塞的：
+    ///   `wrapped()` 逐条调 DPAPI（每次都是一次系统调用），`write_json_atomic`
+    ///   还要 `sync_all()` 等磁盘确认。旧实现持锁做完这些，意味着「一个账号重新登录」
+    ///   期间**所有**转发请求都卡在 `platform_secret()` 的读锁上 —— 而那正是
+    ///   `/v1/chat/completions` 的必经之路。
+    ///
+    /// 内存态在放锁之前就已更新，所以并发读者看到的永远是最新数据；落盘只是一份
+    /// 持久化快照，晚一点写不影响可用性（进程崩了也只是回到上一次成功写入）。
+    fn save_snapshot(&self, accs: &[Account]) {
         if let Some(p) = &self.path {
             if let Err(e) = crate::atomic::write_json_atomic(p, &wrapped(accs)) {
                 tracing::warn!("accounts 落盘失败（{}）：{e}", p.display());
@@ -259,7 +272,11 @@ impl AccountStore {
             // 重新登录/重新粘贴凭据 = 换了一把能用的钥匙，之前「解不开」的标签必须摘掉。
             existing.unreadable = false;
             let clone = existing.clone();
-            self.save_locked(&accs);
+            // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
+            //   所有转发请求（platform_secret 读锁）一起卡住。
+            let snapshot = accs.clone();
+            drop(accs);
+            self.save_snapshot(&snapshot);
             return (clone, true);
         }
         let a = Account {
@@ -277,7 +294,11 @@ impl AccountStore {
             unreadable: false,
         };
         accs.push(a.clone());
-        self.save_locked(&accs);
+        // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
+        //   所有转发请求（platform_secret 读锁）一起卡住。
+        let snapshot = accs.clone();
+        drop(accs);
+        self.save_snapshot(&snapshot);
         (a, false)
     }
 
@@ -294,7 +315,11 @@ impl AccountStore {
             existing.status = "active".into();
             // 刷新链路拿到的是**可用的**新凭据，解不开的标记一并清掉。
             existing.unreadable = false;
-            self.save_locked(&accs);
+            // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
+            //   所有转发请求（platform_secret 读锁）一起卡住。
+            let snapshot = accs.clone();
+            drop(accs);
+            self.save_snapshot(&snapshot);
             (true, changed)
         } else {
             (false, false)
@@ -308,7 +333,11 @@ impl AccountStore {
         accs.retain(|a| a.id != id);
         let changed = accs.len() != before;
         if changed {
-            self.save_locked(&accs);
+            // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
+            //   所有转发请求（platform_secret 读锁）一起卡住。
+            let snapshot = accs.clone();
+            drop(accs);
+            self.save_snapshot(&snapshot);
         }
         changed
     }
@@ -345,7 +374,11 @@ impl AccountStore {
         }
         if let Some(a) = accs.iter_mut().find(|a| a.id == id) {
             a.name = name.to_string();
-            self.save_locked(&accs);
+            // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
+            //   所有转发请求（platform_secret 读锁）一起卡住。
+            let snapshot = accs.clone();
+            drop(accs);
+            self.save_snapshot(&snapshot);
             return (true, String::new(), true);
         }
         (false, "账号不存在".into(), false)
@@ -357,7 +390,11 @@ impl AccountStore {
         if let Some(a) = accs.iter_mut().find(|a| a.id == id) {
             a.enabled = enabled;
             a.status = if enabled { "active".into() } else { "disabled".into() };
-            self.save_locked(&accs);
+            // ★ 先取快照再放锁：落盘里的 DPAPI + fsync 都是阻塞操作，持锁做会把
+            //   所有转发请求（platform_secret 读锁）一起卡住。
+            let snapshot = accs.clone();
+            drop(accs);
+            self.save_snapshot(&snapshot);
             true
         } else {
             false
