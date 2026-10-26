@@ -5142,6 +5142,44 @@ async fn attempt_once(
     attempt
 }
 
+/// 为一次转发准备候选账号：(账号 id, 明文凭据)。
+///
+/// 三条来路，顺序有讲究：
+/// 1. **anon 平台**（OpenCode Zen 匿名车道等）→ 单条免密账号，凭据为空；
+/// 2. **自定义 API**（`custom-*`）→ 从 CustomStore 取 Key。跳过 `key_broken` 的条目：
+///    那是「在别的机器上加密、本机解不开」的密文，发出去只会换来一堆看不懂的 401；
+/// 3. **其余** → AccountStore 里该平台的全部启用账号。
+///
+/// 秘塔单独一条兜底：它是**免登录指纹车道**，没粘贴 uid-sid 时回退匿名单账号
+/// （约 13 发/出口/窗口）。少了这条，没登录的用户会被判「无可用账号」503，
+/// 而它明明可以匿名用。
+///
+/// 返回空 Vec 表示这个平台确实没凭据，调用方据此回 503 并提示去登录。
+fn candidate_accounts(
+    custom: &CustomStore,
+    accounts: &AccountStore,
+    spec: &ProviderSpec,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = if spec.auth == AuthKind::Anon {
+        vec![(format!("{}:anon", spec.id), String::new())]
+    } else if spec.id.starts_with("custom-") {
+        custom
+            .rows()
+            .into_iter()
+            .find(|c| c.id == spec.id && !c.key_broken)
+            .map(|c| c.api_key)
+            .filter(|k| !k.trim().is_empty())
+            .map(|k| vec![(format!("{}:key", spec.id), k)])
+            .unwrap_or_default()
+    } else {
+        accounts.secrets_for(&spec.id)
+    };
+    if out.is_empty() && spec.upstream_kind == "metaso" {
+        out = vec![(format!("{}:anon", spec.id), String::new())];
+    }
+    out
+}
+
 async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> {
     let model = v
         .get("model")
@@ -5245,25 +5283,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
 
     // 账号 candidates：anon 平台走免密单账号；自定义 API 用 CustomStore 里的 Key；
     // 秘塔无账号时回退匿名指纹；其余从 AccountStore 取启用账号（明文 secret）。
-    let anon = spec.auth == AuthKind::Anon;
-    let mut pool_accounts: Vec<(String, String)> = if anon {
-        vec![(format!("{}:anon", spec.id), String::new())]
-    } else if spec.id.starts_with("custom-") {
-        st.custom
-            .rows()
-            .into_iter()
-            .find(|c| c.id == spec.id && !c.key_broken)
-            .map(|c| c.api_key)
-            .filter(|k| !k.trim().is_empty())
-            .map(|k| vec![(format!("{}:key", spec.id), k)])
-            .unwrap_or_default()
-    } else {
-        st.accounts.secrets_for(&spec.id)
-    };
-    // 秘塔支持免登录指纹：未粘贴 uid-sid 时回退匿名单账号（约 13 发/出口/窗口）
-    if pool_accounts.is_empty() && spec.upstream_kind == "metaso" {
-        pool_accounts = vec![(format!("{}:anon", spec.id), String::new())];
-    }
+    let pool_accounts = candidate_accounts(&st.custom, &st.accounts, &spec);
     if pool_accounts.is_empty() {
         return Err(ChatCoreErr::Local {
             status: 503,
@@ -7172,6 +7192,62 @@ stream_dialect = "sse_delta"
         // API Key 与设备码各自有明确指引
         assert!(verify_failure_hint(&mk("openai", "api_key")).contains("API Key"));
         assert!(verify_failure_hint(&mk("openai", "o_auth_device")).contains("设备授权"));
+    }
+
+    #[test]
+    fn candidate_accounts_covers_anon_custom_and_metaso_fallback() {
+        let custom = CustomStore::empty();
+        let accounts = AccountStore::empty();
+        let st = state(vec![]);
+
+        // ① anon 平台：单条免密账号，凭据为空串
+        let anon = spec_toml(
+            r#"
+id = "anon-x"
+name = "X"
+auth = "anon"
+base_url = "https://e.invalid/v1"
+format = "openai"
+models_policy = "live"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let got = candidate_accounts(&custom, &accounts, &anon);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "anon-x:anon");
+        assert!(got[0].1.is_empty());
+
+        // ② 普通平台且没有任何账号 → 空（调用方据此回 503）
+        let plain = spec_toml(
+            r#"
+id = "plain"
+name = "P"
+auth = "cookie"
+base_url = "https://e.invalid/v1"
+format = "openai"
+models_policy = "live"
+stream_dialect = "sse_delta"
+"#,
+        );
+        assert!(candidate_accounts(&custom, &accounts, &plain).is_empty());
+
+        // ③ 秘塔没账号时回退匿名指纹 —— 少了这条，未登录用户会被误判「无可用账号」，
+        //    而它明明可以匿名用（约 13 发/出口/窗口）。
+        let metaso = spec_toml(
+            r#"
+id = "apk-metaso"
+name = "M"
+auth = "cookie"
+base_url = "https://e.invalid/v1"
+format = "openai"
+models_policy = "live"
+upstream_kind = "metaso"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let got = candidate_accounts(&custom, &accounts, &metaso);
+        assert_eq!(got.len(), 1, "秘塔应回退匿名单账号：{got:?}");
+        assert_eq!(got[0].0, "apk-metaso:anon");
     }
 
 
