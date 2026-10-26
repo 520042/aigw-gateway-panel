@@ -3828,6 +3828,9 @@ async fn accounts_action(State(st): State<AppState>, body: Bytes) -> Response {
             let http = aigw_relay::auth_login::auth_http();
             match aigw_relay::wb::query_balance(&http, base, &secret).await {
                 Ok(mut d) => {
+                    // ★ 2026-10-26（P1）：顺手更新号池积分快照（「快过期优先」选号依据）
+                    let credit = d.get("credit").and_then(|x| x.as_i64()).map(|c| c as f64);
+                    st.pool.record_credit(&id, credit);
                     d["ok"] = json!(true);
                     d["supported"] = json!(true);
                     d["platform"] = json!(platform);
@@ -4159,6 +4162,14 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
             } else {
                 aigw_relay::wb::checkin_status(&http, base, &secret).await
             };
+            // ★ 2026-10-26（P1）：签到回包里的 credit 是「本次领到多少」，
+            //   顺手查一次余额写进号池的积分快照，「快过期优先」选号才有依据。
+            if claim && r.is_ok() {
+                if let Ok(b) = aigw_relay::wb::query_balance(&http, base, &secret).await {
+                    let credit = b.get("credit").and_then(|x| x.as_i64()).map(|c| c as f64);
+                    st.pool.record_credit(&acc_id, credit);
+                }
+            }
             results.push(json!({
                 "platform": platform,
                 "account": acc_id,
