@@ -84,6 +84,14 @@ pub fn mask_key(key: &str) -> String {
     }
 }
 
+/// 落盘串行化闸门（见 accounts.rs 的同一说明）：内存锁管内存，闸门管磁盘写序。
+static SAVE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_save_gate<R>(f: impl FnOnce() -> R) -> R {
+    let _g = SAVE_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 impl CustomStore {
     /// 从 data 目录加载（不存在则空表；路径为 data/custom.json）。
     pub fn open(data_dir: &Path) -> CustomStore {
@@ -151,7 +159,9 @@ impl CustomStore {
     /// ★ **调用方必须已经释放 `inner` 锁**：DPAPI + fsync 是毫秒到几十毫秒的阻塞操作，
     ///   持锁做会让面板、`all_specs()`、转发时解析 Key 这些读路径一起排队。
     fn save_snapshot(&self, rows: &[CustomApi]) {
-        if let Some(p) = &self.path {
+        let Some(p) = &self.path else { return };
+        // 走写闸门：加密 + 落盘都在闸门内，保证磁盘上的顺序与内存更新顺序一致。
+        with_save_gate(|| {
             let disk: Vec<CustomApi> = rows
                 .iter()
                 .map(|c| {
@@ -165,7 +175,7 @@ impl CustomStore {
             if let Err(e) = crate::atomic::write_json_atomic(p, &disk) {
                 tracing::warn!("custom 落盘失败（{}）：{e}", p.display());
             }
-        }
+        });
     }
 
     /// 全部条目（前端展示；api_key 掩码处理由快照层完成）。

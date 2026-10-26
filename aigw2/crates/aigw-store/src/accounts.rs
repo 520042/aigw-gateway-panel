@@ -78,6 +78,23 @@ pub struct AccountStore {
     path: Option<PathBuf>,
 }
 
+/// 落盘串行化闸门（进程内）。
+///
+/// ★ 为什么需要：各 Store 的写方法现在都是「改内存 → 取快照 → 放锁 → 落盘」，
+///   内存锁保护了内存，但**没保护磁盘写序**。两个并发写各自 clone 快照后放锁，
+///   完全可能后开始的先写完 —— 磁盘上就留下较旧的那份，重启后「刚改的又回去了」。
+///   旧实现靠「持内存锁落盘」隐式排了序，代价是所有读请求陪着一起等。
+///
+///   这里把「排序」与「不加长读锁」分开：内存锁照旧短暂持有，落盘由这把闸门串行。
+///   代价是并发写的落盘会排队（它们本来就在抢同一个文件），收益是读路径彻底解放。
+static SAVE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 在写闸门内执行一次落盘（panic 时闸门中毒不影响后续写入）。
+fn with_save_gate<R>(f: impl FnOnce() -> R) -> R {
+    let _g = SAVE_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 impl AccountStore {
     /// 双源装载：v2 own 文件存在则以其为权威；否则从 legacy 只读导入并**落 own**
     /// （之后 own 为权威，legacy 只读不动）。
@@ -209,11 +226,12 @@ impl AccountStore {
     /// 内存态在放锁之前就已更新，所以并发读者看到的永远是最新数据；落盘只是一份
     /// 持久化快照，晚一点写不影响可用性（进程崩了也只是回到上一次成功写入）。
     fn save_snapshot(&self, accs: &[Account]) {
-        if let Some(p) = &self.path {
-            if let Err(e) = crate::atomic::write_json_atomic(p, &wrapped(accs)) {
-                tracing::warn!("accounts 落盘失败（{}）：{e}", p.display());
-            }
-        }
+        let Some(p) = &self.path else { return };
+        // 走写闸门：并发写的落盘顺序必须与内存更新顺序一致，否则磁盘上会留下旧快照。
+        with_save_gate(|| match crate::atomic::write_json_atomic(p, &wrapped(accs)) {
+            Ok(()) => {}
+            Err(e) => tracing::warn!("accounts 落盘失败（{}）：{e}", p.display()),
+        });
     }
 
     /// 新增/更新账号（同 platform+name 覆盖，防重复落池）并持久化。
@@ -673,4 +691,73 @@ mod tests {
         let st2 = AccountStore::load_dual(&legacy, &own);
         assert_eq!(st2.secrets_for("web-glm").len(), 1);
     }
+    /// ★ 并发写的落盘顺序必须与内存更新顺序一致。
+    ///
+    /// 这条测试锁住「取快照 → 放锁 → 落盘」改造带来的风险：两个并发写完全可能后开始
+    /// 的先写完，磁盘上留下较旧的那份 —— 内存是对的、重启后却「刚改的又回去了」。
+    /// 旧实现靠「持内存锁落盘」隐式排了序；现在由写闸门（SAVE_GATE）串行化落盘，
+    /// 本用例用多线程并发改名验证磁盘最终状态与内存一致。
+    #[test]
+    fn concurrent_writes_never_leave_an_older_snapshot_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let own = tmp.path().join("accounts.json");
+        let legacy = tmp.path().join("legacy.json");
+        let st = std::sync::Arc::new(AccountStore::load_dual(&legacy, &own));
+
+        let ids: Vec<String> = (0..4)
+            .map(|i| st.add_account("plat", &format!("acct{i}"), "token", "s").0.id)
+            .collect();
+
+        let mut handles = Vec::new();
+        for round in 0..6 {
+            for id in &ids {
+                let s = st.clone();
+                let id = id.clone();
+                handles.push(std::thread::spawn(move || {
+                    s.rename(&id, &format!("r{round}"));
+                }));
+            }
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // 内存最终状态
+        let mem: std::collections::HashMap<String, String> = st
+            .rows_snapshot()["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap_or("").to_string(),
+                    r["name"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+
+        // 磁盘内容必须与内存一致（落盘一定是最后一次更新的快照）
+        let loaded = AccountStore::load_dual(&legacy, &own);
+        let disk: std::collections::HashMap<String, String> = loaded.rows_snapshot()["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap_or("").to_string(),
+                    r["name"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(disk.len(), mem.len(), "磁盘条目数必须与内存一致");
+        for (id, name) in &mem {
+            assert_eq!(
+                disk.get(id),
+                Some(name),
+                "磁盘留下了旧快照（{id}）：内存={name} 磁盘={:?}",
+                disk.get(id)
+            );
+        }
+    }
+
 }
