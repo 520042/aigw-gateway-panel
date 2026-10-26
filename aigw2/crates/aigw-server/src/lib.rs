@@ -5243,6 +5243,205 @@ fn chat_core_err_brief(e: &ChatCoreErr) -> String {
     }
 }
 
+/// 用**这一个账号**发一次请求，返回「成功产物」或「带原始状态码与分类的错误」。
+///
+/// 抽出来的理由：这段原本内联在 `chat_core` 的换号循环里（约 160 行），流式与非流式
+/// 两条分支各带一整套「首帧体检 / 记账 / 错误分类 / 面板提示」逻辑，和账号轮换的
+/// 控制流缠在一起 —— 读的人很难分清「哪些代码每换一个号就重跑一次」。
+/// 现在循环体只剩：选号 → 调本函数 → 按结果决定换号还是返回。
+///
+/// 约定：
+/// - 成功返回 `ChatCoreOut`（流是包装好的 SSE，非流式是 JSON）；
+/// - 失败返回 `(错误, 上游原始状态码, 分类)`，由调用方决定是否值得换号
+///   （见 `failover_worthy`）。**本函数内部已经记了账**（成功/失败都记），
+///   所以调用方不需要重复记账。
+#[allow(clippy::too_many_arguments)]
+async fn attempt_once(
+    st: &AppState,
+    spec: &ProviderSpec,
+    secret: &str,
+    domain: &str,
+    body: &Bytes,
+    is_stream: bool,
+    account: &str,
+    model: &str,
+    started: Instant,
+    lease: Lease,
+) -> Result<ChatCoreOut, (ChatCoreErr, u16, ErrorClass)> {
+        // 每一轮尝试的产物：成功直接返回；失败带上「原始状态码 + 分类」出来，
+        // 由循环尾部决定「换下一个账号」还是「把错误交给调用方」。
+        let attempt: Result<ChatCoreOut, (ChatCoreErr, u16, ErrorClass)> = if is_stream {
+            match st.client.forward_stream(&spec, &secret, &domain, &body).await {
+                Ok((stream, mut stat_rx)) => {
+                    // ★ 下发第一个字节之前先做首帧体检：上游常见「HTTP 200 + 流里报错」，
+                    //   原样透传会让客户端拿到 200 和解析不了的东西，failover 也无从触发。
+                    let (stream, head_bad) = sniff_stream_head(stream).await;
+                    if let Some((msg, class, raw_status)) = head_bad {
+                        drop(stat_rx);
+                        record(
+                            &st.store, &st.pool, &spec.id, &account, &model, started, false,
+                            0, 0, Some(class), false, &spec.base_url, 0, None,
+                        );
+                        let hint = Some(
+                            "上游回了 200，但流式内容一开头就是错误帧/直接结束：多半是这把凭据已失效、或该账号在当前模型上被挡。换号重试后仍失败就重新粘贴凭据。"
+                                .to_string(),
+                        );
+                        Err((
+                            ChatCoreErr::Upstream {
+                                status: upstream_status(raw_status),
+                                body: msg,
+                                hint,
+                            },
+                            raw_status,
+                            class,
+                        ))
+                    } else {
+                        let store = st.store.clone();
+                        let pool = st.pool.clone();
+                        let spec_id = spec.id.clone();
+                        let spec_url = spec.base_url.clone();
+                        let model2 = model.to_string();
+                        let account2 = account.to_string();
+                        let last_err2 = st.last_err.clone();
+                        tokio::spawn(async move {
+                            let _lease = lease;
+                            match stat_rx.recv().await {
+                                Some(stat) => {
+                                    let stat: StreamStat = stat;
+                                    let ok = stat.error.is_none();
+                                    if stat.client_gone {
+                                        // 用户点了停止：不罚账号、不往卡片上写「平台坏了」。
+                                        record_cancelled(
+                                            &store, &spec_id, &account2, &model2, started,
+                                            stat.tokens_in, stat.tokens_out, &spec_url,
+                                        );
+                                    } else {
+                                        note_stream_outcome(
+                                            &last_err2, &spec_id, stat.error, &stat.error_msg,
+                                        );
+                                        record(
+                                            &store, &pool, &spec_id, &account2, &model2, started, ok,
+                                            stat.tokens_in, stat.tokens_out, stat.error, false, &spec_url,
+                                            stat.ttfb_ms, None,
+                                        );
+                                    }
+                                }
+                                None => {
+                                    last_err2.note(
+                                        &spec_id,
+                                        0,
+                                        "流式响应结束了却没收到任何统计（连接被上游掐断或代理中断）",
+                                    );
+                                    record(
+                                        &store, &pool, &spec_id, &account2, &model2, started, false,
+                                         0, 0, Some(ErrorClass::Transient), false, &spec_url, 0, None,
+                                    );
+                                }
+                            }
+                        });
+                        Ok(ChatCoreOut::Stream(stream))
+                    }
+                }
+                Err(e) => {
+                    record(
+                        &st.store, &st.pool, &spec.id, &account, &model, started, false,
+                         0, 0, Some(e.class), false, &spec.base_url, 0, e.retry_after_hint(),
+                    );
+                    // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
+                    // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
+                    // 真正的限流/额度问题伪装成凭据问题）。
+                    let auth_rejected =
+                        e.status == 401 || e.status == 403 || matches!(e.class, ErrorClass::Auth);
+                    if auth_rejected {
+                        if let Some(kind) = refreshable_kind(&spec, &secret) {
+                            if let Some(ret) = credential_retry_after_refresh(
+                                &st, &spec, &account, &secret, kind, &body, is_stream, started, &model,
+                                lease,
+                            )
+                            .await
+                            {
+                                // 自愈重试成功也是一次成功：否则 401 → 刷新成功 → 重试成功之后，
+                                // 卡片会一直挂着那条已经修好的 401，直到下一次「普通」成功。
+                                if ret.is_ok() {
+                                    st.last_err.clear(&spec.id);
+                                }
+                                // ★ 自愈重试成功才直接返回；失败则**不在这里返回** ——
+                                //   ChatCoreErr 没有携带原始 status/class，无法还原外层需要的
+                                //   三元组。落下去走下面「按原错误分类」的路径，语义更准：
+                                //   刷新之后仍然是 401，本就是同一个 Auth 结论。
+                                if let Ok(out) = ret {
+                                    return Ok(out);
+                                }
+                            }
+                        }
+                    }
+                    let (st_code, st_class) = (e.status, e.class);
+                    let hint = upstream_hint(&spec, e.status, Some(e.class), &e.body);
+                    Err((
+                        ChatCoreErr::Upstream {
+                            status: upstream_status(e.status),
+                            body: e.body,
+                            hint,
+                        },
+                        st_code,
+                        st_class,
+                    ))
+                }
+            }
+        } else {
+            match st.client.forward_nonstream(&spec, &secret, &domain, &body).await {
+                Ok(v) => {
+                    let (tin, tout) = usage_or_estimate(&v, body.len());
+                    record(
+                        &st.store, &st.pool, &spec.id, &account, &model, started, true,
+                        tin, tout, None, false, &spec.base_url, 0, None,
+                    );
+                    Ok(ChatCoreOut::Json(v))
+                }
+                Err(e) => {
+                    let waf_fp = e.status == 200;
+                    record(
+                        &st.store, &st.pool, &spec.id, &account, &model, started, false,
+                        0, 0, Some(e.class), waf_fp, &spec.base_url, 0, e.retry_after_hint(),
+                    );
+                    // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
+                    // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
+                    // 真正的限流/额度问题伪装成凭据问题）。
+                    let auth_rejected =
+                        e.status == 401 || e.status == 403 || matches!(e.class, ErrorClass::Auth);
+                    if auth_rejected {
+                        if let Some(kind) = refreshable_kind(&spec, &secret) {
+                            if let Some(ret) = credential_retry_after_refresh(
+                                &st, &spec, &account, &secret, kind, &body, is_stream, started, &model,
+                                lease,
+                            )
+                            .await
+                            {
+                                // 与流式分支同口径：只有自愈重试**成功**才直接返回；
+                                // 失败继续按原错误的分类处理（刷新后仍 401 本就是同一个结论）。
+                                if let Ok(out) = ret {
+                                    return Ok(out);
+                                }
+                        }
+                        }
+                    }
+                    let (st_code, st_class) = (e.status, e.class);
+                    let hint = upstream_hint(&spec, e.status, Some(e.class), &e.body);
+                    Err((
+                        ChatCoreErr::Upstream {
+                            status: upstream_status(e.status),
+                            body: e.body,
+                            hint,
+                        },
+                        st_code,
+                        st_class,
+                    ))
+                }
+            }
+        };
+    attempt
+}
+
 async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> {
     let model = v
         .get("model")
@@ -5484,168 +5683,12 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
             st.sticky.unbind(&skey);
             continue;
         }
+        // 一次尝试：流式 / 非流式两条分支都在 attempt_once 里（含记账与首帧体检）
         let started = Instant::now();
-        // 每一轮尝试的产物：成功直接返回；失败带上「原始状态码 + 分类」出来，
-        // 由循环尾部决定「换下一个账号」还是「把错误交给调用方」。
-        let attempt: Result<ChatCoreOut, (ChatCoreErr, u16, ErrorClass)> = if is_stream {
-            match st.client.forward_stream(&spec, &secret, &domain, &body).await {
-                Ok((stream, mut stat_rx)) => {
-                    // ★ 下发第一个字节之前先做首帧体检：上游常见「HTTP 200 + 流里报错」，
-                    //   原样透传会让客户端拿到 200 和解析不了的东西，failover 也无从触发。
-                    let (stream, head_bad) = sniff_stream_head(stream).await;
-                    if let Some((msg, class, raw_status)) = head_bad {
-                        drop(stat_rx);
-                        record(
-                            &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                            0, 0, Some(class), false, &spec.base_url, 0, None,
-                        );
-                        let hint = Some(
-                            "上游回了 200，但流式内容一开头就是错误帧/直接结束：多半是这把凭据已失效、或该账号在当前模型上被挡。换号重试后仍失败就重新粘贴凭据。"
-                                .to_string(),
-                        );
-                        Err((
-                            ChatCoreErr::Upstream {
-                                status: upstream_status(raw_status),
-                                body: msg,
-                                hint,
-                            },
-                            raw_status,
-                            class,
-                        ))
-                    } else {
-                        let store = st.store.clone();
-                        let pool = st.pool.clone();
-                        let spec_id = spec.id.clone();
-                        let spec_url = spec.base_url.clone();
-                        let model2 = model.clone();
-                        let account2 = account.clone();
-                        let last_err2 = st.last_err.clone();
-                        tokio::spawn(async move {
-                            let _lease = lease;
-                            match stat_rx.recv().await {
-                                Some(stat) => {
-                                    let stat: StreamStat = stat;
-                                    let ok = stat.error.is_none();
-                                    if stat.client_gone {
-                                        // 用户点了停止：不罚账号、不往卡片上写「平台坏了」。
-                                        record_cancelled(
-                                            &store, &spec_id, &account2, &model2, started,
-                                            stat.tokens_in, stat.tokens_out, &spec_url,
-                                        );
-                                    } else {
-                                        note_stream_outcome(
-                                            &last_err2, &spec_id, stat.error, &stat.error_msg,
-                                        );
-                                        record(
-                                            &store, &pool, &spec_id, &account2, &model2, started, ok,
-                                            stat.tokens_in, stat.tokens_out, stat.error, false, &spec_url,
-                                            stat.ttfb_ms, None,
-                                        );
-                                    }
-                                }
-                                None => {
-                                    last_err2.note(
-                                        &spec_id,
-                                        0,
-                                        "流式响应结束了却没收到任何统计（连接被上游掐断或代理中断）",
-                                    );
-                                    record(
-                                        &store, &pool, &spec_id, &account2, &model2, started, false,
-                                         0, 0, Some(ErrorClass::Transient), false, &spec_url, 0, None,
-                                    );
-                                }
-                            }
-                        });
-                        Ok(ChatCoreOut::Stream(stream))
-                    }
-                }
-                Err(e) => {
-                    record(
-                        &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                         0, 0, Some(e.class), false, &spec.base_url, 0, e.retry_after_hint(),
-                    );
-                    // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
-                    // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
-                    // 真正的限流/额度问题伪装成凭据问题）。
-                    let auth_rejected =
-                        e.status == 401 || e.status == 403 || matches!(e.class, ErrorClass::Auth);
-                    if auth_rejected {
-                        if let Some(kind) = refreshable_kind(&spec, &secret) {
-                            if let Some(ret) = credential_retry_after_refresh(
-                                &st, &spec, &account, &secret, kind, &body, is_stream, started, &model,
-                                lease,
-                            )
-                            .await
-                            {
-                                // 自愈重试成功也是一次成功：否则 401 → 刷新成功 → 重试成功之后，
-                                // 卡片会一直挂着那条已经修好的 401，直到下一次「普通」成功。
-                                if ret.is_ok() {
-                                    st.last_err.clear(&spec.id);
-                                }
-                                return ret;
-                            }
-                        }
-                    }
-                    let (st_code, st_class) = (e.status, e.class);
-                    let hint = upstream_hint(&spec, e.status, Some(e.class), &e.body);
-                    Err((
-                        ChatCoreErr::Upstream {
-                            status: upstream_status(e.status),
-                            body: e.body,
-                            hint,
-                        },
-                        st_code,
-                        st_class,
-                    ))
-                }
-            }
-        } else {
-            match st.client.forward_nonstream(&spec, &secret, &domain, &body).await {
-                Ok(v) => {
-                    let (tin, tout) = usage_or_estimate(&v, body.len());
-                    record(
-                        &st.store, &st.pool, &spec.id, &account, &model, started, true,
-                        tin, tout, None, false, &spec.base_url, 0, None,
-                    );
-                    Ok(ChatCoreOut::Json(v))
-                }
-                Err(e) => {
-                    let waf_fp = e.status == 200;
-                    record(
-                        &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                        0, 0, Some(e.class), waf_fp, &spec.base_url, 0, e.retry_after_hint(),
-                    );
-                    // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
-                    // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
-                    // 真正的限流/额度问题伪装成凭据问题）。
-                    let auth_rejected =
-                        e.status == 401 || e.status == 403 || matches!(e.class, ErrorClass::Auth);
-                    if auth_rejected {
-                        if let Some(kind) = refreshable_kind(&spec, &secret) {
-                            if let Some(ret) = credential_retry_after_refresh(
-                                &st, &spec, &account, &secret, kind, &body, is_stream, started, &model,
-                                lease,
-                            )
-                            .await
-                            {
-                                return ret;
-                            }
-                        }
-                    }
-                    let (st_code, st_class) = (e.status, e.class);
-                    let hint = upstream_hint(&spec, e.status, Some(e.class), &e.body);
-                    Err((
-                        ChatCoreErr::Upstream {
-                            status: upstream_status(e.status),
-                            body: e.body,
-                            hint,
-                        },
-                        st_code,
-                        st_class,
-                    ))
-                }
-            }
-        };
+        let attempt = attempt_once(
+            &st, &spec, &secret, &domain, &body, is_stream, &account, &model, started, lease,
+        )
+        .await;
 
         match attempt {
             Ok(out) => {
