@@ -31,7 +31,7 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// ★ 2026-10-26（P3）：在线配置热更新（对齐 workbuddy2api internal/livecfg）。
@@ -40,9 +40,17 @@ pub mod livecfg;
 pub mod net;
 pub mod ratelimit;
 pub mod dialect;
+pub mod model_rates;
 pub mod models;
 pub mod state;
 pub mod backup;
+pub mod gongyi;
+pub mod errresp;
+pub mod errlog;
+pub mod sesskey;
+pub mod tasks;
+pub mod streamhead;
+pub mod truncated;
 pub mod stream;
 
 // 门禁与出站判定用的纯函数（原 lib.rs 内联，已拆到 net.rs 并补单测）。
@@ -52,16 +60,39 @@ pub use models::WARM_WAIT_CAP;
 // 生产路径已全部经由 state.rs 与 models_ttl。
 #[allow(unused_imports)]
 pub(crate) use models::{
-    custom_to_spec, free_to_spec, models_ttl, ModelsEntry, MODELS_FETCH_CONCURRENCY,
-    MODELS_TTL_ALL, MODELS_TTL_ERR, MODELS_TTL_OK,
+    custom_to_spec, free_to_spec, models_ttl, MODELS_TTL_ALL, MODELS_TTL_ERR, MODELS_TTL_OK,
 };
 pub use state::{loopback_hosts, norm_model_id, same_model, AppState};
 #[allow(unused_imports)]
 pub(crate) use backup::{
-    backup_export, backup_export_full, backup_restore, base64_decode, base64_encode,
-    collect_backup, is_db_file_name, is_secret_file, restore_into_at, restore_target,
-    safe_restore_name,
+    backup_export, backup_export_full, backup_restore, base64_encode, collect_backup,
+    is_secret_file, restore_into_at, safe_restore_name,
 };
+// 公益站聚合：面板路由（/api/free）与每日刷新任务都从这里取；
+// gongyi_host_ok / gongyi_source_list 只有测试在用，标 allow 免得误删。
+#[allow(unused_imports)]
+// 对外：bin（每日公益站刷新任务）要用这三个。
+pub use gongyi::{gongyi_source_list, refresh_free_sites_guarded, FreeRefresh};
+// 对内：其余只在 crate 内与测试里用，pub(crate) 即可（pub use 会因 E0364 失败）。
+#[allow(unused_imports)]
+pub(crate) use gongyi::{
+    fetch_gongyi_sites, fetch_one_source, refresh_free_sites, GONGYI_SOURCES_FILE,
+};
+#[allow(unused_imports)]
+pub(crate) use errresp::{
+    anthropic_error, error_type, extract_upstream_message, msg_with_hint, openai_error,
+    openai_error_coded, responses_error, upstream_error_response, upstream_hint, upstream_status,
+};
+#[allow(unused_imports)]
+pub(crate) use errlog::{note_stream_outcome, LastErrors, LAST_ERR_MAX_CHARS};
+pub use errlog::VERIFY_FAIL_MSG;
+#[allow(unused_imports)]
+pub(crate) use sesskey::{key_id, session_key};
+#[allow(unused_imports)]
+pub use tasks::{supervise_loop_now, TaskStat};
+pub use tasks::{supervise_loop, TaskHealth};
+#[allow(unused_imports)]
+pub(crate) use streamhead::{sniff_stream_head, sniff_stream_head_within};
 pub use stream::{anthropic_stream, responses_stream};
 pub use dialect::{
     anthropic_blocks_text, anthropic_stop_reason, anthropic_to_openai, conv_usage, nanos_hex,
@@ -163,189 +194,6 @@ fn rate_limited(wait: u64, lim: &RateLimiter) -> Response {
     r
 }
 
-/// 后台长任务的一次运行结果（只用于观测，不参与调度决策）。
-#[derive(Clone, Default)]
-pub struct TaskStat {
-    pub ok_runs: u64,
-    pub err_runs: u64,
-    /// 最近一次成功的 unix 秒。
-    pub last_ok: Option<u64>,
-    /// 最近一次成功的说明（例如「共 43 站，新增 2，保留 41；聚合页 43 条，丢弃 3（host 不合规 2，重复 1）」）。
-    ///
-    /// 只记时间不记内容的话，「刷新成功但一个站都没拿到」与「刷新成功拿到 43 个站」在
-    /// 面板上是同一个样子 —— 聚合页改版这类故障会静默持续一整天。
-    pub last_ok_msg: Option<String>,
-    /// 最近一次失败（或 panic）的 unix 秒与原因。
-    pub last_err: Option<(u64, String)>,
-}
-
-/// 后台任务健康台账：`/api/health` 里的 `tasks` 字段。
-///
-/// 为什么需要它：`tokio::spawn` 出去的后台循环**一旦 panic 就永久消失**，而进程还活着、
-/// `/api/health` 还是 `ok:true` —— 面板看上去一切正常，实际「公益站不再刷新」「模型清单
-/// 不再预热」，且没有任何日志会被用户看到。旧实现就是这个状态：一条 `refresh_free_sites`
-/// 里的 `unwrap` 就能让每日刷新静默停摆。这里把「最近一次成功/失败时间」显式暴露出来，
-/// 「本来该在 X 小时前跑过一次的任务，已经 Y 小时没动静」就成了可观测事实。
-#[derive(Default)]
-pub struct TaskHealth {
-    inner: Mutex<HashMap<&'static str, TaskStat>>,
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-impl TaskHealth {
-    pub fn new() -> TaskHealth {
-        TaskHealth::default()
-    }
-
-    /// 预登记一个任务：还没跑过也出现在台账里（`ok_runs: 0`），
-    /// 否则「24 小时才跑一次」的任务在头一天完全不可见。
-    pub fn declare(&self, name: &'static str) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(name)
-            .or_default();
-    }
-
-    pub fn mark_ok(&self, name: &'static str, msg: impl Into<String>) {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let e = g.entry(name).or_default();
-        e.ok_runs += 1;
-        e.last_ok = Some(unix_now());
-        e.last_ok_msg = Some(msg.into());
-    }
-
-    pub fn mark_err(&self, name: &'static str, why: impl Into<String>) {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let e = g.entry(name).or_default();
-        e.err_runs += 1;
-        e.last_err = Some((unix_now(), why.into()));
-    }
-
-    pub fn stat(&self, name: &str) -> Option<TaskStat> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(name)
-            .cloned()
-    }
-
-    /// 快照：`{任务名: {ok_runs, err_runs, last_ok_s_ago, last_err, last_err_s_ago}}`。
-    /// 时间给「多少秒之前」而不是绝对时间，读的人不用再对表。
-    pub fn snapshot(&self) -> Value {
-        let now = unix_now();
-        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let mut out = serde_json::Map::new();
-        for (k, v) in g.iter() {
-            out.insert(
-                (*k).to_string(),
-                json!({
-                    "ok_runs": v.ok_runs,
-                    "err_runs": v.err_runs,
-                    "last_ok_s_ago": v.last_ok.map(|t| now.saturating_sub(t)),
-                    // 成功也要带说明：失败有 last_err，成功什么都不记就等于「刷新成功」
-                    // 可以掩盖「拿到 0 个站」。
-                    "last_ok": v.last_ok_msg.clone(),
-                    "last_err": v.last_err.as_ref().map(|(_, m)| m.clone()),
-                    "last_err_s_ago": v.last_err.as_ref().map(|(t, _)| now.saturating_sub(*t)),
-                }),
-            );
-        }
-        Value::Object(out)
-    }
-}
-
-/// 把「每个周期跑一次」的后台任务包成**不会死**的循环。
-///
-/// - `body` 返回 `Ok(说明)` 记成功、`Err(原因)` 记失败；
-/// - `body` 里 panic 会被 `catch_unwind` 隔离，记一次失败并**继续调度**（旧行为：整个任务消失）；
-/// - 成功后退回 `period`，失败后按 `retry` 更早重试 —— 网络抖动不该让「公益站刷新」
-///   停摆整整一个周期。
-pub fn supervise_loop<F, Fut>(
-    name: &'static str,
-    health: Arc<TaskHealth>,
-    period: std::time::Duration,
-    retry: std::time::Duration,
-    body: F,
-) -> impl std::future::Future<Output = ()> + Send
-where
-    F: FnMut() -> Fut + Send,
-    Fut: std::future::Future<Output = Result<String, String>> + Send,
-{
-    supervise_loop_opts(name, health, period, retry, false, body)
-}
-
-/// 与 supervise_loop 相同，但**先跑一轮再进入周期**。
-///
-/// 用于「周期很长、且冷启动时就该有数据」的任务：24 小时周期的公益站刷新如果先睡
-/// 24 小时再跑，全新部署当天面板和 /api/health 一直是「尚未成功过」——用户只能
-/// 靠手动点刷新来绕过，而那本该是默认行为。
-pub fn supervise_loop_now<F, Fut>(
-    name: &'static str,
-    health: Arc<TaskHealth>,
-    period: std::time::Duration,
-    retry: std::time::Duration,
-    body: F,
-) -> impl std::future::Future<Output = ()> + Send
-where
-    F: FnMut() -> Fut + Send,
-    Fut: std::future::Future<Output = Result<String, String>> + Send,
-{
-    supervise_loop_opts(name, health, period, retry, true, body)
-}
-
-fn supervise_loop_opts<F, Fut>(
-    name: &'static str,
-    health: Arc<TaskHealth>,
-    period: std::time::Duration,
-    retry: std::time::Duration,
-    run_first: bool,
-    mut body: F,
-) -> impl std::future::Future<Output = ()> + Send
-where
-    F: FnMut() -> Fut + Send,
-    Fut: std::future::Future<Output = Result<String, String>> + Send,
-{
-    use futures_util::FutureExt;
-    async move {
-        health.declare(name);
-        // 首次等待：要立刻跑的任务用 ZERO（sleep(0) 只让出一次执行权）。
-        let mut wait = if run_first {
-            std::time::Duration::ZERO
-        } else {
-            period
-        };
-        loop {
-            tokio::time::sleep(wait).await;
-            let fut = std::panic::AssertUnwindSafe(body()).catch_unwind();
-            match fut.await {
-                Ok(Ok(msg)) => {
-                    health.mark_ok(name, msg.clone());
-                    tracing::info!("后台任务 {} 完成：{}", name, msg);
-                    wait = period;
-                }
-                Ok(Err(e)) => {
-                    health.mark_err(name, e.clone());
-                    tracing::warn!("后台任务 {} 失败：{}（{} 秒后重试）", name, e, retry.as_secs());
-                    wait = retry;
-                }
-                Err(_) => {
-                    // panic 的载荷不一定是 &str，这里只关心「发生过」，细节已进 panic hook。
-                    health.mark_err(name, "任务 panic 已被隔离（详见日志）");
-                    tracing::error!("后台任务 {} 发生 panic，已隔离并继续调度", name);
-                    wait = retry;
-                }
-            }
-        }
-    }
-}
-
 /// 请求门禁（对应旧版 Python `_guard`）：
 /// 1. **Host 白名单** —— 挡 DNS 重绑定（攻击者域名解析到 127.0.0.1 后浏览器按同源读数据）；
 /// 2. **Origin/Referer 白名单** —— 挡跨站表单/POST（CSRF），例如恶意页面改写 /api/proxy；
@@ -438,7 +286,17 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
                          面板令牌来自启动参数 --token、环境变量 AIGW_PANEL_TOKEN，或对外监听时自动生成并打印在日志里。",
                     )
                 } else {
-                    unauthorized("缺少或错误的访问令牌（X-AIGW-Token / Bearer / aigw_token Cookie）")
+                    // ★ 补一句「忘了怎么办」。令牌是**一次性回显**的（/api/token 的
+                    //   generate 只在响应里给一次，之后任何接口都读不出来），而落盘文件
+                    //   `data/panel-token.txt` 是 **dpapi: 加密**的、读不回明文 ——
+                    //   用户忘了令牌时，面板 401、UI 上又没有指引，就真的卡死了。
+                    //   唯一的出路是删掉那个文件再重启（启动日志里只在「解密失败」时才
+                    //   提这一句，正常忘了的情况看不到）。
+                    unauthorized(
+                        "缺少或错误的访问令牌（X-AIGW-Token / Bearer / aigw_token Cookie）。\n\
+                         忘了令牌？本网关不保存明文（data\\panel-token.txt 是 dpapi 加密的），无法找回：\n\
+                         删掉数据目录下的 panel-token.txt 后重启服务即可关闭鉴权，再用 /api/token 重新生成。",
+                    )
                 };
             }
         }
@@ -499,6 +357,8 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/proxy", get(proxy_get).post(proxy_set))
         .route("/api/accounts", get(accounts).post(accounts_action))
         .route("/api/pool", get(pool_snapshot).post(pool_action))
+        // ★ 面板「日志」页：落盘日志的尾部原文视图（实现见 logs_view）。
+        .route("/api/logs", get(logs_view))
         // 面板令牌轮换：改一次令牌不该等于重启一次服务。
         .route("/api/token", post(token_action))
         // 访问密钥（多把 + 每把的模型白名单）：借出去的 key 只能调指定模型。
@@ -617,6 +477,13 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
                 .iter()
                 .filter(|m| !disabled.contains(aigw_store::bare_model(m)))
                 .count();
+            // ★ 模型积分倍率：只下发**能查到**的那些（离线表里没有的不编数）。
+            //   前端按 p.rates[模型名] 查，查不到就不显示徽标 —— 宁可不显示，
+            //   也不给用户看一个瞎猜的倍率。
+            let rates: serde_json::Map<String, serde_json::Value> = models
+                .iter()
+                .filter_map(|m| model_rates::rate_for(m).map(|r| (m.clone(), json!(r))))
+                .collect();
             json!({
                 "id": s.id, "name": s.name, "auth": s.auth,
                 "enabled": s.enabled,
@@ -625,6 +492,10 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
                 "models_n": models.len(),
                 "models_on": models_on,
                 "models": models,
+                "rates": rates,
+                // 倍率数据来源（离线(2026-09) / 在线 MM-DD HH:MM）：界面上注明新旧，
+                // 用户才敢把 x0.79 当真数用 —— 这是 model_rates 模块的设计承诺。
+                "rates_source": model_rates::source_label(),
                 "models_policy": s.models_policy,
                 "placeholder": s.base_url.starts_with('@'),
                 "accounts_n": acct_n,
@@ -1022,391 +893,12 @@ async fn custom_action(State(st): State<AppState>, body: Bytes) -> Response {
     }
 }
 
-// ---- 公益站聚合（手动刷新 + 每日自动） ----
-
-/// 聚合源（静态导航页，页面内嵌 JSON-LD itemListElement：name+url）。
-///
-/// 第一个是正式站（GitHub Pages），第二个是**同一仓库**在 raw.githubusercontent.com
-/// 上的原始 index.html（实测同样含 itemListElement）。两个源分属不同域名/不同 CDN，
-/// Pages 构建抖动、证书过期、自定义域名改绑时第二个仍能刷新 —— 旧实现只有第一个，
-/// 它一挂「公益站刷新」就整轮失败，只能等聚合站自己恢复。
-///
-/// 顺序即优先级：按顺序尝试，先成功的那份生效（失败明细进任务台账与 /api/free）。
-const GONGYI_SOURCES: &[&str] = &[
-    "https://bubblevv.github.io/ai-api-gongyi-nav/",
-    "https://raw.githubusercontent.com/bubblevv/ai-api-gongyi-nav/main/index.html",
-];
-
-/// 追加自定义聚合源：`data/gongyi-sources.json`（`{"urls":["https://…"]}` 或裸数组）。
-///
-/// 内置源只收验证过含 itemListElement 的地址 —— 往代码里塞未经核对的镜像，
-/// 只会在真出故障时一起 404。用户自己的镜像/内网静态页写这个文件即可，追加在内置源之后。
-const GONGYI_SOURCES_FILE: &str = "gongyi-sources.json";
-
-/// 聚合源数量上限：串行尝试、每源 30s 超时，源太多会把一次刷新拖成几分钟。
-const MAX_GONGYI_SOURCES: usize = 6;
-
-/// 单批公益站上限：聚合页是外部输入，被投毒塞几千条会把 /v1/models 与
-/// 路由表撑爆，也让面板变成别人的扫描器。
-const MAX_GONGYI_SITES: usize = 200;
-
-/// JSON-LD ListItem（聚合页内嵌）。
-#[derive(Debug, serde::Deserialize)]
-struct GongyiItem {
-    name: String,
-    #[serde(default)]
-    url: String,
-}
-
-/// 公益站 host 准入：聚合页是外部不可信输入，站点 host 会被直接当成上游。
-///
-/// 挡三类：① 云元数据端点（面板会带着用户填的 Key 去请求它，等于把 Key 与
-/// 云主机临时凭据一起交出去）；② 本机/回环（会形成自指回环：面板转发给自己，
-/// 再拉自己的 /v1/models，放大成请求风暴）；③ 明显不是公网域名的畸形 host。
-/// 内网上游有意不拦 —— 用户自己填的自定义 API 是另一条路径，走 custom_action。
-pub fn gongyi_host_ok(host: &str) -> bool {
-    let h = host.trim().trim_start_matches('[').trim_end_matches(']').to_lowercase();
-    if h.is_empty() || h.len() > 253 {
-        return false;
-    }
-    if blocked_upstream_host(&h) {
-        return false;
-    }
-    const LOOPBACK: &[&str] = &[
-        "localhost",
-        "127.0.0.1",
-        "::1",
-        "0.0.0.0",
-        "[::1]",
-    ];
-    if LOOPBACK.iter().any(|x| *x == h) {
-        return false;
-    }
-    // 公网域名至少有一个点；没有点的主机名（`api`、`localhost`）不该被当成上游
-    if !h.contains('.') {
-        return false;
-    }
-    for seg in h.split('.') {
-        if seg.is_empty() || seg.len() > 63 {
-            return false;
-        }
-        if !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return false;
-        }
-    }
-    true
-}
-/// 从 host 提取 id 用 slug（去 www.，非法字符转 -）。
-fn slug_of(host: &str) -> String {
-    let h = host.trim_start_matches("www.");
-    let mut s = String::new();
-    for ch in h.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' {
-            s.push(ch);
-        } else {
-            s.push('-');
-        }
-    }
-    s.trim_matches('-').to_string()
-}
-
-/// 从 URL 提取 host（https://host/path?a=b → host）。
-fn host_of(u: &str) -> Option<String> {
-    let rest = u.split("://").nth(1)?;
-    let host = rest.split(['/', '?', '#']).next()?;
-    if host.is_empty() {
-        return None;
-    }
-    Some(host.to_string())
-}
-
-
-/// 聚合源 URL 的合规检查：只收 http(s)、主机可解析、且不是云元数据端点。
-///
-/// **回环放行**：自建镜像常见于本机 https://127.0.0.1:8443，那是用户自己的静态页，
-/// 与「聚合页被投毒塞进来一个站」不是一回事（后者由 `gongyi_host_ok` 单独拦）。
-fn gongyi_source_ok(raw: &str) -> Option<String> {
-    let u = raw.trim();
-    if u.is_empty() {
-        return None;
-    }
-    let low = u.to_ascii_lowercase();
-    if !(low.starts_with("https://") || low.starts_with("http://")) {
-        return None;
-    }
-    let h = url_host(u);
-    if h.is_empty() || blocked_upstream_host(&h) {
-        return None;
-    }
-    Some(u.to_string())
-}
-
-/// URL → 便于阅读的主机名（解析不出时退回原串）。
-fn short_host(u: &str) -> String {
-    let h = url_host(u);
-    if h.is_empty() {
-        u.to_string()
-    } else {
-        h
-    }
-}
-
-/// 本轮生效的聚合源列表：内置源 + `data/gongyi-sources.json` 追加的源（去重后截断）。
-///
-/// 配置文件损坏时**不**让刷新失败 —— 只用内置源并留一条 warn：一个写错逗号的
-/// JSON 不该让公益站整轮刷不出来。
-pub fn gongyi_source_list(data_dir: Option<&std::path::Path>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for u in GONGYI_SOURCES {
-        match gongyi_source_ok(u) {
-            Some(u) => out.push(u),
-            None => tracing::warn!("内置聚合源不合规，已跳过：{u}"),
-        }
-    }
-    if let Some(dir) = data_dir {
-        match std::fs::read_to_string(dir.join(GONGYI_SOURCES_FILE)) {
-            // Windows 记事本/PowerShell 5 写文件默认带 UTF-8 BOM：serde_json
-            // 见到 \u{feff} 直接报 unexpected character，于是整份配置被静默忽略
-            // （实测就是这条：用户写了聚合源，面板上源列表一个都没多）。先剥 BOM。
-            Ok(txt) => match serde_json::from_str::<Value>(txt.trim_start_matches('\u{feff}')) {
-                Ok(v) => {
-                    let arr = v
-                        .as_array()
-                        .or_else(|| v.get("urls").and_then(|x| x.as_array()))
-                        .cloned()
-                        .unwrap_or_default();
-                    if arr.is_empty() {
-                        tracing::warn!(
-                            "{} 里没有可用地址（应是数组或 {{\"urls\":[…]}}），本轮只用内置聚合源",
-                            GONGYI_SOURCES_FILE
-                        );
-                    }
-                    for it in arr {
-                        let Some(raw) = it.as_str() else {
-                            tracing::warn!(
-                                "{} 里有非字符串条目，已忽略：{it}",
-                                GONGYI_SOURCES_FILE
-                            );
-                            continue;
-                        };
-                        match gongyi_source_ok(raw) {
-                            Some(u) => out.push(u),
-                            None => tracing::warn!(
-                                "{} 里的聚合源不合规（只收 http/https，且不能是云元数据端点），已忽略：{raw}",
-                                GONGYI_SOURCES_FILE
-                            ),
-                        }
-                    }
-                }
-                Err(e) => tracing::warn!(
-                    "{} 解析失败（本轮只用内置聚合源）：{e}",
-                    GONGYI_SOURCES_FILE
-                ),
-            },
-            Err(_) => {}
-        }
-    }
-    let mut seen: Vec<String> = Vec::new();
-    out.retain(|u| {
-        let k = u.trim_end_matches('/').to_ascii_lowercase();
-        if seen.iter().any(|x| x == &k) {
-            return false;
-        }
-        seen.push(k);
-        true
-    });
-    out.truncate(MAX_GONGYI_SOURCES);
-    out
-}
-
-/// 从聚合页 HTML 里抽出 JSON-LD `itemListElement` 数组（括号配对，兼容内部嵌套）。
-fn parse_gongyi_items(html: &str) -> Result<Vec<GongyiItem>, String> {
-    let start = html
-        .find("\"itemListElement\"")
-        .ok_or("聚合页未找到 itemListElement（聚合站改版或返回了错误页）")?;
-    let rest = &html[start + "\"itemListElement\"".len()..];
-    let colon = rest.find(':').ok_or("itemListElement 缺冒号")?;
-    let arr = &rest[colon + 1..];
-    let arr = arr.trim_start();
-    if !arr.starts_with('[') {
-        return Err("itemListElement 不是数组".into());
-    }
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut esc = false;
-    let mut end = 0usize;
-    for (i, ch) in arr.char_indices() {
-        if esc {
-            esc = false;
-            continue;
-        }
-        match ch {
-            '\\' if in_str => esc = true,
-            '"' => in_str = !in_str,
-            '[' => {
-                if !in_str {
-                    depth += 1
-                }
-            }
-            ']' if !in_str => {
-                depth -= 1;
-                if depth == 0 {
-                    end = i + 1;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    if end == 0 {
-        return Err("itemListElement 数组未闭合".into());
-    }
-    serde_json::from_str(&arr[..end]).map_err(|e| format!("解析站点列表失败：{e}"))
-}
-
-/// 单个聚合源的尝试次数。
-///
-/// 实测：服务刚起来的那一轮刷新，两个源会**同时**报「请求失败」（DNS/TLS 还没热），
-/// 几十秒后手动刷新就正常了。不重试的话，每次重启面板上都会留下一次「全源失败」的
-/// 假故障。两次重试（0.25s / 0.5s 退避）足以盖住这种瞬时抖动。
-const GONGYI_FETCH_TRIES: usize = 3;
 
 /// 「近 24h 平台健康」的统计窗口（/api/platforms 的 recent 字段）。
 ///
 /// 一天是刻意的：公益站/免费车道被封、上游改反爬之后，失败会立刻集中出现，而
 /// 一周前的历史失败没有决策价值（反而会让刚恢复的平台一直挂着红标）。
 const PLATFORM_HEALTH_WINDOW_S: f64 = 24.0 * 3600.0;
-
-/// 每个接入源「最近一次失败」的原始原因（面板接入源卡片用）。
-///
-/// usage 台账只有 ok/failed 计数：一个公益站挂了两周，面板只会显示「近24h 失败 40%」，
-/// 用户完全看不到是 **401 凭据过期**、**402 额度耗尽** 还是 **域名解析不了** —— 这三种
-/// 的处理方式完全不同（粘贴 Key / 换站 / 查 DNS）。出错那一刻的信息只在响应体里，
-/// 不记下来就永久消失，所以在这里留一份（按 spec id 一条，只保留最近一次）。
-pub struct LastErrors {
-    inner: Mutex<HashMap<String, ErrNote>>,
-}
-
-/// 一条「最近一次失败」。
-#[derive(Debug, Clone)]
-pub struct ErrNote {
-    /// unix 秒。
-    pub at: u64,
-    /// 上游 HTTP 状态；0 = 连接层失败（DNS/拒绝连接/超时），本地错误记调用方状态。
-    pub status: u16,
-    /// 上游原话（已压缩/截断）。
-    pub text: String,
-}
-
-/// 记下来的原因最长多少字符：上游有时回一整页 HTML，全存下来会让面板卡片爆掉。
-const LAST_ERR_MAX_CHARS: usize = 300;
-
-/// 主动「验活」失败时的统一说法（既做响应文案，也做平台卡片上的失败原因）。
-///
-/// 验活只回 bool（各平台 wrapper 的端点不同，具体原因拿不到），所以这里只能说
-/// 「凭据可能已过期」这一句；对 cookie 平台补一句该怎么做，避免用户去翻日志。
-const VERIFY_FAIL_MSG: &str = "验活未通过：凭据可能已过期（Cookie 平台请重新登录后复制完整字段）";
-
-impl Default for LastErrors {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LastErrors {
-    pub fn new() -> LastErrors {
-        LastErrors {
-            inner: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// 记一次失败（空 id 忽略：没有平台就无处归属）。
-    pub fn note(&self, id: &str, status: u16, text: &str) {
-        let id = id.trim();
-        if id.is_empty() {
-            return;
-        }
-        let t = compact_err_text(text);
-        let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        m.insert(
-            id.to_string(),
-            ErrNote {
-                at: aigw_store::now_unix() as u64,
-                status,
-                text: t,
-            },
-        );
-    }
-
-    /// 这个平台成功了一次：旧的失败原因不再代表现状，必须清掉。
-    ///
-    /// 不注意这点就会出现「刚跑通的车道卡片上还挂着上周的 402」——
-    /// 比没有信息更糟，因为它会让人去修一个已经不存在的问题。
-    pub fn clear(&self, id: &str) {
-        let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        m.remove(id);
-    }
-
-    /// 面板展示用：at / s_ago / status / text；没有记录返回 Null。
-    pub fn json(&self, id: &str) -> Value {
-        let now = aigw_store::now_unix() as u64;
-        let m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        match m.get(id) {
-            Some(n) => json!({
-                "at": n.at,
-                "s_ago": now.saturating_sub(n.at),
-                "status": n.status,
-                "text": n.text,
-            }),
-            None => Value::Null,
-        }
-    }
-}
-
-/// 把上游错误文本压成一行可读的原因：能解析成 JSON 就取 message 字段，
-/// 否则取原文；换行压成空格；超长截断。
-fn compact_err_text(raw: &str) -> String {
-    let raw = raw.trim();
-    let mut t = raw.to_string();
-    if let Ok(v) = serde_json::from_str::<Value>(raw) {
-        for path in [
-            ["error", "message"],
-            ["error", "msg"],
-            ["message", ""],
-            ["msg", ""],
-            ["detail", ""],
-        ] {
-            let mut cur = &v;
-            let mut hit = true;
-            for k in path.iter().filter(|k| !k.is_empty()) {
-                match cur.get(*k) {
-                    Some(n) => cur = n,
-                    None => {
-                        hit = false;
-                        break;
-                    }
-                }
-            }
-            if hit {
-                if let Some(x) = cur.as_str() {
-                    if !x.trim().is_empty() {
-                        t = x.trim().to_string();
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    let one: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one.is_empty() {
-        return "（上游没有给出原因）".to_string();
-    }
-    let mut out: String = one.chars().take(LAST_ERR_MAX_CHARS).collect();
-    if one.chars().count() > LAST_ERR_MAX_CHARS {
-        out.push('…');
-    }
-    out
-}
 
 /// 从转发错误里取「给人看的原因」。
 fn chat_err_text(e: &ChatCoreErr) -> String {
@@ -1416,399 +908,6 @@ fn chat_err_text(e: &ChatCoreErr) -> String {
     }
 }
 
-/// 把**流式**结果写进「最近失败原因」台账。
-///
-/// 流式的结局不是主循环拿到的：网关把 body 交出去之后就返回了 Ok，成败要等后台
-/// 统计任务从 stat_rx 里读。少了这一步，流式失败（真机上最常见的一类）在卡片上
-/// 只剩「近24h 失败 N 次」，说不出上游原话。
-fn note_stream_outcome(le: &LastErrors, spec_id: &str, error: Option<ErrorClass>, msg: &str) {
-    match error {
-        None => le.clear(spec_id),
-        Some(cl) => {
-            // 流里没有 HTTP 状态码：status 记 0，面板据此不显示「HTTP xxx」。
-            let text = if msg.trim().is_empty() {
-                format!("流式响应中途失败（上游断开或回了错误帧；分类 {cl:?}）")
-            } else {
-                msg.to_string()
-            };
-            le.note(spec_id, 0, &text);
-        }
-    }
-}
-
-
-/// 单次抓取：HTTP 状态也要查（改版页/错误页常是 200，但 404 页必然没有列表）。
-/// 第二个返回值表示「是否值得重试」：4xx 多半是地址写错了，重试只是浪费时间。
-async fn fetch_one_source_once(
-    client: &aigw_relay::OutClient,
-    url: &str,
-) -> (Result<(Vec<aigw_store::FreeSite>, GongyiStats), String>, bool) {
-    let resp = match client
-        .http()
-        .get(url)
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return (Err(format!("请求失败：{e}")), true),
-    };
-    let status = resp.status();
-    if !status.is_success() {
-        let retry = status.as_u16() == 429 || status.is_server_error();
-        return (Err(format!("HTTP {status}")), retry);
-    }
-    let html = match resp.text().await {
-        Ok(h) => h,
-        Err(e) => return (Err(format!("读取响应失败：{e}")), true),
-    };
-    (parse_gongyi_items(&html).map(gongyi_items_to_sites), false)
-}
-
-/// 带重试的抓取。最终报错里带「已重试 N 次」，让面板上分得清
-/// 「一次就 404」和「反复失败」。
-async fn fetch_one_source(
-    client: &aigw_relay::OutClient,
-    url: &str,
-) -> Result<(Vec<aigw_store::FreeSite>, GongyiStats), String> {
-    let mut last = String::new();
-    let mut tries = 0usize;
-    for i in 0..GONGYI_FETCH_TRIES {
-        if i > 0 {
-            let backoff = 250u64 << (i - 1).min(3);
-            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-        }
-        tries = i + 1;
-        let (r, retryable) = fetch_one_source_once(client, url).await;
-        match r {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                last = e;
-                if !retryable {
-                    break;
-                }
-            }
-        }
-    }
-    if tries > 1 {
-        Err(format!("{last}（已重试 {} 次）", tries - 1))
-    } else {
-        Err(last)
-    }
-}
-
-/// 按顺序回退：第一个成功的源生效，失败源的明细全部保留。
-///
-/// 抽成纯函数是为了能单测「首源失败→次源命中」「全失败时的报错文案」——
-/// 这两条正是多源回退真正会走的分支，靠外网写集成测试既慢又不稳。
-fn combine_gongyi_attempts(
-    attempts: Vec<(String, Result<(Vec<aigw_store::FreeSite>, GongyiStats), String>)>,
-) -> Result<(Vec<aigw_store::FreeSite>, GongyiStats), String> {
-    if attempts.is_empty() {
-        return Err(format!(
-            "没有可用的聚合源：内置源为空且 data/{GONGYI_SOURCES_FILE} 里没有合规地址"
-        ));
-    }
-    let mut tried: Vec<SourceStat> = Vec::new();
-    for (url, r) in attempts {
-        match r {
-            Ok((sites, mut st)) => {
-                tried.push(SourceStat {
-                    url,
-                    ok: true,
-                    items: sites.len(),
-                    err: String::new(),
-                });
-                st.sources = tried;
-                return Ok((sites, st));
-            }
-            Err(e) => tried.push(SourceStat {
-                url,
-                ok: false,
-                items: 0,
-                err: e,
-            }),
-        }
-    }
-    let detail = tried
-        .iter()
-        .map(|s| format!("{}（{}）", short_host(&s.url), s.err))
-        .collect::<Vec<_>>()
-        .join("；");
-    Err(format!(
-        "全部 {} 个聚合源都失败：{detail}",
-        tried.len()
-    ))
-}
-
-/// 抓取聚合源并解析出站点列表（按 host 去重，首个保留）。
-///
-/// 多源回退：按 `sources` 顺序串行尝试，第一个成功的生效；全部失败才返回 Err。
-pub async fn fetch_gongyi_sites(
-    client: &aigw_relay::OutClient,
-    sources: &[String],
-) -> Result<(Vec<aigw_store::FreeSite>, GongyiStats), String> {
-    let mut attempts = Vec::new();
-    for url in sources {
-        let r = fetch_one_source(client, url).await;
-        let failed = r.is_err();
-        if let Err(e) = &r {
-            tracing::warn!("聚合源 {url} 失败：{e}");
-        }
-        attempts.push((url.clone(), r));
-        if !failed {
-            break;
-        }
-    }
-    combine_gongyi_attempts(attempts)
-}
-
-/// 一轮聚合刷新里「为什么少了这么多站」的明细。
-///
-/// 只把 counts 写进 tracing 日志的话，面板上只能看到「共 N 站」，看不出这个 N 是
-/// 「聚合页本来只有 N 条」还是「聚合页给了 60 条、58 条被筛掉」——后者意味着上游
-/// 站点集体挂掉或聚合页被投毒，必须能直接看见。
-/// 单个聚合源的尝试结果（多源回退的可解释性：到底是谁失败、谁命中）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceStat {
-    pub url: String,
-    /// 该源是否取数成功（成功即本轮生效，后面的源不会再试）。
-    pub ok: bool,
-    /// 成功时入库的站点条数。
-    pub items: usize,
-    /// 失败原因（HTTP 状态 / 解析错误 / 网络错误）；成功时为空。
-    pub err: String,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct GongyiStats {
-    /// 聚合页给出的条目总数。
-    pub items: usize,
-    /// host 不合规（云元数据 / 回环 / 畸形域名 / 空 url）被跳过。
-    pub bad_host: usize,
-    /// host 重复（聚合页常见重复条目）。
-    pub dup_host: usize,
-    /// 触达 MAX_GONGYI_SITES 上限后丢弃。
-    pub over_cap: usize,
-    /// slug 撞车导致 id 冲突丢弃。
-    pub id_conflict: usize,
-    /// 与内置 `providers/free-*.toml` 同域，因此没有入库（卡片用内置那一条）。
-    ///
-    /// 单独计数而不是并进 `dropped()`：这些条目本身没坏，丢掉它们只是为了避免
-    /// 同一个站在面板上出现两张卡片。混进「丢弃」会让扣减看起来像上游出了问题。
-    pub shadowed: usize,
-    /// 本轮尝试过的聚合源（按尝试顺序；最后一个 `ok` 的即生效源）。
-    pub sources: Vec<SourceStat>,
-}
-
-impl GongyiStats {
-    /// 被丢弃的条目总数。
-    pub fn dropped(&self) -> usize {
-        self.bad_host + self.dup_host + self.over_cap + self.id_conflict
-    }
-
-    /// 一行明细，写进任务台账与 /api/free 的响应。计数为 0 的项不占字数。
-    pub fn detail(&self) -> String {
-        let shadow = if self.shadowed > 0 {
-            format!("，另有 {} 个与内置接入源同域（已并入内置条目）", self.shadowed)
-        } else {
-            String::new()
-        };
-        if self.dropped() == 0 {
-            return format!("聚合页 {} 条，无丢弃{}", self.items, shadow);
-        }
-        let mut parts: Vec<String> = Vec::new();
-        if self.bad_host > 0 {
-            parts.push(format!("host 不合规 {}", self.bad_host));
-        }
-        if self.dup_host > 0 {
-            parts.push(format!("重复 {}", self.dup_host));
-        }
-        if self.over_cap > 0 {
-            parts.push(format!("超上限丢弃 {}", self.over_cap));
-        }
-        if self.id_conflict > 0 {
-            parts.push(format!("id 撞车 {}", self.id_conflict));
-        }
-        format!(
-            "聚合页 {} 条，丢弃 {}（{}）{}",
-            self.items,
-            self.dropped(),
-            parts.join("，"),
-            shadow
-        )
-    }
-
-    /// 多源回退的一句话说明：'聚合源 X 命中' / '聚合源 A 失败（…），由 B 命中'。
-    ///
-    /// 只在真有多个源参与时才值得写；单源命中不占字数（`detail()` 已经说了条数）。
-    pub fn sources_note(&self) -> String {
-        if self.sources.is_empty() {
-            return String::new();
-        }
-        let Some(hit) = self.sources.iter().position(|s| s.ok) else {
-            return String::new();
-        };
-        if hit == 0 {
-            // 单源也是这个源：写出来才能回答「今天用的是正式站还是回退源」——
-            // 只写「无丢弃」时，回退源长期接管这件事在面板上看不出来。
-            return format!("聚合源 {} 命中", short_host(&self.sources[0].url));
-        }
-        let failed: Vec<String> = self.sources[..hit]
-            .iter()
-            .map(|s| format!("{}（{}）", short_host(&s.url), s.err))
-            .collect();
-        format!(
-            "聚合源 {} 失败（{}），由 {} 命中",
-            failed.len(),
-            failed.join("；"),
-            short_host(&self.sources[hit].url)
-        )
-    }
-}
-
-/// JSON-LD 条目 → 公益站条目（纯函数，便于单测）。
-///
-/// 去重两条线：host 完全相同（聚合页常见重复条目）与 **id 相同**
-/// （slug 只保留 [a-z0-9-]，不同 host 可能映射到同一 slug）。
-/// 返回 (条目, 明细)：明细让「聚合页给了 60 条但只入库 2 条」在面板上可解释。
-fn gongyi_items_to_sites(items: Vec<GongyiItem>) -> (Vec<aigw_store::FreeSite>, GongyiStats) {
-    let total = items.len();
-    let mut st = GongyiStats {
-        items: total,
-        ..Default::default()
-    };
-    let mut seen: Vec<String> = Vec::new();
-    let mut out: Vec<aigw_store::FreeSite> = Vec::new();
-    // id 也必须去重：slug 只保留 [a-z0-9-]，不同的 host 完全可能映射到同一个 slug
-    // （例如 `api.a-b.com` 与 `api-a-b.com` 都变成 `api-a-b-com`）。旧实现只按 host
-    // 去重，于是同一批里出现两条同 id 的站点，upsert_batch 会把后一条当成「已存在」
-    // 覆盖前一条的 base_url —— 刷新一次，某个站点就静默指向了另一个域名。
-    let mut seen_ids: Vec<String> = Vec::new();
-    for (idx, it) in items.into_iter().enumerate() {
-        let u = it.url.trim().to_string();
-        if !scheme_ok(&u) {
-            // javascript://host/… 这类：host_of 能切出合规主机，但整个串是可执行
-            // 脚本 URL，绝不能入库当注册页链接（见 scheme_ok 注释）。
-            st.bad_host += 1;
-            tracing::warn!(
-                "公益站 URL 的 scheme 不是 http(s)，已跳过：{}",
-                u.chars().take(80).collect::<String>()
-            );
-            continue;
-        }
-        let Some(host) = host_of(&u) else {
-            // 空 url 或解析不出 host 的条目也算「不合规」：否则明细里 items 与
-            // 入库+丢弃对不上，看的人会以为漏算了。
-            st.bad_host += 1;
-            continue;
-        };
-        if !gongyi_host_ok(&host) {
-            st.bad_host += 1;
-            tracing::warn!("公益站 host 不合规，已跳过：{}（来自 {}）", host, u);
-            continue;
-        }
-        if out.len() >= MAX_GONGYI_SITES {
-            // 剩余条目一次性丢弃：逐条 warn 会让一次投毒刷新刷满整个日志。
-            st.over_cap = total - idx;
-            tracing::warn!(
-                "公益站数量已达上限 {}，忽略后续 {} 条条目",
-                MAX_GONGYI_SITES,
-                st.over_cap
-            );
-            break;
-        }
-        if seen.contains(&host) {
-            st.dup_host += 1;
-            continue;
-        }
-        seen.push(host.clone());
-        let slug = slug_of(&host);
-        if slug.is_empty() {
-            st.bad_host += 1;
-            continue;
-        }
-        let id = format!("free-{slug}");
-        if seen_ids.iter().any(|x| x == &id) {
-            st.id_conflict += 1;
-            tracing::warn!(
-                "公益站 id 冲突：{} 与已收录站点的 slug 都是 {}，跳过后者（host={host}）",
-                it.name.trim(),
-                id
-            );
-            continue;
-        }
-        seen_ids.push(id.clone());
-        out.push(aigw_store::FreeSite {
-            id,
-            name: it.name.trim().to_string(),
-            base_url: format!("https://{host}"),
-            url: u,
-            desc: String::new(),
-            enabled: true,
-        });
-    }
-    (out, st)
-}
-
-/// 公益站刷新的全局单飞闸门。
-///
-/// 手动点「⟳ 刷新公益站」和每日定时任务走的是同一条抓取链路：两个一起跑会
-/// 同时打聚合源（几秒到几十秒）、同时 upsert，并互相覆盖 health 里那句
-/// 「这一轮拿到了几个站」。用 try_lock 而不是 lock：并发的一方直接说清楚
-/// 「上一次还在进行」，而不是排队等完再抓第二遍。
-static FREE_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// 刷新结果：要么真跑完了，要么「上一轮还在进行中」被挡下。
-pub enum FreeRefresh {
-    Done(usize, usize, usize, GongyiStats),
-    Busy,
-}
-
-/// 单飞版刷新：拿不到闸门就返回 Busy，不做重复抓取。
-pub async fn refresh_free_sites_guarded(
-    client: &aigw_relay::OutClient,
-    free: &aigw_store::FreeStore,
-    sources: &[String],
-    static_hosts: &[String],
-) -> Result<FreeRefresh, String> {
-    let _gate = match FREE_REFRESH_LOCK.try_lock() {
-        Ok(g) => g,
-        Err(_) => return Ok(FreeRefresh::Busy),
-    };
-    let (total, added, kept, stats) = refresh_free_sites(client, free, sources, static_hosts).await?;
-    Ok(FreeRefresh::Done(total, added, kept, stats))
-}
-
-/// 刷新公益站聚合：抓取（多源回退）→ 解析 → 跳过已被内置接入源覆盖的站 → 合并（已存在保留）。
-/// 返回 (聚合总数, 新增数, 保留数, 丢弃明细)。
-///
-/// static_hosts 见 [static_free_hosts]：同域的动态条目不入库，否则同一个站会有
-/// 两张卡片（id 不同 → upsert_batch 的按 id 去重拦不住）。
-pub async fn refresh_free_sites(
-    client: &aigw_relay::OutClient,
-    free: &aigw_store::FreeStore,
-    sources: &[String],
-    static_hosts: &[String],
-) -> Result<(usize, usize, usize, GongyiStats), String> {
-    let (sites, mut stats) = fetch_gongyi_sites(client, sources).await?;
-    let total = sites.len();
-    // 与内置接入源同域的条目：不入库（内置那条已经在面板上了）。
-    let (shadowed, keep): (Vec<_>, Vec<_>) = sites.into_iter().partition(|s| {
-        let h = site_host(&s.base_url);
-        !h.is_empty() && static_hosts.iter().any(|x| x == &h)
-    });
-    stats.shadowed = shadowed.len();
-    if stats.shadowed > 0 {
-        tracing::info!(
-            "公益站刷新：{} 个条目与内置接入源同域，未重复入库（{}）",
-            stats.shadowed,
-            shadowed.iter().map(|s| s.base_url.clone()).collect::<Vec<_>>().join("，")
-        );
-    }
-    let (added, kept) = free.upsert_batch(keep);
-    Ok((total, added, kept, stats))
-}
 
 /// 被内置 `providers/free-*.toml` 同域覆盖、且名下没有账号的动态公益站 id。
 ///
@@ -2570,6 +1669,19 @@ async fn accounts(State(st): State<AppState>) -> Json<Value> {
             row["cooling_s"] = json!(blocked.cooling_s.round());
             row["waf_s"] = json!(blocked.waf_s.round());
             row["blocked"] = json!(!blocked.is_clear());
+            // ★ 积分余额快照（签到后刷新）：面板要能看出「这个号还剩多少额度」，
+            //   否则「低余额优先」的加权在界面上无从验证。过期快照不下发 ——
+            //   与 pool::credit_snapshot / pick 同一口径。
+            // Token 限制器现场：面板显示「已用 x / 限 y · 翻页剩 N 分钟」用
+            if let Some((rule, used)) = st.pool.token_view(&id) {
+                row["token_rule"] = json!({"limit": rule.limit, "period_s": rule.period_s});
+                row["token_used"] = json!(used);
+            }
+            if let Some((c, age, expire_at)) = st.pool.credit_snapshot(&id) {
+                row["credit"] = json!(c);
+                row["credit_age_s"] = json!(age);
+                row["credit_expire_s"] = json!(expire_at);
+            }
         }
     }
     // 顶层附「每日自动签到」开关与后台任务台账：账号页要能就地开关，
@@ -2627,10 +1739,11 @@ async fn accounts_action(State(st): State<AppState>, body: Bytes) -> Response {
         && action != "verify"
         && action != "rename"
         && action != "balance"
+        && action != "set_limit"
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"ok": false, "message": format!("未知 action：{action}（可用 delete / toggle / verify / rename / balance）")})),
+            Json(json!({"ok": false, "message": format!("未知 action：{action}（可用 delete / toggle / verify / rename / balance / set_limit）")})),
         )
             .into_response();
     }
@@ -2667,16 +1780,55 @@ async fn accounts_action(State(st): State<AppState>, body: Bytes) -> Response {
             let http = aigw_relay::auth_login::auth_http();
             match aigw_relay::wb::query_balance(&http, base, &secret).await {
                 Ok(mut d) => {
-                    // ★ 2026-10-26（P1）：顺手更新号池积分快照（「快过期优先」选号依据）
-                    let credit = d.get("credit").and_then(|x| x.as_i64()).map(|c| c as f64);
-                    st.pool.record_credit(&id, credit);
+                    // ★ 2026-10-26（P1）：顺手更新号池积分快照（「快过期优先」选号依据）。
+                    //   到期时刻一起记 —— pick 的「48h 内到期优先」靠 expire_at。
+                    let credit = d
+                        .get("credit")
+                        .and_then(|x| x.as_f64())
+                        .or_else(|| d.get("credit").and_then(|x| x.as_i64()).map(|c| c as f64));
+                    let expire_at = d.get("expire_at").and_then(|x| x.as_i64());
+                    st.pool.record_credit_exp(&id, credit, expire_at);
                     d["ok"] = json!(true);
                     d["supported"] = json!(true);
                     d["platform"] = json!(platform);
                     Json(d).into_response()
                 }
-                Err(e) => Json(json!({"ok": false, "supported": true, "message": e})).into_response(),
+                Err(e) => {
+                    // 确 401/403 = 凭据死了：清掉旧余额快照，
+                    // 否则面板挂着「积分 8600」而号早就用不了。
+                    if auth_failure_of(&e) {
+                        st.pool.clear_credit(&id);
+                    }
+                    Json(json!({"ok": false, "supported": true, "message": e})).into_response()
+                }
             }
+        }
+        "set_limit" => {
+            // ★ Token 周期限制器（对齐参考项目账号级 limiter）：到量选号跳过，
+            //   窗口翻页自动恢复。limit=null 清除。周期夹进 [30min, 24h]——
+            //   太短会「刚恢复又被拦」，太长失去保护意义（参考实现评审结论）。
+            let limit = v.get("limit").and_then(|x| x.as_u64()).filter(|l| *l > 0);
+            let period = v
+                .get("period_s")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(3600)
+                .clamp(1_800, 86_400);
+            if !st.accounts.set_token_limit(&id, limit, (limit.is_some()).then_some(period)) {
+                return (
+                    StatusCode::NOT_FOUND
+                    ,
+                    Json(json!({"ok": false, "message": "账号不存在"})),
+                ).into_response();
+            }
+            st.pool.set_token_rule(&id, limit, period);
+            Json(json!({
+                "ok": true
+                ,
+                "message": match limit {
+                    Some(l) => format!("已设置限制：每 {period} 秒最多 {l} token（整点窗口翻页自动恢复）"),
+                    None => "已清除该账号的 Token 限制".to_string(),
+                },
+            })).into_response()
         }
         "rename" => {
             const MAX_ACCOUNT_NAME_LEN: usize = 60;
@@ -3002,8 +2154,12 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
             //   顺手查一次余额写进号池的积分快照，「快过期优先」选号才有依据。
             if claim && r.is_ok() {
                 if let Ok(b) = aigw_relay::wb::query_balance(&http, base, &secret).await {
-                    let credit = b.get("credit").and_then(|x| x.as_i64()).map(|c| c as f64);
-                    st.pool.record_credit(&acc_id, credit);
+                    let credit = b
+                        .get("credit")
+                        .and_then(|x| x.as_f64())
+                        .or_else(|| b.get("credit").and_then(|x| x.as_i64()).map(|c| c as f64));
+                    let expire_at = b.get("expire_at").and_then(|x| x.as_i64());
+                    st.pool.record_credit_exp(&acc_id, credit, expire_at);
                 }
             }
             results.push(json!({
@@ -3022,6 +2178,109 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
 /// 业务成败在 data.ok / data.code：code=2（参考实现）与 code=10001（2026-10 起
 /// copilot.tencent.com 实际返回，HTTP 400 +「今天已签到」）都是「今日已领取」，
 /// 不是失败，单列出来 —— 否则每天第二次跑都显示「失败」，用户会以为签到坏了。
+/// 周期刷新 wb 族账号的积分快照（只读查询，不做写操作，无需开关）。
+///
+/// ★ 为什么需要它：快照此前只在两条路径更新——手动点「积分」按钮、签到成功后
+///   顺手查一次。用户 25 小时没有任何操作时，快照过 CREDIT_TTL 被视同不存在，
+///   于是「快到期优先」的选号加权失去数据源、账号页的积分总览条也会消失。
+///   6 小时一轮保证**界面上看到的快照最多 6 小时旧**，远在 TTL 之内。
+///
+/// 平台范围只取 `wb_checkin_base` 认得的站（intl 的计费端点未实测过，
+/// 不猜端点——猜错只是白跑请求，但不猜错更诚实）。
+/// 余额查询的错误是否足以判定**凭据失效**（清快照的门槛要硬）。
+///
+/// 只有 401/403 算：那是鉴权层的明确答复。网络抖动、超时、5xx、
+/// 甚至业务码 JSON 错误都不清 —— 误清把好号的可用余额丢了，比留着旧值更糟。
+pub fn auth_failure_of(err: &str) -> bool {
+    err.contains("HTTP 401") || err.contains("HTTP 403")
+}
+pub async fn refresh_credits_all(st: &AppState) -> String {
+    let http = aigw_relay::auth_login::auth_http();
+    let mut ok_n = 0usize;
+    let mut fail_n = 0usize;
+    let mut earliest: Option<i64> = None;
+    let mut auth_dead = 0usize;
+    for platform in ["wb-gateway", "codebuddy"] {
+        let Some(base) = aigw_relay::wb::wb_checkin_base(platform) else {
+            continue;
+        };
+        for (acc_id, secret) in st.accounts.secrets_for(platform) {
+            match aigw_relay::wb::query_balance(&http, base, &secret).await {
+                Ok(d) => {
+                    let credit = d
+                        .get("credit")
+                        .and_then(|x| x.as_f64())
+                        .or_else(|| d.get("credit").and_then(|x| x.as_i64()).map(|c| c as f64));
+                    let expire_at = d.get("expire_at").and_then(|x| x.as_i64());
+                    st.pool.record_credit_exp(&acc_id, credit, expire_at);
+                    if credit.is_some() {
+                        ok_n += 1;
+                    }
+                    if let Some(e) = expire_at {
+                        earliest = Some(earliest.map_or(e, |c| c.min(e)));
+                    }
+                }
+                Err(e) => {
+                    fail_n += 1;
+                    if auth_failure_of(&e) {
+                        st.pool.clear_credit(&acc_id);
+                        auth_dead += 1;
+                    }
+                }
+            }
+        }
+    }
+    // ★ 顺带拉在线倍率目录（best-effort）：整站一份，不需要逐号做；
+    //   任何账号的凭据都行，第一个可用即试 —— 失败静默回退离线表（来源
+    //   标签如实显示「离线」），成功则覆盖并落盘。上游对未登录回 401/302，
+    //   所以没配真账号时这条永远走失败路径，无副作用。
+    let mut rate_note = String::new();
+    'rates: for platform in ["wb-gateway", "codebuddy", "wb-gateway-intl"] {
+        let Some(secret) = st.accounts.secrets_for(platform).into_iter().next().map(|(_, s)| s) else {
+            continue;
+        };
+        match aigw_relay::wb::fetch_model_rates(&http, platform, &secret).await {
+            Ok(map) => {
+                let n = map.len();
+                model_rates::set_online(map);
+                if let Some(dir) = st.data_dir.as_ref().as_ref() {
+                    model_rates::save_cache(dir);
+                }
+                rate_note = format!("；倍率已在线刷新（{n} 条）");
+                break 'rates;
+            }
+            Err(e) => {
+                rate_note = format!("；倍率在线刷新失败（回退离线表）：{e}");
+                break 'rates;
+            }
+        }
+    }
+    if ok_n + fail_n == 0 {
+        return format!("没有 wb 族账号，跳过{rate_note}");
+    }
+    let mut msg = format!("刷新 {ok_n} 个号的积分快照");
+    if fail_n > 0 {
+        msg += &format!("（{fail_n} 个查询失败");
+        if auth_dead > 0 {
+            msg += &format!("，{auth_dead} 个凭据已失效并清除旧余额快照");
+        }
+        msg += "）";
+    }
+    // 台账消息给人读：具体到期时刻在账号行的徽标上，这里只说「有没有急的」。
+    // 48h 阈值与 pool::CREDIT_EXPIRING_WINDOW_SECS 同一口径。
+    if let Some(e) = earliest {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if e <= now_epoch + 2 * 86400 {
+            msg += "，有号 48 小时内到期（选号已优先）";
+        }
+    }
+    msg += &rate_note;
+    msg
+}
+
 pub fn summarize_checkin(v: &Value) -> String {
     let rows = v.get("results").and_then(|r| r.as_array());
     let rows = match rows {
@@ -3495,6 +2754,50 @@ fn disk_stats_of(dd: &std::path::Path) -> Option<DiskStats> {
     })
 }
 
+/// 面板「日志」页：落盘日志尾部原文。
+///
+/// ★ 与 /api/requests 的分工：那边是 SQLite 结构化台账（谁在何时调了什么模型），
+///   这里是 tracing 原始行——**失败根因只活在这里**（上游失败的完整 why= 文本、
+///   后台任务台账、写盘失败现场）。用户被截断的台账报错卡住时，这页是最后一层。
+/// 只读尾部 256 KiB 窗口（rotlog::tail），行数与过滤都有上限，不整读文件。
+async fn logs_view(
+    State(st): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let want_lines = params
+        .get("lines")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(300)
+        .min(2000);
+    let grep = params.get("grep").map(|s| s.to_lowercase()).unwrap_or_default();
+    let level = params.get("level").map(|s| s.to_uppercase()).unwrap_or_default();
+    let Some(dd) = st.data_dir.as_ref().clone() else {
+        return Json(json!({"ok": false, "message": "未配置数据目录", "lines": []}));
+    };
+    // 先多取一截再过滤：grep/level 命中率低时，300 行窗口可能筛成 0 行
+    let fetch = if grep.is_empty() && level.is_empty() { want_lines } else { want_lines * 6 };
+    let (raw, size) = aigw_store::rotlog::tail(&dd, fetch.min(4000));
+    let mut lines: Vec<String> = raw
+        .into_iter()
+        // 「只看 WARN+」是**级别下限**语义：WARN 必须连带 ERROR
+        // （前端选项文案就是这么承诺的）；级别字符串本身保持通用子串匹配。
+        .filter(|l| {
+            if level.is_empty() {
+                return true;
+            }
+            if l.contains(level.as_str()) {
+                return true;
+            }
+            level == "WARN" && l.contains("ERROR")
+        })
+        .filter(|l| grep.is_empty() || l.to_lowercase().contains(&grep))
+        .collect();
+    if lines.len() > want_lines {
+        lines = lines.split_off(lines.len() - want_lines);
+    }
+    Json(json!({"ok": true, "lines": lines, "file_size": size}))
+}
 async fn health(State(st): State<AppState>) -> Json<Value> {
     let skipped = st.skipped_specs.as_ref();
     // ok 只在服务本身能跑时为 true；被跳过的 spec 不影响 ok（否则一个写错的
@@ -3525,6 +2828,20 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
         // 429 只体现在响应里，不放这里的话「面板突然全失败」根本查不到原因。
         "limits": st.limits.snapshot(),
     });
+    // ★ 积分资产总览（概览页一行）：口径与选号逻辑**同一个**
+    //   `pool::credit_summary`（TTL 过期不算、<1 不算、48h 窗口）。
+    //   没有任何有效快照时整个键省略——概览页不显示空节。
+    {
+        let (c_n, c_total, c_soon, c_earliest) = st.pool.credit_summary();
+        if c_n > 0 {
+            v["credits"] = json!({
+                "accounts": c_n,
+                "total": (c_total * 10.0).round() / 10.0,
+                "expiring_soon": c_soon,
+                "earliest_expire_s": c_earliest,
+            });
+        }
+    }
     // 落盘日志现场：日志在滚没滚、占了多大。只报统计不报路径之外的任何内容。
     // 「日志文件不在滚 / 一直 0 字节」在这里一眼可见（e.g. 目录只读、被误删）。
     // 落盘失败现场：只要有任何一个 json 最近一次没写成功，这里就有内容。
@@ -3762,88 +3079,6 @@ fn top_groups(v: &Value, n: usize) -> Value {
     })
 }
 
-/// FNV-1a 64 位（std 实现，零新增依赖；仅作稳定压缩，不需加密强度）。
-fn fnv1a(b: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &x in b {
-        h ^= x as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-/// 客户端可控的会话标识一律折成定长哈希再当键。
-///
-/// 为什么不直接用原文：`conversation_id` 是请求体里的字符串，长度由调用方决定
-/// （实测有人在 `metadata.conversation_id` 里塞整段对话历史）。把它原样存进粘性表
-/// 的 HashMap 键，一个 1MB 的 id 就变成 1MB 的驻留内存，几万个不同 id 直接把进程撑爆。
-fn key_id(s: &str) -> String {
-    format!("k{:016x}", fnv1a(s.as_bytes()))
-}
-
-/// 是否是本服务自己生成的会话键形状（`k` + 16 位小写十六进制）。
-fn is_key_id(s: &str) -> bool {
-    s.len() == 17
-        && s.starts_with('k')
-        && s.as_bytes()[1..].iter().all(|b| b.is_ascii_hexdigit())
-}
-
-/// 会话粘性键（对齐 workbuddy2api 键优先级 + loomy2api「最后一条 user」修正）：
-/// ① `metadata.conversation_id` / `conversationId` / `conversation_id` /
-///    `prompt_cache_key`（02 号五键优先级）；
-/// ② 都没有 → **最后一条** `role=user` 消息内容 FNV-1a。
-///    为什么取最后一条：通用客户端重发全历史时首条 user 恒定，以首条为键会让
-///    整个会话永久钉在同一账号（单号霸占、其余饿死）；最后一条随对话推进变化。
-///
-/// 返回值恒为 17 字节以内（`k` + 16 位十六进制，或 `u` + 16 位，或 `anon`）：幂等且定长，
-/// 粘性表的条目大小与客户端发什么都无关（条目数量另有上限，见 `STICKY_MAX_ENTRIES`）。
-fn session_key(v: &Value) -> String {
-    // 协议转换（/v1/messages、/v1/responses）会重建请求体，原始会话标识必须由
-    // 转换函数搬到这个私有字段里，否则粘性路由退化成「按最后一条 user 内容哈希」，
-    // 多轮对话每轮都换账号，上游的 prompt cache 全丢。
-    if let Some(s) = v.get("_aigw_session").and_then(|x| x.as_str()) {
-        if !s.is_empty() {
-            // 这个字段是 carry_session 写进去的，已经是折过的定长键；**再折一次**会让
-            // `/v1/messages`（经 carry_session）与 `/v1/chat/completions`（直接给
-            // conversation_id）对同一个会话算出两个不同的键 —— 同一会话跨协议混用时
-            // 粘性就断了，上游 prompt cache 全丢。所以自家形状原样放行。
-            // 但客户端也能伪造这个顶层字段，故只放行形状，其余照样折（否则又是无界键）。
-            if is_key_id(s) {
-                return s.to_string();
-            }
-            return key_id(s);
-        }
-    }
-    if let Some(md) = v.get("metadata").and_then(|m| m.as_object()) {
-        for k in ["conversation_id", "conversationId", "prompt_cache_key"] {
-            if let Some(s) = md.get(k).and_then(|x| x.as_str()) {
-                if !s.is_empty() {
-                    return key_id(s);
-                }
-            }
-        }
-    }
-    for k in ["conversation_id", "conversationId"] {
-        if let Some(s) = v.get(k).and_then(|x| x.as_str()) {
-            if !s.is_empty() {
-                return key_id(s);
-            }
-        }
-    }
-    if let Some(msgs) = v.get("messages").and_then(|m| m.as_array()) {
-        for m in msgs.iter().rev() {
-            if m.get("role").and_then(|r| r.as_str()) == Some("user") {
-                let text = m
-                    .get("content")
-                    .map(|c| c.to_string())
-                    .unwrap_or_default();
-                return format!("u{:016x}", fnv1a(text.as_bytes()));
-            }
-        }
-    }
-    "anon".to_string()
-}
-
 /// `/api/requests` 缺省返回条数（与历史行为一致：前端「最近请求」只看 60 条）。
 const REQ_PAGE_DEFAULT: usize = 60;
 /// `/api/requests` 单页条数上限：再大就是让调用方把整张台账拖走，
@@ -3985,6 +3220,13 @@ async fn models(st: State<AppState>, req: Request) -> Response {
                 .map(|(_, v)| v.to_string())
         })
         .filter(|v| !v.is_empty());
+    // ★ 平台名大小写不敏感，与 chat 侧（`canonical_platform_id`）同一口径。
+    //
+    //   错误文案里到处让人「用 /v1/models?platform=<平台> 查」，而这里曾是精确匹配 ——
+    //   用户照着填成 `?platform=KILO` 会得到「没有叫 KILO 的平台」+ 空清单，
+    //   于是「查不到」被误认为「这个平台没有模型」。同一套标识在三条路径上
+    //   （chat 的 @后缀、这里的 ?platform、面板的 /api/platforms）必须认同一组写法。
+    let want_platform = want_platform.and_then(|v| st.canonical_platform_id(&v).or(Some(v)));
     // 这把 key 的模型白名单：它决定了「这个调用方能看到哪些模型」。
     // 不过滤的后果不是安全问题（chat 侧早已 403），而是**可用性**问题：客户端
     // 拿到 148 个模型，逐个试过去 147 个 403，日志里全是对不上号的报错。
@@ -4271,298 +3513,6 @@ fn model_known(st: &AppState, model: &str) -> bool {
         .any(|(_, ids, _)| ids.iter().any(|m| m == model || m == &bare))
 }
 
-/// 上游失败要落成「客户端能识别的错误码」。
-///
-/// 踩过的坑：上游返回 HTTP 200 但 body 是 HTML / 非 JSON（网页版逆向最常见的
-/// 失效形态），`RelayError.status` 会被填成 200，于是 `openai_error(200, ...)`
-/// 回了一个 **HTTP 200 + 错误 JSON**——OpenAI SDK 把它当成功响应解析，直接抛
-/// 解析异常，调用方完全看不到"上游返回了登录页"这个真实原因。
-fn upstream_status(status: u16) -> u16 {
-    match status {
-        // 0 = 连接/超时失败；1xx/2xx/3xx 都不是合法错误码
-        0..=399 => 502,
-        s => s,
-    }
-}
-
-/// HTTP 状态 → OpenAI 兼容的 `error.type`。
-///
-/// ★ 旧实现不管什么状态一律写死 `"upstream_error"`：400（客户端 JSON 语法错）、401（还没接
-///   账号）、429（本地并发闸）、503（未知模型）全被当成「上游故障」。按 `error.type` 决定
-///   「重试 / 降级 / 换 Key」的客户端（LiteLLM、Claude Code、各种自研网关）会把**自己的参数
-///   错误**当服务端抖动反复重试，日志里满是我们返回的错却显示上游有问题。
-fn error_type(status: u16) -> &'static str {
-    match status {
-        401 => "authentication_error",
-        402 => "insufficient_quota",
-        403 => "permission_error",
-        404 => "not_found_error",
-        429 => "rate_limit_error",
-        // 501：平台 format 不是 openai（本面板不做协议转换）——是调用方选错了端点，不是上游挂了
-        501 => "invalid_request_error",
-        // 504：上游 200 之后一直不给首帧（连接打开但空转/半死），是网关侧判定出来的超时，
-        // 用 gateway_timeout 比笼统的 upstream_error 更能让运维一眼看出「不是上游返回了错，
-        // 是它压根没说话」。
-        504 => "gateway_timeout",
-        400..=499 => "invalid_request_error",
-        _ => "upstream_error",
-    }
-}
-
-fn openai_error(status: u16, msg: &str) -> Response {
-    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-    (
-        code,
-        Json(json!({
-            "error": {"message": msg, "type": error_type(status), "code": status}
-        })),
-    )
-        .into_response()
-}
-
-/// 同 openai_error，但允许显式指定 error.type 与字符串 error.code。
-///
-/// 用于「错误码必须能被客户端当成**永久性**失败」的少数场景：OpenAI 官方对
-/// 不存在的模型回 404 + type=invalid_request_error + code=model_not_found，
-/// 而按状态码推导出来的 404 -> not_found_error / code:404 与之不同。
-fn openai_error_coded(status: u16, typ: &str, code: &str, msg: &str) -> Response {
-    let http = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-    (
-        http,
-        Json(json!({
-            "error": {"message": msg, "type": typ, "code": code}
-        })),
-    )
-        .into_response()
-}
-
-/// 上游错误透传：上游本来就是 OpenAI 错误信封时**原样回**，不要把整段 JSON 塞进 message。
-///
-/// ★ 旧实现把上游的 `{"error":{…}}` 整段当 message 传进 `openai_error`：
-///   当纯文本 message，客户端真正要读的 `error.type`（`insufficient_quota` /
-///   `context_length_exceeded` / `invalid_api_key`）与 `error.code` 全部丢失，
-///   只剩一串转义后的 JSON，排障时完全看不出上游到底说了什么。
-/// 在错误 message 尾巴追加「建议」；已带建议的不重复追加。
-fn msg_with_hint(msg: &str, hint: Option<&str>) -> String {
-    match hint {
-        Some(h) if !msg.contains("建议：") => format!("{msg}（建议：{h}）"),
-        _ => msg.to_string(),
-    }
-}
-
-/// 造一个 OpenAI 错误信封（message + type + code [+ hint]）。
-fn upstream_error_json(status: u16, message: &str, hint: Option<&str>) -> Response {
-    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-    let mut err = json!({
-        "message": msg_with_hint(message, hint),
-        "type": error_type(status),
-        "code": status,
-    });
-    if let (Some(h), Some(obj)) = (hint, err.as_object_mut()) {
-        obj.insert("hint".to_string(), json!(h));
-    }
-    (code, Json(json!({ "error": err }))).into_response()
-}
-
-fn upstream_error_response(status: u16, body: &str, hint: Option<&str>) -> Response {
-    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-    let text = body.trim();
-    if let Ok(v) = serde_json::from_str::<Value>(text) {
-        // 有的上游把 error 写成裸字符串：直接当 message
-        if let Some(s) = v.get("error").and_then(|e| e.as_str()) {
-            return upstream_error_json(status, s, hint);
-        }
-        if v.get("error").map(|e| e.is_object()).unwrap_or(false) {
-            let mut v = v;
-            if let Some(obj) = v.get_mut("error").and_then(|e| e.as_object_mut()) {
-                // 不少上游只回 message 不写 code，客户端普遍读 code 判类型，这里补 HTTP 状态
-                if !obj.contains_key("code") {
-                    obj.insert("code".to_string(), json!(status));
-                }
-                // 建议直接写进同一个信封：message 给人看，hint 给前端做强调
-                if let Some(h) = hint {
-                    let msg = obj
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if !msg.contains("建议：") {
-                        obj.insert("message".to_string(), json!(format!("{msg}（建议：{h}）")));
-                    }
-                    obj.insert("hint".to_string(), json!(h));
-                }
-            }
-            return (code, Json(v)).into_response();
-        }
-        // 非标准形状（{"message":…} / {"errno":…} / 裸数组）：原文留在 error.raw，别丢信息
-        let mut err = json!({
-            "message": msg_with_hint(&format!("上游返回 {status}"), hint),
-            "type": error_type(status),
-            "code": status,
-            "raw": v,
-        });
-        if let (Some(h), Some(obj)) = (hint, err.as_object_mut()) {
-            obj.insert("hint".to_string(), json!(h));
-        }
-        return (code, Json(json!({ "error": err }))).into_response();
-    }
-    if text.is_empty() {
-        return upstream_error_json(status, &format!("上游返回 {status}，响应体为空"), hint);
-    }
-    // 逐字符截断：`&text[..n]` 是**字节**切片，中文/emoji 落在字符中间会 panic
-    let clipped: String = text.chars().take(600).collect();
-    let more = if text.chars().count() > 600 {
-        "…（已截断）"
-    } else {
-        ""
-    };
-    upstream_error_json(status, &format!("上游返回 {status}：{clipped}{more}"), hint)
-}
-
-// ---------------------------------------------------------------------------
-// 上游失败的「可行动建议」
-// ---------------------------------------------------------------------------
-
-/// 区域的中文名（给用户看，不把 cn/intl 直接抛给他）。
-fn region_label(region: &str) -> &'static str {
-    match region {
-        "cn" => "国内站",
-        "intl" => "国际站",
-        _ => "全球站",
-    }
-}
-
-/// 上游错误码/文案 → 用户下一步该做什么。
-///
-/// 动机：401/402/429/连不上 在面板里原本都是一条「上游返回 N：原文」，用户看不出
-/// 该**重新登录**、该**加账号**、还是该**开代理**——尤其 Kimi/MiniMax/智谱/Qoder
-/// 这类国内国际两套账号体系的平台，最容易把「代理没开」误判成「凭据失效」。
-fn upstream_hint(spec: &ProviderSpec, status: u16, class: Option<ErrorClass>, body: &str) -> Option<String> {
-    let low = body.to_ascii_lowercase();
-    let has = |ks: &[&str]| ks.iter().any(|k| low.contains(k));
-    let proxy_mode = aigw_relay::proxy::current().mode;
-    // ① 网络层失败（连不上/超时/DNS）：先怀疑代理模式，别让人去重登
-    if has(&[
-        "error sending request",
-        "dns error",
-        "failed to lookup address",
-        "connection refused",
-        "connection reset",
-        "tcp connect error",
-        "operation timed out",
-        "timed out",
-    ]) {
-        return Some(match spec.region.as_str() {
-            "intl" => format!(
-                "{}（{}）在国内一般连不上，当前代理模式是 {}：去「设置 → 网络代理」改成 global 或 bypass_cn，并确认本地代理在跑",
-                spec.name,
-                region_label(&spec.region),
-                proxy_mode
-            ),
-            _ => format!(
-                "连不上上游（当前代理模式 {}）：{} 建议直连，把代理改成 direct 或 bypass_cn，别用 global（那会把国内请求也绕出国）",
-                proxy_mode,
-                region_label(&spec.region)
-            ),
-        });
-    }
-    // ①.5 车道级封锁/地域封锁：必须在鉴权分支**之前**判，否则 403 会掉进下面的
-    // 「去重新登录」——匿名车道没有凭据可重登，用户会照着做无用功。
-    if matches!(class, Some(ErrorClass::LaneLocked))
-        || has(&["freetiererror", "free tier can only be used from within"])
-    {
-        return Some(
-            "上游按客户端指纹封锁了整条免 Key 车道（不是你的凭据问题，也无需重新登录）：这是上游的准入策略，过一段时间或换一条免费车道（kilo / pollinations）再试"
-                .to_string(),
-        );
-    }
-    if matches!(class, Some(ErrorClass::Region))
-        || has(&["regionerror", "not available in your country"])
-    {
-        return Some(format!(
-            "{} 不对该地区提供这个模型（地域封锁，与凭据无关）：换一条车道，或把「设置 → 网络代理」改成 global/bypass_cn 换出口再试",
-            spec.name
-        ));
-    }
-    // ② 鉴权/登录态
-    if matches!(class, Some(ErrorClass::Auth))
-        || status == 401
-        || status == 403
-        || has(&[
-            "unauthor",
-            "invalid token",
-            "token expire",
-            "token is not active",
-            "not logged in",
-            "login required",
-            "session expired",
-            "authentication is invalid",
-            "jwt",
-            "forbidden",
-        ])
-    {
-        let mut s = format!("到「接入源 → {}」点重新登录/重新粘贴凭据", spec.name);
-        if spec.region != "global" {
-            s.push_str(&format!(
-                "；注意{}与另一区的账号、Key 互不通用（两边是独立账号体系），别拿另一个区的凭据来试",
-                region_label(&spec.region)
-            ));
-        }
-        s.push_str("；登录成功后把失效的旧账号删掉，否则账号池还会轮换到它");
-        return Some(s);
-    }
-    // ③ 额度/积分
-    if matches!(class, Some(ErrorClass::Quota))
-        || status == 402
-        || has(&["quota", "insufficient", "balance", "credit", "billing", "额度", "积分", "欠费"])
-    {
-        return Some(
-            "额度/积分用尽：给这个平台再加一个账号（面板会在账号间轮换），或换免费车道（kilo / pollinations / anon-zen 免凭据直接可用）"
-                .to_string(),
-        );
-    }
-    // ④ 限流
-    if matches!(class, Some(ErrorClass::Rate))
-        || status == 429
-        || has(&["rate limit", "too many request", "requests per", "too frequent", "限流", "频率"])
-    {
-        return Some(
-            "触发限流：等 30–60 秒再试；同一平台多存几个账号能明显减少撞限流（面板自动轮换）".to_string(),
-        );
-    }
-    // ⑤ 模型名不被接受
-    if status == 404
-        || has(&[
-            "model not found",
-            "model_not_found",
-            "unknown model",
-            "invalid model",
-            "no such model",
-            "does not exist",
-        ])
-    {
-        return Some(format!(
-            "该平台不认这个模型名：先看 /v1/models 里有没有它；要走指定平台就写 模型id@{}；官方带日期全名（…-20250929）与点号版本面板会自动归一，但仍以平台声明的为准",
-            spec.id
-        ));
-    }
-    // ⑥ 上游自己故障/网络抖动
-    if status >= 500 || matches!(class, Some(ErrorClass::Transient)) {
-        return Some(
-            "上游自己故障或网络抖动（不是面板的问题）：稍后重试；连续失败会让该账号进冷却，冷却结束自动恢复"
-                .to_string(),
-        );
-    }
-    // ⑦ 请求被上游拒绝（参数/内容审查）
-    if matches!(class, Some(ErrorClass::Rejected)) || status == 400 {
-        return Some(
-            "上游拒了这次请求：多为该平台不支持这个参数（tools / 图片 / 超长上下文）或触发内容审查，换个模型或缩短上下文再试"
-                .to_string(),
-        );
-    }
-    None
-}
-
 #[allow(clippy::too_many_arguments)]
 fn record(
     store: &Store,
@@ -4575,7 +3525,6 @@ fn record(
     tin: i64,
     tout: i64,
     class: Option<ErrorClass>,
-    waf_fp: bool,
     upstream: &str,
     // ★ 2026-10-26（P3）：首字节耗时（流式才有；非流式传 0）
     ttfb_ms: i64,
@@ -4597,11 +3546,18 @@ fn record(
         cancelled: false,
         kind: "chat".to_string(),
     });
+    // ★ Token 限制器增量记账（对齐参考实现「请求收尾把本次消耗当场加进
+    //   窗口」）：触顶判定不必等下一次台账聚合。失败与取消也计——
+    //   上游照样烧了这些 token，限制器防的是「用量太猛被盯上」，不是「成功量」。
+    {
+        let used = tin.max(0) as u64 + tout.max(0) as u64;
+        pool.add_tokens_used(account, used);
+    }
     match class {
         // ★ 上游明确给了 Retry-After 就照它来（见 Pool::report_with_hint）：
         //   429 的「稍后」大多是可精确得知的，按本地曲线猜只会继续撞墙。
-        Some(c) => pool.report_with_hint(spec_id, account, model, false, c, waf_fp, retry_after),
-        None => pool.report(spec_id, account, model, true, ErrorClass::Transient, false),
+        Some(c) => pool.report_with_hint(spec_id, account, model, false, c, retry_after),
+        None => pool.report(spec_id, account, model, true, ErrorClass::Transient),
     }
 }
 
@@ -4611,6 +3567,7 @@ fn record(
 #[allow(clippy::too_many_arguments)]
 fn record_cancelled(
     store: &Store,
+    pool: &Pool,
     spec_id: &str,
     account: &str,
     model: &str,
@@ -4629,11 +3586,13 @@ fn record_cancelled(
         ms: started.elapsed().as_millis() as i64,
         // ★ P3：非流式路径不计 TTFB（首字节即完整响应）
         ttfb: 0,
-        ok: false,
+        ok: false, 
         upstream: upstream.to_string(),
         cancelled: true,
         kind: "chat".to_string(),
     });
+    // 取消的流同样消耗了上游 token（断开前已生成的部分）——限制器照记。
+    pool.add_tokens_used(account, tin.max(0) as u64 + tout.max(0) as u64);
 }
 
 /// chat 转发核心的统一出口：非流式 JSON 或已记账的流。
@@ -4660,12 +3619,28 @@ enum ChatCoreErr {
 }
 
 /// 把请求体安全地解析为 JSON 对象，失败返回 OpenAI 信封错误。
+/// 请求体读取失败时的统一文案（五条协议入口共用）。
+///
+/// ★ 413 要单独说：axum 的原话 `Failed to buffer the request body` 看不出是
+///   「超了上限」还是「连接断了」，用户也没法知道上限是多少。五条入口各写一份
+///   时，只有 chat 那条改成了人话 —— 另外四条仍吐英文技术串（这就是「N 条
+///   入口各写一份」的典型后果）。
+fn body_read_failure_msg(status: u16, e: &impl std::fmt::Display) -> String {
+    if status == 413 {
+        format!(
+            "请求体超过上限（{} MiB）：请缩短上下文或拆成多轮发送。底层：{e}",
+            MAX_CHAT_BODY / 1024 / 1024
+        )
+    } else {
+        format!("请求体读取失败：{e}")
+    }
+}
 fn parse_chat_body(body: Result<Bytes, BytesRejection>) -> Result<Value, Response> {
     let body = match body {
         Ok(b) => b,
         Err(e) => {
             let status = e.status().as_u16();
-            return Err(openai_error(status, &format!("请求体读取失败：{e}")));
+            return Err(openai_error(status, &body_read_failure_msg(status, &e)));
         }
     };
     let Ok(v) = serde_json::from_slice::<Value>(&body) else {
@@ -4740,6 +3715,33 @@ fn sse_response(body: Body) -> Response {
 /// 实现：包一层流，第一块数据到达时记一次时间，然后打一行结构化日志
 /// `[请求] model=… acct=… ttfb=…ms total=…ms status=…`。
 /// 只在首块记录（`seen` 标志），后续块零开销。
+/// 非流式完成的一行请求日志（五个协议入口共用）。
+///
+/// ★ 为什么每个入口都要：用户报「有时候能答有时候不能」时，日志是唯一能自查的
+///   线索。只在 /v1/chat/completions 记一行等于只照亮五条并行入口里的一条
+///   （Claude Code / codex 用户日常走 messages 与 responses，卡住的恰恰是它们）。
+fn log_done(model: &str, started: Instant) {
+    tracing::info!(
+        target: "aigw::req",
+        model = %model,
+        ms = started.elapsed().as_millis() as i64,
+        "非流式完成"
+    );
+}
+
+/// 上游失败的一行请求日志（五个协议入口共用）。失败比成功更需要留痕：
+/// 那是用户来求助的原因本身。body 截 160 字防刷屏。
+fn log_upstream(model: &str, status: u16, body: &str, started: Instant) {
+    tracing::warn!(
+        target: "aigw::req",
+        model = %model,
+        status = status,
+        ms = started.elapsed().as_millis() as i64,
+        why = %body.chars().take(160).collect::<String>(),
+        "上游失败"
+    );
+}
+
 fn sse_response_timed(
     body: Body,
     started: Instant,
@@ -4749,22 +3751,65 @@ fn sse_response_timed(
 ) -> Response {
     use futures_util::StreamExt;
     let stream = body.into_data_stream();
+
+    /// 流结束（或客户端断开导致流被 drop）时打一行「流式结束」。
+    ///
+    /// 为什么用 Drop 而不是在流里判末帧：SSE 流没有可靠的「最后一帧」信号
+    /// （上游可能发 [DONE]、也可能直接断），而客户端的连接也可能中途消失。
+    /// **两种终点都会让这个 guard 被析构**，所以放在这里最稳。
+    /// 没有它的话，流式请求只有「请求首字节」那一行 —— 用户问「流式为什么卡住/
+    /// 为什么没输出」时，日志里看不到这次流最后是成功结束还是半路断了。
+    struct StreamEndGuard {
+        started: Instant,
+        model: String,
+        bytes: usize,
+    }
+    impl StreamEndGuard {
+        /// 经方法写入（而不是闭包里裸写字段）：裸写字段会被 capture 分析判成
+        /// 「变量只写不读」，方法调用则明确算「使用」。
+        fn add_bytes(&mut self, n: usize) {
+            self.bytes += n;
+        }
+    }
+
+    impl Drop for StreamEndGuard {
+        fn drop(&mut self) {
+            tracing::info!(
+                target: "aigw::req",
+                model = %self.model,
+                ms = self.started.elapsed().as_millis() as i64,
+                bytes = self.bytes as i64,
+                "流式结束"
+            );
+        }
+    }
+
+    let mut guard = StreamEndGuard {
+        started,
+        model: model.clone(),
+        bytes: 0,
+    };
     let mut seen = false;
+    // ★ dead-store 这个 lint 看不到 Drop：`guard.bytes` 的最终值其实被
+    //   `StreamEndGuard::drop`（打「流式结束」那行）读走，但在闭包体内它只被写不被读，
+    //   于是误报 "value assigned is never read"。这是 lint 的边界而非真问题 ——
+    //   定向 allow + 这条注释，而不是砍掉字节统计（bytes 能区分「流没开始就断」
+    //   与「完整答完」，正是这轮加这行日志的意义）。
+    #[allow(unused_assignments)]
     let wrapped = stream.map(move |chunk| {
-        if !seen {
-            if let Ok(bytes) = &chunk {
-                if !bytes.is_empty() {
-                    seen = true;
-                    let ttfb = started.elapsed().as_millis();
-                    tracing::info!(
-                        target: "aigw::req",
-                        model = %model,
-                        account = %if account.is_empty() { "-" } else { &account },
-                        platform = %platform,
-                        ttfb_ms = ttfb as i64,
-                        "请求首字节"
-                    );
-                }
+        if let Ok(bytes) = &chunk {
+            guard.add_bytes(bytes.len());
+            if !seen && !bytes.is_empty() {
+                seen = true;
+                let ttfb = started.elapsed().as_millis();
+                tracing::info!(
+                    target: "aigw::req",
+                    model = %model,
+                    account = %if account.is_empty() { "-" } else { &account },
+                    platform = %platform,
+                    ttfb_ms = ttfb as i64,
+                    "请求首字节"
+                );
             }
         }
         chunk
@@ -4795,7 +3840,36 @@ async fn chat_completions(
         return resp;
     }
     match chat_core(&st, v).await {
-        Ok(ChatCoreOut::Json(v)) => Json(v).into_response(),
+        Ok(ChatCoreOut::Json(v)) => {
+            // ★ 截断可见化（零风险）：上游这轮像被腰斩时，在响应头打一个标记。
+            //
+            //   为什么不在响应体里加字段：客户端不认识的字段会被忽略或误判，
+            //   而响应头是**附加**信息，不认识它的客户端完全不受影响。
+            //
+            //   为什么值得做：上游输出预算用尽（finish_reason: length 一族）时，
+            //   客户端拿到的是**半截答案**，而它没法区分「模型就说这么多」与
+            //   「被腰斩」—— 用户只会觉得模型坏了。有个明确的头，至少排障时
+            //   能一眼看出「这次是被截断的」。
+            //
+            //   ★ 这里**不做自动续写**：那要额外打上游（多轮 = 多次往返、prompt
+            //   各轮求和）、且续写轮会重新选路（同一次请求的内容可能落到另一个
+            //   账号）。那是产品决策，不该由这里擅自决定。
+            // ★ 非流式也要有一行请求日志：流式有 `aigw::req` 的「请求首字节」，
+            //   非流式以前**一行都没有** —— 用户报「有时候能答有时候不能」时，
+            //   日志里什么都查不到，只能靠猜。这里补一条与流式对齐的完成日志。
+            log_done(&req_model, started);
+            let truncated = crate::truncated::outcome_from_chat(&v)
+                .map(|(o, text)| crate::truncated::looks_truncated(o, text))
+                .unwrap_or(false);
+            let mut resp = Json(v).into_response();
+            if truncated {
+                resp.headers_mut().insert(
+                    header::HeaderName::from_static("x-aigw-truncated"),
+                    HeaderValue::from_static("1"),
+                );
+            }
+            resp
+        }
         Ok(ChatCoreOut::Stream(stream)) => {
             // ★ P3：流式响应带 TTFB 计时 + 每请求一行结构化日志
             sse_response_timed(Body::from_stream(stream), started, req_model, String::new(), String::new())
@@ -4822,7 +3896,12 @@ async fn chat_completions(
             status,
             body,
             hint,
-        }) => upstream_error_response(upstream_status(status), &body, hint.as_deref()),
+        }) => {
+            // ★ 上游失败必须留痕：以前这些只在响应体里，日志里一行都没有。
+            //   用户报「某个平台突然全挂」时，日志里查不到「哪一次、什么状态码、什么原因」。
+            log_upstream(&req_model, status, &body, started);
+            upstream_error_response(upstream_status(status), &body, hint.as_deref())
+        }
     }
 }
 
@@ -4980,7 +4059,7 @@ async fn attempt_once(
                         drop(stat_rx);
                         record(
                             &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                            0, 0, Some(class), false, &spec.base_url, 0, None,
+                            0, 0, Some(class), &spec.base_url, 0, None,
                         );
                         let hint = Some(
                             "上游回了 200，但流式内容一开头就是错误帧/直接结束：多半是这把凭据已失效、或该账号在当前模型上被挡。换号重试后仍失败就重新粘贴凭据。"
@@ -5012,7 +4091,7 @@ async fn attempt_once(
                                     if stat.client_gone {
                                         // 用户点了停止：不罚账号、不往卡片上写「平台坏了」。
                                         record_cancelled(
-                                            &store, &spec_id, &account2, &model2, started,
+                                            &store, &pool, &spec_id, &account2, &model2, started,
                                             stat.tokens_in, stat.tokens_out, &spec_url,
                                         );
                                     } else {
@@ -5021,7 +4100,7 @@ async fn attempt_once(
                                         );
                                         record(
                                             &store, &pool, &spec_id, &account2, &model2, started, ok,
-                                            stat.tokens_in, stat.tokens_out, stat.error, false, &spec_url,
+                                            stat.tokens_in, stat.tokens_out, stat.error, &spec_url,
                                             stat.ttfb_ms, None,
                                         );
                                     }
@@ -5034,7 +4113,7 @@ async fn attempt_once(
                                     );
                                     record(
                                         &store, &pool, &spec_id, &account2, &model2, started, false,
-                                         0, 0, Some(ErrorClass::Transient), false, &spec_url, 0, None,
+                                         0, 0, Some(ErrorClass::Transient), &spec_url, 0, None,
                                     );
                                 }
                             }
@@ -5045,7 +4124,7 @@ async fn attempt_once(
                 Err(e) => {
                     record(
                         &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                         0, 0, Some(e.class), false, &spec.base_url, 0, e.retry_after_hint(),
+                         0, 0, Some(e.class), &spec.base_url, 0, e.retry_after_hint(),
                     );
                     // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
                     // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
@@ -5094,15 +4173,14 @@ async fn attempt_once(
                     let (tin, tout) = usage_or_estimate(&v, body.len());
                     record(
                         &st.store, &st.pool, &spec.id, &account, &model, started, true,
-                        tin, tout, None, false, &spec.base_url, 0, None,
+                        tin, tout, None, &spec.base_url, 0, None,
                     );
                     Ok(ChatCoreOut::Json(v))
                 }
                 Err(e) => {
-                    let waf_fp = e.status == 200;
                     record(
                         &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                        0, 0, Some(e.class), waf_fp, &spec.base_url, 0, e.retry_after_hint(),
+                        0, 0, Some(e.class), &spec.base_url, 0, e.retry_after_hint(),
                     );
                     // 只有「凭据本身被拒」才值得续期重试：429/500/400 之类刷新也没用
                     // （对每次失败都刷一遍，等于给上游续期端点白送一轮压力，还会把
@@ -5184,19 +4262,80 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
     let model = v
         .get("model")
         .and_then(|m| m.as_str())
-        .unwrap_or("unknown")
+        .unwrap_or("")
+        .trim()
         .to_string();
+    // ★ model 缺失 / 空串 → 400，而不是让它走到「未知模型」的 404。
+    //
+    //   旧实现把缺失当 "unknown"、空串原样保留，两条路都落到 resolve_spec 失败，
+    //   于是报「未知模型 unknown：…」/「未知模型 ：…」—— 用户在面板上看到
+    //   「未知模型 ：」只会困惑（冒号后面什么都没有），而真正的问题是**请求体少了
+    //   一个必填字段**，那是 400 的语义，不是 404。
+    if model.is_empty() {
+        return Err(ChatCoreErr::Local {
+            status: 400,
+            message: "请求体缺少 model 字段（或为空）：请填一个模型名（可用 /v1/models 查看当前有哪些），也可写成 模型id@平台 指定平台。".to_string(),
+            code: Some("invalid_request_error".to_string()),
+            retry_after: None,
+        });
+    }
     // 模型链（combo:xxx）：一个名字背后是一条有序候选链，跨平台/跨模型回退。
     // 必须在 resolve_spec 之前拦下 —— 链名不是任何平台声明的模型，走普通路由只会 404。
     if model.starts_with(aigw_store::combos::COMBO_PREFIX) {
         return chat_via_combo(st, v, &model).await;
+    }
+    // ★ 链名也能直接当模型名用。
+    //
+    //   链的 id 是自动生成的不透明串（`combo:u-a5261120ac9477b5`），用户建了条叫
+    //   「测试链」的链，想按名字调用却拿到 404「未知模型 测试链」—— 而这个名字
+    //   既不能自定义、在 /v1/models 里也看不出是什么。要求用户记住一个哈希来调用
+    //   自己建的东西，是可用性缺陷，不是设计。
+    //
+    //   规则：只有**恰好一条**链用这个名字时才按名字路由；重名就仍然 404 并提示
+    //   改用 id（避免「悄悄选了其中一条」这种不可预期行为）。
+    if let Some(id) = st.combos.id_by_unique_name(&model) {
+        return chat_via_combo(st, v, &id).await;
     }
     // 「模型id@平台」后缀路由（旧版语义）；转发给上游时剥掉。
     // 只有后缀**确实是一个平台 id** 时才剥：上游模型名本身可能带 @
     // （`qwen3@2025-09` 这类版本号写法），无条件 rsplit 会把它截成另一个名字，
     // 于是路由命中 A 平台、上游却收到一个不存在的模型。
     let (upstream_model, named_platform) = match model.rsplit_once("@") {
-        Some((m, p)) if st.is_platform_id(p) => (m.to_string(), Some(p.to_string())),
+        // 平台名归一大写不敏感（与模型名的 same_model 口径一致）：用户手写
+        // `@KILO` 时归一成真实的 `kilo`，否则会被当成模型名的一部分报 404。
+        Some((m, p)) => match st.canonical_platform_id(p) {
+            Some(real) => (m.to_string(), Some(real)),
+            None => {
+                // ★ 后缀**看起来像平台名**（无空格、无斜杠、长度合理）但不是已知平台 ——
+                //   这几乎总是拼错了，而旧行为会把整串当模型名报「未知模型 x@y」，
+                //   用户据此去查模型名，实际要改的是 @ 后面那一截。
+                let looks_like_platform = !p.is_empty()
+                    && p.len() <= 40
+                    && !p.contains('/')
+                    && !p.contains(' ')
+                    && !p.contains('@');
+                if looks_like_platform {
+                    let lower = p.to_ascii_lowercase();
+                    let hint = st.all_specs().into_iter().map(|s| s.id).find(|id| {
+                        let il = id.to_ascii_lowercase();
+                        il == lower || il.starts_with(&lower) || lower.starts_with(&il)
+                    });
+                    let tail = match hint {
+                        Some(h) => format!("你是不是想写 @{h}？"),
+                        None => "可用 /v1/models?platform=<平台> 查看该平台声明的模型。".to_string(),
+                    };
+                    return Err(ChatCoreErr::Local {
+                        status: 404,
+                        message: format!(
+                            "@{p} 不是已知平台：模型名里「@平台」的后缀必须是一个已加载的平台 id。{tail}\n如果 {model} 本身就是一个完整模型名（某些上游的模型名自带 @），请确认它已在某个启用的平台清单里。"
+                        ),
+                        code: Some("model_not_found".to_string()),
+                        retry_after: None,
+                    });
+                }
+                (model.clone(), None)
+            }
+        },
         _ => (model.clone(), None),
     };
     let Some(spec) = st.resolve_spec(&model).await else {
@@ -5320,22 +4459,43 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
             });
         }
         let account = match st.sticky.route(&skey, &remaining) {
-            Some(a) if st.pool.available(&a, &model) => a,
+            Some(a) if st.pool.available(&a, &upstream_model) => a,
             other => {
                 if let Some(stale) = other {
                     st.sticky.unbind(&skey);
                     tracing::info!("粘性命中 {stale} 但该账号当前不可用，重新选号");
                 }
-                let Some(a) = st.pool.pick(&spec.id, &remaining, &model) else {
+                let Some(a) = st.pool.pick(&spec.id, &remaining, &upstream_model) else {
                     if let Some(e) = last_err {
                         return Err(e);
                     }
-                    tracing::warn!("pool 全挡：{} 的账号均处于冷却/凭据隔离中", spec.id);
+                    // 全挡的原因不止一种，文案必须分开说：限制器触顶**不该去重新登录**
+                    // （登了也没用，窗口翻页才恢复），把用户支去「账号页重登」是误导。
+                    let hit = st.pool.token_hit_info(&remaining);
+                    let (why, advice) = match hit {
+                        Some((n, reset_s)) => {
+                            let left = if reset_s >= 3600 {
+                                format!("约 {} 小时", (reset_s + 1800) / 3600)
+                            } else {
+                                format!("约 {} 分钟", (reset_s / 60).max(1))
+                            };
+                            (
+                                format!("冷却、凭据隔离或 Token 限额触顶（{n} 个号触顶）"),
+                                format!("触顶的号窗口翻页后自动恢复（{left}内），无需重新登录；也可到「账号」页调整或清除限额。"),
+                            )
+                        }
+                        None => (
+                            "冷却中或凭据失效隔离".to_string(),
+                            "若长期如此请到「账号」页重新登录该平台。".to_string(),
+                        ),
+                    };
+                    tracing::warn!("pool 全挡：{} 的账号均处于 {} 中", spec.id, why);
                     return Err(ChatCoreErr::Local {
                         status: 503,
-                        message: format!("平台 {} 的账号当前全部不可用（冷却中或凭据失效隔离），请稍后重试；若长期如此请到「账号」页重新登录该平台。", spec.id),
+                        message: format!("平台 {} 的账号当前全部不可用（{why}），请稍后重试；{advice}", spec.id),
                         code: None,
-                        retry_after: None,
+                        // retry_after 是 u16 秒（上限约 18 小时）；冷却剩余超过它就夹到上界
+                        retry_after: hit.map(|(_, rs)| rs.clamp(0, 65535) as u16),
                     });
                 };
                 st.sticky.bind(&skey, &a);
@@ -5403,10 +4563,23 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
             st.sticky.unbind(&skey);
             continue;
         }
+        // ★ 冷却键必须用**上游真名**（upstream_model），不能是请求名：
+        //   `canonical_model_for` 会把 GLM-5.2 / glm-5.2 / glm-5.2@web-glm 这些写法
+        //   统一回填成平台清单里的那一个名字 —— 它们在上游是**同一份额度**。
+        //   若按请求名记账，同一份额度会被拆成几条互不相干的冷却：
+        //   ① 写入分裂（面板显示「3 个模型限流中」，其实是同一份）；
+        //   ② 判定漏命中（别名撞限额后写在别名键上，改用真名请求时读不到那条冷却，
+        //      于是照样挑中这个已经限额的账号，白撞一次 429）。
+        //   这与 Agent2API 在 routing.rs 里警告的是同一件事。
+        //
+        // ★ 诚实边界：这条选择**没有自动化测试覆盖** —— 实测把上面三处改回
+        //   &model（请求名）后，cargo test 全绿。原因是 chat_core 的端到端路径需要
+        //   真实上游，而单测只覆盖了 canonical_model_for 的归一能力（前提），
+        //   覆盖不到「调用处传的是哪个变量」。改这里请靠代码审查，别以为有网。
         // 一次尝试：流式 / 非流式两条分支都在 attempt_once 里（含记账与首帧体检）
         let started = Instant::now();
         let attempt = attempt_once(
-            &st, &spec, &secret, &domain, &body, is_stream, &account, &model, started, lease,
+            &st, &spec, &secret, &domain, &body, is_stream, &account, &upstream_model, started, lease,
         )
         .await;
 
@@ -5451,248 +4624,6 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
 ///   变成三倍等待；
 /// - `Rejected`（400/404/410/413/415/422）：请求本身写错了，换号也是同一个错；
 /// - `LaneLocked` / `Region`：车道级/地域级封锁，池里每个账号都会被同样拒绝。
-/// 流式首帧体检的等待预算：**总预算**，不是每次读取的预算。
-///
-/// 旧实现把 30s 当成「每次 s.next() 的超时」——上游只要每 29 秒挤一个字节，就能让这个
-/// 循环无限续命，HTTP 200 迟迟不提交、客户端一直挂在那里，而我们又永远判不出首帧好坏
-/// （对应 cherry-studio 的「延迟提交」纪律：pending 态必须有天花板）。
-const STREAM_HEAD_WAIT: Duration = Duration::from_secs(30);
-/// 首帧体检的宽限：读到过哪怕是半截帧/心跳的上游，说明它确实在干活（只是慢），
-/// 给到更长的总预算；一个字节都没给的上游没有任何理由拖过 STREAM_HEAD_WAIT。
-const STREAM_HEAD_WAIT_AFTER_BYTES: Duration = Duration::from_secs(60);
-/// 首帧窗口上限：超过这么多字节还没判定，说明上游在正常流式吐内容，放行。
-const STREAM_HEAD_MAX: usize = 16 * 1024;
-
-/// 把预算时长写成人类读得懂的样子：整秒就写秒，亚秒（只有测试会给）写毫秒。
-///
-/// ★ 踩过：直接用 as_secs() 在毫秒级预算下会被截成 0，文案变成「上游 0 秒内没有发出
-///   任何流式内容」——既不准确，也让测试断言无从下手。
-fn fmt_budget(d: Duration) -> String {
-    if d.as_secs() > 0 {
-        format!("{} 秒", d.as_secs())
-    } else {
-        format!("{} 毫秒", d.as_millis())
-    }
-}
-
-/// 首帧体检结论。
-enum HeadProbe {
-    /// 正常流：带 choices 的帧、或非 SSE 的正常 JSON。
-    Pass,
-    /// 坏流：把上游真实原因、错误分类、对应 HTTP 状态带出来（分类决定要不要换号）。
-    Fail(String, ErrorClass, u16),
-}
-
-/// 上游「HTTP 200 + 流里当场报错」是聚合站/中转站最常见的坏法：状态码骗人，
-/// 真实原因（凭据失效、模型不可用、额度耗尽）藏在第一个 SSE 帧里。
-///
-/// 旧实现原样透传 → 客户端拿到 200 和一段它解析不了的东西，`failover` 也无从触发
-/// （它只挂在 `forward_stream` 返回 Err 的时候）。此处把判定提前到「下发第一个字节之前」，
-/// 于是这仍然是一次**可以换号重试**的失败。判定只看「首个带 choices 的帧之前」的字节，
-/// 无论结论如何，已读到的字节都原样接回流首，不吞不改。
-async fn sniff_stream_head(
-    s: std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
-) -> (
-    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
-    Option<(String, ErrorClass, u16)>,
-) {
-    sniff_stream_head_within(s, STREAM_HEAD_WAIT, STREAM_HEAD_WAIT_AFTER_BYTES).await
-}
-
-/// 同 sniff_stream_head，但超时预算可注入（测试要能在毫秒级验证「拖不出首帧」的判定）。
-///
-/// ★ 预算语义是**总预算**：从进函数开始计时，读到过字节后放宽到 after_bytes，两者都不随
-///   读次数刷新。旧实现把 timeout 写在循环里，等于「每读一次就给 30 秒」，上游一秒挤一个
-///   字节就能把提交无限拖后；客户端那边是「连上了、什么也没有」，这种半开状态比直接 5xx
-///   更难排查（对应 cherry-studio 的「延迟提交」纪律：pending 态必须有天花板）。
-/// 首帧预算用光时的判定（两条路径共用：`left` 减到 0、以及某次等待超时）。
-///
-/// ★ 措辞按「已收到多少字节」定性，而不是按「哪条分支先触发」——两者对运维是同一件事：
-///   上游回了 200 却一直凑不出首帧。旧实现两条分支各写一套文案，同一现象会报出
-///   「只挤了 N 字节」或「卡住了」两种说法，日志里根本没法聚合统计。
-fn head_timeout_verdict(buf_len: usize, first_wait: Duration, after_bytes: Duration) -> (String, ErrorClass, u16) {
-    let msg = if buf_len == 0 {
-        format!(
-            "上游 {}内没有发出任何流式内容（HTTP 200，连接打开但一直空转）",
-            fmt_budget(first_wait)
-        )
-    } else {
-        format!(
-            "上游 {}内只挤了 {} 字节、始终凑不出一个完整的首帧（疑似被限速或连接半死）",
-            fmt_budget(after_bytes),
-            buf_len
-        )
-    };
-    (msg, ErrorClass::Transient, 504)
-}
-
-async fn sniff_stream_head_within(
-    mut s: std::pin::Pin<
-        Box<dyn futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send>,
-    >,
-    first_wait: Duration,
-    after_bytes: Duration,
-) -> (
-    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
-    Option<(String, ErrorClass, u16)>,
-) {
-    use futures_util::StreamExt;
-    let mut buf: Vec<u8> = Vec::new();
-    let mut verdict: Option<(String, ErrorClass, u16)> = None;
-    let started = Instant::now();
-    loop {
-        if let Some(probe) = scan_stream_head(&buf, false) {
-            if let HeadProbe::Fail(m, c, st) = probe {
-                verdict = Some((m, c, st));
-            }
-            break;
-        }
-        if buf.len() > STREAM_HEAD_MAX {
-            break;
-        }
-        // 总预算：读到过字节的按 after_bytes 算，一个字节没给的按 first_wait 算。
-        let budget = if buf.is_empty() { first_wait } else { after_bytes };
-        let left = match budget.checked_sub(started.elapsed()) {
-            Some(d) if !d.is_zero() => d,
-            // 预算用光：不许再无限等下去。
-            _ => {
-                verdict = Some(head_timeout_verdict(buf.len(), first_wait, after_bytes));
-                break;
-            }
-        };
-        match tokio::time::timeout(left, s.next()).await {
-            Ok(Some(Ok(chunk))) => buf.extend_from_slice(&chunk),
-            Ok(Some(Err(e))) => {
-                // 还没吐出任何有效帧就读失败：对客户端来说与「上游立刻挂了」等价，
-                // 此刻仍可换号，比下发一个半截流更有用。
-                verdict = Some((
-                    format!("上游流式读取失败（首帧前）：{e}"),
-                    ErrorClass::Transient,
-                    502,
-                ));
-                break;
-            }
-            Ok(None) => {
-                // 流结束：最后一次判定按 eof 语义（空流/只有心跳 = 失败）。
-                if let Some(HeadProbe::Fail(m, c, st)) = scan_stream_head(&buf, true) {
-                    verdict = Some((m, c, st));
-                }
-                break;
-            }
-            Err(_) => {
-                // 这一次等满了剩余预算还没有新字节：不再「放行」（旧实现如此），
-                // 因为放行的结果就是客户端挂在 200 上什么都收不到。
-                verdict = Some(head_timeout_verdict(buf.len(), first_wait, after_bytes));
-                break;
-            }
-        }
-    }
-    let prefix = futures_util::stream::once(async move {
-        Ok::<Bytes, std::io::Error>(Bytes::from(buf))
-    });
-    (Box::pin(prefix.chain(s)), verdict)
-}
-
-/// 在已读字节里找「首个有效帧」或「错误信号」。返回 `None` 表示信息还不够、继续读。
-fn scan_stream_head(buf: &[u8], eof: bool) -> Option<HeadProbe> {
-    let text = String::from_utf8_lossy(buf);
-    let trimmed = text.trim_start();
-    if trimmed.is_empty() {
-        return if eof {
-            Some(HeadProbe::Fail(
-                "上游流式响应在发出任何内容前就结束了（HTTP 200，但流是空的）".to_string(),
-                ErrorClass::Transient,
-                502,
-            ))
-        } else {
-            None
-        };
-    }
-    // 有些上游无视 stream:true 直接回一个 JSON：错误体按错误处理，正常体放行。
-    if trimmed.starts_with('{') {
-        return match serde_json::from_str::<Value>(trimmed) {
-            Ok(v) => Some(probe_json(&v)),
-            Err(_) => {
-                if eof {
-                    Some(HeadProbe::Pass)
-                } else {
-                    None
-                }
-            }
-        };
-    }
-    let mut saw_frame = false;
-    for raw in text.lines() {
-        let line = raw.trim_end_matches('\r');
-        let Some(payload) = line.strip_prefix("data:") else {
-            if line.starts_with("event:") && line.to_ascii_lowercase().contains("error") {
-                saw_frame = true;
-            }
-            continue;
-        };
-        let payload = payload.trim();
-        if payload.is_empty() || payload == "[DONE]" {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(payload) else {
-            continue; // 半截帧：等下一块
-        };
-        saw_frame = true;
-        let probe = probe_json(&v);
-        if let HeadProbe::Fail(..) = probe {
-            return Some(probe);
-        }
-        if v.get("choices").is_some() {
-            return Some(HeadProbe::Pass);
-        }
-    }
-    if eof && !saw_frame {
-        return Some(HeadProbe::Fail(
-            "上游流式响应只有心跳/空帧，没有发出任何内容".to_string(),
-            ErrorClass::Transient,
-            502,
-        ));
-    }
-    None
-}
-
-/// 单个 JSON 载荷的判定：有非空 `error` 就是坏流，其余放行。
-fn probe_json(v: &Value) -> HeadProbe {
-    if let Some(e) = v.get("error").filter(|x| !x.is_null()) {
-        let msg = e
-            .as_str()
-            .map(str::to_string)
-            .or_else(|| e.get("message").and_then(|m| m.as_str()).map(str::to_string))
-            .unwrap_or_else(|| e.to_string());
-        return classify_stream_error(&msg);
-    }
-    HeadProbe::Pass
-}
-
-/// 把流内错误文案归类：分类决定「换号有没有用」，状态码决定客户端看到什么。
-fn classify_stream_error(msg: &str) -> HeadProbe {
-    let m = msg.to_ascii_lowercase();
-    let has = |k: &str| m.contains(k);
-    let (class, status) = if has("api key")
-        || has("apikey")
-        || has("unauthorized")
-        || has("invalid token")
-        || has("token expired")
-        || has("认证")
-        || has("登录")
-        || has("401")
-    {
-        (ErrorClass::Auth, 401)
-    } else if has("quota") || has("额度") || has("余额") || has("balance") || has("402") {
-        (ErrorClass::Quota, 402)
-    } else if has("rate limit") || has("too many") || has("限流") || has("429") {
-        (ErrorClass::Rate, 429)
-    } else {
-        (ErrorClass::Transient, 502)
-    };
-    let short: String = msg.chars().take(400).collect();
-    HeadProbe::Fail(format!("上游流式响应首帧报错：{short}"), class, status)
-}
 fn failover_worthy(status: u16, class: ErrorClass) -> bool {
     match class {
         ErrorClass::Auth | ErrorClass::Waf | ErrorClass::Rate | ErrorClass::Quota => true,
@@ -5802,7 +4733,7 @@ async fn credential_retry_after_refresh(
                         Some(stat) => {
                             if stat.client_gone {
                                 record_cancelled(
-                                    &store, &spec_id, &account2, &model2, started,
+                                    &store, &pool, &spec_id, &account2, &model2, started,
                                     stat.tokens_in, stat.tokens_out, &spec_url,
                                 );
                             } else {
@@ -5812,7 +4743,7 @@ async fn credential_retry_after_refresh(
                                 record(
                                     &store, &pool, &spec_id, &account2, &model2, started,
                                     stat.error.is_none(), stat.tokens_in, stat.tokens_out,
-                                    stat.error, false, &spec_url, stat.ttfb_ms, None,
+                                    stat.error, &spec_url, stat.ttfb_ms, None,
                                 )
                             }
                         }
@@ -5824,7 +4755,7 @@ async fn credential_retry_after_refresh(
                             );
                             record(
                                 &store, &pool, &spec_id, &account2, &model2, started, false,
-                                 0, 0, Some(ErrorClass::Transient), false, &spec_url, 0, None,
+                                 0, 0, Some(ErrorClass::Transient), &spec_url, 0, None,
                             )
                         }
                     }
@@ -5834,7 +4765,7 @@ async fn credential_retry_after_refresh(
             Err(e2) => {
                 record(
                     &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                    0, 0, Some(e2.class), false, &spec.base_url, 0, e2.retry_after_hint(),
+                    0, 0, Some(e2.class), &spec.base_url, 0, e2.retry_after_hint(),
                 );
                 let hint = upstream_hint(&spec, e2.status, Some(e2.class), &e2.body);
                 Some(Err(ChatCoreErr::Upstream {
@@ -5851,14 +4782,14 @@ async fn credential_retry_after_refresh(
                 let (tin, tout) = usage_or_estimate(&v, body2.len());
                 record(
                     &st.store, &st.pool, &spec.id, &account, &model, started, true,
-                    tin, tout, None, false, &spec.base_url, 0, None,
+                    tin, tout, None, &spec.base_url, 0, None,
                 );
                 Some(Ok(ChatCoreOut::Json(v)))
             }
             Err(e2) => {
                 record(
                     &st.store, &st.pool, &spec.id, &account, &model, started, false,
-                    0, 0, Some(e2.class), false, &spec.base_url, 0, e2.retry_after_hint(),
+                    0, 0, Some(e2.class), &spec.base_url, 0, e2.retry_after_hint(),
                 );
                 let hint = upstream_hint(&spec, e2.status, Some(e2.class), &e2.body);
                 Some(Err(ChatCoreErr::Upstream {
@@ -5876,22 +4807,6 @@ async fn credential_retry_after_refresh(
 // ---------------------------------------------------------------------------
 
 /// Anthropic 形状错误信封：{"type":"error","error":{"type":…,"message":…}}。
-fn anthropic_error(status: u16, msg: &str) -> Response {
-    let etype = match status {
-        400 => "invalid_request_error",
-        401 => "authentication_error",
-        403 => "permission_error",
-        404 => "not_found_error",
-        429 => "rate_limit_error",
-        503 => "overloaded_error",
-        _ => "api_error",
-    };
-    (
-        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-        Json(json!({"type": "error", "error": {"type": etype, "message": msg}})),
-    )
-        .into_response()
-}
 
 
 
@@ -5973,25 +4888,6 @@ async fn anthropic_passthrough(
 }
 
 /// 从上游错误 body 里尽力提取人类可读 message（回退到原文截断）。
-fn extract_upstream_message(body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<Value>(body) {
-        if let Some(m) = v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
-            return m.to_string();
-        }
-        if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
-            return m.to_string();
-        }
-        if let Some(m) = v.get("error").and_then(|e| e.as_str()) {
-            return m.to_string();
-        }
-    }
-    let clipped: String = body.chars().take(300).collect();
-    if clipped.is_empty() {
-        "上游返回错误（无响应体）".to_string()
-    } else {
-        clipped
-    }
-}
 
 /// 粗粒度 token 估算：CJK 字符按 1 token，其余非空白字符按 4 字符/token。
 fn estimate_tokens(text: &str) -> i64 {
@@ -6027,12 +4923,20 @@ async fn search_messages(
         Ok(b) => b,
         Err(e) => {
             let status = e.status().as_u16();
-            return anthropic_error(status, &format!("请求体读取失败：{e}"));
+            return anthropic_error(status, &body_read_failure_msg(status, &e));
         }
     };
     let Ok(v) = serde_json::from_slice::<Value>(&raw) else {
         return anthropic_error(400, "invalid JSON body");
     };
+    // ★ 必须是 JSON 对象 —— 与另外四条协议入口同一道门。
+    //
+    //   缺这一步的后果不是「没报错」，而是**报错报错了方向**：数组形态的 body 里
+    //   `get("query")` 全是 None，query 退化成空串，然后继续往下走到「没有账号」
+    //   的 503 —— 用户看到「请先去登录账号」，而他真正的问题是请求体格式不对。
+    if !v.is_object() {
+        return anthropic_error(400, "请求体必须是 JSON 对象（如 {\"query\":\"关键词\"}）");
+    }
     // query 三种来源：query / messages[].content（Anthropic Messages 形态）/ input
     let query = v
         .get("query")
@@ -6053,6 +4957,17 @@ async fn search_messages(
         })
         .or_else(|| v.get("input").and_then(|x| x.as_str()).map(|s| s.to_string()))
         .unwrap_or_default();
+    // ★ query 是必填：缺了就是 400，不能让它带着空串继续往下走。
+    //
+    //   空 query 走到最后会被判成「没账号」的 503 —— 用户按提示去「接入源」登录，
+    //   而真正的问题是请求体里忘了写 query。**错误优先级必须是「先校验请求，
+    //   再检查依赖」**：请求本身不合法时，后面的一切判断都没有意义。
+    if query.trim().is_empty() {
+        return anthropic_error(
+            400,
+            "缺少 query：请在请求体里给 {\"query\":\"关键词\"}（也接受 messages[].content 或 input）",
+        );
+    }
     let max_results = v
         .get("max_results")
         .and_then(|x| x.as_i64())
@@ -6128,6 +5043,7 @@ async fn search_messages(
             Json(d).into_response()
         }
         Err(e) => {
+            log_upstream("search", 502, &e, started);
             st.pool.mark_health(&acc, false, "搜索失败");
             anthropic_error(502, &format!("搜索上游失败：{e}"))
         }
@@ -6153,6 +5069,35 @@ async fn runtime_set(State(st): State<AppState>, body: Bytes) -> Response {
     // 同步到号池：max_inflight 是 pick 的硬门槛，必须在同一个请求里生效
     if changed.iter().any(|c| c == "max_inflight") {
         st.pool.set_max_inflight(st.cfg.max_inflight());
+    }
+    // ★ 三个 rpm 也要同步到限流器。原来只同步了 max_inflight，于是面板改完
+    //   per_ip_rpm / global_rpm / key_rpm 会回「已更新 N 项，立即生效」，而实际
+    //   限流一点没变 —— 用户以为把每 IP 上限从 300 收到 10 就收紧了，其实还是 300。
+    //   这是**安全相关的静默失效**：改了不生效比没这个开关更糟（人会有虚假安全感）。
+    // ★ 只覆盖**这次真正改过**的那几档，其余沿用限流器当前值。
+    //   不能无脑三档一起 set：livecfg 里「用户没设过」的字段是 0，而 0 在这里
+    //   表示「关闭这一档」—— 一起 set 会把启动时由 CLI 决定的 key_rpm=120
+    //   悄悄清零（实测：只改 per_ip_rpm 与 global_rpm 时 key_rpm 从 120 变 0）。
+    if changed
+        .iter()
+        .any(|c| matches!(c.as_str(), "per_ip_rpm" | "global_rpm" | "key_rpm"))
+    {
+        let per_ip = if changed.iter().any(|c| c == "per_ip_rpm") {
+            st.cfg.per_ip_rpm() as u32
+        } else {
+            st.limits.per_ip()
+        };
+        let global = if changed.iter().any(|c| c == "global_rpm") {
+            st.cfg.global_rpm() as u32
+        } else {
+            st.limits.global()
+        };
+        let key_rate = if changed.iter().any(|c| c == "key_rpm") {
+            st.cfg.key_rpm() as u32
+        } else {
+            st.limits.key_rate_now()
+        };
+        st.limits.set_rates(per_ip, global, key_rate);
     }
     let mut msg = if changed.is_empty() {
         "没有字段发生变化".to_string()
@@ -6190,7 +5135,7 @@ async fn count_tokens(    State(_st): State<AppState>,
         Ok(b) => b,
         Err(e) => {
             let status = e.status().as_u16();
-            return anthropic_error(status, &format!("请求体读取失败：{e}"));
+            return anthropic_error(status, &body_read_failure_msg(status, &e));
         }
     };
     let Ok(v) = serde_json::from_slice::<Value>(&raw) else {
@@ -6233,7 +5178,7 @@ async fn messages_completions(
         Ok(b) => b,
         Err(e) => {
             let status = e.status().as_u16();
-            return anthropic_error(status, &format!("请求体读取失败：{e}"));
+            return anthropic_error(status, &body_read_failure_msg(status, &e));
         }
     };
     let Ok(v) = serde_json::from_slice::<Value>(&raw) else {
@@ -6245,8 +5190,15 @@ async fn messages_completions(
     let model = v
         .get("model")
         .and_then(|m| m.as_str())
-        .unwrap_or("unknown")
+        .unwrap_or("")
+        .trim()
         .to_string();
+    // ★ 与 chat_core 同口径：缺 model / 空串是 **400 请求错**，不是 404「模型不存在」。
+    //   （旧实现这里用 "unknown" 占位，转成 OpenAI 形状后 chat_core 的空检查就失效了，
+    //    最终报「未知模型 unknown」。同一个判据要在三条入口都成立。）
+    if model.is_empty() {
+        return anthropic_error(400, "请求体缺少 model 字段（或为空）：可用 模型id@平台 指定平台。");
+    }
     if let Some(k) = key.as_ref() {
         if !k.allows(&model) {
             return anthropic_error(403, &key_model_denied_message(k, &model));
@@ -6258,16 +5210,24 @@ async fn messages_completions(
     if let Some(spec) = native_anthropic_spec(&st, &model) {
         return anthropic_passthrough(&st, spec, &v, &model).await;
     }
+    // ★ 五入口统一留痕（helper 注释）：每个协议入口都得有自己的 started，
+    //   chat_completions 的那份不会替这里计时。
+    let started = Instant::now();
     let mut oa = match anthropic_to_openai(&v) {
         Ok(oa) => oa,
         Err(msg) => return anthropic_error(400, &msg),
     };
     carry_session(&mut oa, &v);
     match chat_core(&st, oa).await {
-        Ok(ChatCoreOut::Json(v)) => Json(openai_to_anthropic(&v, &model)).into_response(),
+        Ok(ChatCoreOut::Json(v)) => {
+            log_done(&model, started);
+            Json(openai_to_anthropic(&v, &model)).into_response()
+        }
         Ok(ChatCoreOut::Stream(stream)) => {
-            let conv = anthropic_stream(stream, model);
-            sse_response(Body::from_stream(conv))
+            let conv = anthropic_stream(stream, model.clone());
+            // 流式同样走带日志的 timed 版：以前 messages/responses 的流连
+            // 「请求首字节」「流式结束」都没有——日志覆盖面不能只给一条入口。
+            sse_response_timed(Body::from_stream(conv), started, model, String::new(), String::new())
         }
         Err(ChatCoreErr::Local {
             status,
@@ -6289,6 +5249,7 @@ async fn messages_completions(
             body,
             hint,
         }) => {
+            log_upstream(&model, status, &body, started);
             let msg = extract_upstream_message(&body);
             // 幂等兜底：chat_core 里所有 ChatCoreErr::Upstream 已经过 upstream_status，
             // 这里再过一次是防御性的（502→502 不变）。留着是因为将来若有人在 chat_core
@@ -6299,22 +5260,6 @@ async fn messages_completions(
     }
 }
 
-fn responses_error(status: u16, msg: &str) -> Response {
-    let kind = match status {
-        400 => "invalid_request_error",
-        401 => "authentication_error",
-        403 => "permission_error",
-        404 => "not_found_error",
-        429 => "rate_limit_error",
-        _ => "api_error",
-    };
-    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
-    (
-        code,
-        Json(json!({"error": {"message": msg, "type": kind, "code": status}})),
-    )
-        .into_response()
-}
 
 async fn responses_completions(
     State(st): State<AppState>,
@@ -6326,7 +5271,7 @@ async fn responses_completions(
         Ok(b) => b,
         Err(e) => {
             let status = e.status().as_u16();
-            return responses_error(status, &format!("请求体读取失败：{e}"));
+            return responses_error(status, &body_read_failure_msg(status, &e));
         }
     };
     let Ok(v) = serde_json::from_slice::<Value>(&raw) else {
@@ -6338,23 +5283,32 @@ async fn responses_completions(
     let model = v
         .get("model")
         .and_then(|m| m.as_str())
-        .unwrap_or("unknown")
+        .unwrap_or("")
+        .trim()
         .to_string();
+    // ★ 同 messages 入口：缺 model 是 400，不是 404。
+    if model.is_empty() {
+        return responses_error(400, "请求体缺少 model 字段（或为空）：可用 模型id@平台 指定平台。");
+    }
     if let Some(k) = key.as_ref() {
         if !k.allows(&model) {
             return responses_error(403, &key_model_denied_message(k, &model));
         }
     }
+    let started = Instant::now();
     let mut oa = match responses_to_openai(&v) {
         Ok(oa) => oa,
         Err(msg) => return responses_error(400, &msg),
     };
     carry_session(&mut oa, &v);
     match chat_core(&st, oa).await {
-        Ok(ChatCoreOut::Json(v)) => Json(openai_to_responses(&v, &model)).into_response(),
+        Ok(ChatCoreOut::Json(v)) => {
+            log_done(&model, started);
+            Json(openai_to_responses(&v, &model)).into_response()
+        }
         Ok(ChatCoreOut::Stream(stream)) => {
-            let conv = responses_stream(stream, model);
-            sse_response(Body::from_stream(conv))
+            let conv = responses_stream(stream, model.clone());
+            sse_response_timed(Body::from_stream(conv), started, model, String::new(), String::new())
         }
         Err(ChatCoreErr::Local {
             status,
@@ -6376,6 +5330,7 @@ async fn responses_completions(
             body,
             hint,
         }) => {
+            log_upstream(&model, status, &body, started);
             let msg = extract_upstream_message(&body);
             // 同 /v1/messages：幂等兜底（chat_core 已映射过），保证 200+HTML
             // 绝不会以 200 返回给 Codex CLI。
@@ -6469,7 +5424,42 @@ async fn web_file(uri: Uri) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::*;
+    /// 清快照的判据要硬：只有 401/403 算凭据失效；
+    /// 络抖动/超时/5xx/业务码错误一律不清（误清比留旧值更糟）。
+    #[test]
+    fn auth_failure_gate_is_strict() {
+        assert!(auth_failure_of("HTTP 401：Unauthorized"));
+        assert!(auth_failure_of("HTTP 403: forbidden"));
+        assert!(!auth_failure_of("网络失败：timeout"));
+        assert!(!auth_failure_of("HTTP 502：bad gateway"));
+        assert!(!auth_failure_of("HTTP 400：{\"code\":10001}"));
+        assert!(!auth_failure_of("非 JSON 响应（可能被重定向到登录页）"));
+    }
+    #[test]
+    fn legacy_poisoned_login_url_is_never_served() {
+        // 旧版入库时没查 scheme，free_sites.json 里可能还躺着历史毒条目：
+        // 映射成 ProviderSpec 时不下发（宁可没有注册页按钮，也不给可执行链接）。
+        let poisoned = aigw_store::FreeSite {
+            id: "free-x".into(),
+            name: "X".into(),
+            base_url: "https://x.example.com".into(),
+            url: "javascript://x.example.com/%0Aalert(1)".into(),
+            desc: String::new(),
+            enabled: true,
+        };
+        assert_eq!(free_to_spec(&poisoned).login_url, "", "javascript: 注册链接不许再下发");
+        let clean = aigw_store::FreeSite {
+            url: "https://x.example.com/sign-up?aff=1".into(),
+            ..poisoned
+        };
+        assert_eq!(
+            free_to_spec(&clean).login_url,
+            "https://x.example.com/sign-up?aff=1",
+            "正常 https 注册链接照发"
+        );
+    }
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -9007,7 +7997,7 @@ stream_dialect = "sse_delta"
         let st = state_with_custom(CustomStore::empty(), AccountStore::empty());
         // 免密车道被上游 403 之后记的是 `{平台}:anon` 这个车道键。
         st.pool
-            .report("anon-zen", "anon-zen:anon", "flint-40b-free", false, ErrorClass::LaneLocked, false);
+            .report("anon-zen", "anon-zen:anon", "flint-40b-free", false, ErrorClass::LaneLocked);
         assert!(!st.pool.blocked_of("anon-zen:anon").is_clear(), "种子没生效");
         let app = build_app(st.clone());
 
@@ -9374,6 +8364,42 @@ stream_dialect = "sse_delta"
         assert!(!same_model("gpt-4o-mini", "gpt-4o"));
     }
 
+    /// 同一模型的多种写法必须回填成**同一个名字**。
+    ///
+    /// ★ 这是号池冷却键能共享的前提：冷却按 (账号, 模型) 记账，而记账用的是
+    ///   canonical_model_for 回填后的上游真名（不是请求名）。若这里不归一，
+    ///   GLM-5.2 / glm-5.2 这类写法会变成几条互不相干的冷却 —— 同一份额度被
+    ///   拆开记，改用另一种写法请求时读不到那条冷却，就会挑中这个已经限额的
+    ///   账号白撞一次 429。
+    #[test]
+    fn canonical_model_folds_case_and_dot_forms() {
+        let spec = spec_toml(
+            r#"
+id = "web-glm"
+name = "glm"
+enabled = true
+auth = "cookie"
+base_url = "https://example.invalid"
+format = "openai"
+models = ["glm-5.2", "glm-5-turbo"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+region = "cn"
+"#,
+        );
+        let st = state(vec![spec.clone()]);
+        // 精确命中
+        assert_eq!(st.canonical_model_for(&spec, "glm-5.2"), "glm-5.2");
+        // 大小写不同 → 归一成清单里的写法
+        assert_eq!(st.canonical_model_for(&spec, "GLM-5.2"), "glm-5.2");
+        assert_eq!(st.canonical_model_for(&spec, "Glm-5.2"), "glm-5.2");
+        // 清单里没有的模型按原样返回（不凭空造名字）
+        assert_eq!(
+            st.canonical_model_for(&spec, "other-model"),
+            "other-model"
+        );
+    }
+
     // ---------- 上游失败的可行动建议 ----------
 
     fn hint_spec(region: &str) -> ProviderSpec {
@@ -9677,6 +8703,8 @@ biz_err = ["登录", "失效"]
             status: String::new(),
             unreadable: false,
             domain: String::new(),
+            token_limit: None,
+            token_period_s: None,
         }]);
         let app = build_app(state_with_accounts(vec![glm_spec_for(&format!("http://{addr}"))], accounts));
         let res = app
@@ -10542,6 +9570,8 @@ stream_dialect = "sse_delta"
             secret: "k".into(),
             kind: "api_key".into(),
             enabled: true,
+            token_limit: None,
+            token_period_s: None,
             status: String::new(),
             unreadable: false,
             domain: String::new(),
@@ -11739,6 +10769,8 @@ stream_dialect = "sse_delta"
             secret: "sk-x".into(),
             kind: "api_key".into(),
             enabled: true,
+            token_limit: None,
+            token_period_s: None,
             status: String::new(),
             unreadable: false,
             domain: String::new(),
@@ -11775,6 +10807,8 @@ stream_dialect = "sse_delta"
             secret: "sk-y".into(),
             kind: "api_key".into(),
             enabled: true,
+            token_limit: None,
+            token_period_s: None,
             status: String::new(),
             unreadable: false,
             domain: String::new(),
@@ -12465,296 +11499,6 @@ stream_dialect = "sse_delta"
         }
     }
 
-    #[test]
-    fn gongyi_sites_with_colliding_slugs_keep_distinct_ids() {
-        // slug 只保留 [a-z0-9-]：不同 host 可能撞成同一个 id。
-        // 旧实现只按 host 去重 → 同一批里两条同 id 的站点进 upsert_batch，
-        // 后一条被当成「已存在」把前一条的 base_url 覆盖掉（刷新一次就指错域名）。
-        let items = vec![
-            GongyiItem { name: "A".into(), url: "https://api.a-b.com/x".into() },
-            GongyiItem { name: "B".into(), url: "https://api-a-b.com/y".into() },
-            // 完全重复的 host 仍然只保留一个
-            GongyiItem { name: "A2".into(), url: "https://api.a-b.com/z".into() },
-        ];
-        let (sites, st) = gongyi_items_to_sites(items);
-        assert_eq!(sites.len(), 1, "两个 host 撞同一 slug，只应保留先到的那个：{sites:?}");
-        assert_eq!(st.id_conflict, 1, "撞 id 的那条要记进明细：{st:?}");
-        assert_eq!(st.dup_host, 1, "重复 host 的那条要记进明细：{st:?}");
-        assert_eq!(sites[0].id, "free-api-a-b-com");
-        assert_eq!(sites[0].base_url, "https://api.a-b.com");
-    }
-
-    #[test]
-    fn gongyi_hosts_are_screened_before_becoming_upstream() {
-        // 公网域名放行
-        assert!(gongyi_host_ok("api.example.com"));
-        assert!(gongyi_host_ok("www.foo.dev"));
-        // 云元数据端点：面板会带着用户的 Key 去请求，等于交出云主机凭据
-        assert!(!gongyi_host_ok("169.254.169.254"));
-        assert!(!gongyi_host_ok("metadata.google.internal"));
-        assert!(!gongyi_host_ok("fd00:ec2::254"));
-        // 回环：会形成自指回环（面板转发给自己）
-        assert!(!gongyi_host_ok("127.0.0.1"));
-        assert!(!gongyi_host_ok("localhost"));
-        assert!(!gongyi_host_ok("::1"));
-        assert!(!gongyi_host_ok("[::1]"));
-        // 无点单标签 / 畸形 host
-        assert!(!gongyi_host_ok("api"));
-        assert!(!gongyi_host_ok(""));
-        assert!(!gongyi_host_ok("a..b"));
-        assert!(!gongyi_host_ok("bad_host.example.com"));
-    }
-
-    #[test]
-    fn gongyi_batch_is_capped_and_hosts_screened() {
-        let mut items = Vec::new();
-        for i in 0..(MAX_GONGYI_SITES + 20) {
-            items.push(GongyiItem {
-                name: format!("s{i}"),
-                url: format!("https://s{i}.example.com/v1"),
-            });
-        }
-        let (sites, st) = gongyi_items_to_sites(items);
-        // 上限生效：不会把 /v1/models 与路由表撑爆
-        assert_eq!(sites.len(), MAX_GONGYI_SITES);
-        assert_eq!(st.over_cap, 20, "超上限被丢弃的条数要落进明细：{st:?}");
-        assert_eq!(st.items, MAX_GONGYI_SITES + 20);
-        // 不合规条目在配额之外被剔除（不计入上限）
-        let mixed = vec![
-            GongyiItem { name: "ok".into(), url: "https://ok.example.com/v1".into() },
-            GongyiItem { name: "meta".into(), url: "http://169.254.169.254/latest".into() },
-            GongyiItem { name: "self".into(), url: "http://127.0.0.1:8800/v1".into() },
-            GongyiItem { name: "nodot".into(), url: "https://api/v1".into() },
-        ];
-        let (out, st) = gongyi_items_to_sites(mixed);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].base_url, "https://ok.example.com");
-        assert_eq!(st.bad_host, 3, "元数据 / 回环 / 无点单标签都要计数");
-    }
-    #[test]
-    fn gongyi_stats_account_for_every_dropped_item() {
-        // 明细必须与 items 对得上：items == 入库 + 丢弃，否则看的人会以为漏算了。
-        let mixed = vec![
-            GongyiItem { name: "ok".into(), url: "https://ok.example.com/v1".into() },
-            GongyiItem { name: "dup".into(), url: "https://ok.example.com/v2".into() },
-            GongyiItem { name: "meta".into(), url: "http://169.254.169.254/latest".into() },
-            GongyiItem { name: "self".into(), url: "http://127.0.0.1:8800/v1".into() },
-            GongyiItem { name: "blank".into(), url: "   ".into() },
-        ];
-        let (sites, st) = gongyi_items_to_sites(mixed);
-        assert_eq!(sites.len(), 1);
-        assert_eq!(st.items, 5);
-        assert_eq!(st.bad_host, 3, "元数据 / 回环 / 空 url 都算不合规：{st:?}");
-        assert_eq!(st.dup_host, 1);
-        assert_eq!(st.dropped(), 4);
-        assert_eq!(st.items, sites.len() + st.dropped(), "items 必须等于入库 + 丢弃");
-        let d = st.detail();
-        assert!(d.contains("聚合页 5 条"), "{d}");
-        assert!(d.contains("丢弃 4"), "{d}");
-        assert!(d.contains("host 不合规 3"), "{d}");
-        assert!(d.contains("重复 1"), "{d}");
-        // 干净的一批不写「丢弃 0」这种噪音
-        let (_, clean) = gongyi_items_to_sites(vec![GongyiItem {
-            name: "a".into(),
-            url: "https://a.example.com/x".into(),
-        }]);
-        assert_eq!(clean.dropped(), 0);
-        assert_eq!(clean.detail(), "聚合页 1 条，无丢弃");
-    }
-
-    #[test]
-    fn non_http_schemes_never_become_free_sites() {
-        // javascript://host/%0Acode 能切出完全合规的 host（host_of 只认 ://），
-        // 但整个串是可执行脚本 URL —— 一旦入库就会成为 login_url，前端把它放进
-        // <a href>，点一下「注册页」就在面板源上执行。必须在入口处丢弃。
-        let mixed = vec![
-            GongyiItem {
-                name: "xss".into(),
-                url: "javascript://ok.example.com/%0Awindow.__xss=1".into(),
-            },
-            GongyiItem { name: "xss-upper".into(), url: "JaVaScRiPt://ok.example.com/x".into() },
-            GongyiItem { name: "plain-js".into(), url: "javascript:alert(document.domain)".into() },
-            GongyiItem { name: "data".into(), url: "data://ok.example.com/html".into() },
-            GongyiItem { name: "good".into(), url: "https://good.example.com/v1".into() },
-        ];
-        let (sites, st) = gongyi_items_to_sites(mixed);
-        assert_eq!(sites.len(), 1, "只有 https 条目该入库：{sites:?}");
-        assert_eq!(sites[0].name, "good");
-        assert_eq!(st.bad_host, 4, "四个非 http(s) scheme 都该计为丢弃：{st:?}");
-        assert_eq!(st.items, sites.len() + st.dropped(), "items 必须等于入库 + 丢弃");
-    }
-
-    #[test]
-    fn legacy_poisoned_login_url_is_never_served() {
-        // 旧版入库时没查 scheme，free_sites.json 里可能还躺着历史毒条目：
-        // 映射成 ProviderSpec 时不下发（宁可没有注册页按钮，也不给可执行链接）。
-        let poisoned = aigw_store::FreeSite {
-            id: "free-x".into(),
-            name: "X".into(),
-            base_url: "https://x.example.com".into(),
-            url: "javascript://x.example.com/%0Aalert(1)".into(),
-            desc: String::new(),
-            enabled: true,
-        };
-        assert_eq!(free_to_spec(&poisoned).login_url, "", "javascript: 注册链接不许再下发");
-        let clean = aigw_store::FreeSite {
-            url: "https://x.example.com/sign-up?aff=1".into(),
-            ..poisoned
-        };
-        assert_eq!(
-            free_to_spec(&clean).login_url,
-            "https://x.example.com/sign-up?aff=1",
-            "正常 https 注册链接照发"
-        );
-    }
-
-    #[test]
-    fn gongyi_sources_have_verified_fallback_and_accept_config() {
-        // 没有配置文件：内置两个源（Pages 正式站 + 同仓库 raw HTML，分属不同域名）
-        let d = gongyi_source_list(None);
-        assert_eq!(d.len(), 2, "内置聚合源应是两个（正式站 + raw 回退）：{d:?}");
-        assert!(d[0].contains("github.io"), "{d:?}");
-        assert!(
-            d[1].contains("raw.githubusercontent.com"),
-            "第二个源必须是独立域名上的同一份页面：{d:?}"
-        );
-
-        // 配置文件：追加在内置源之后；非 http、云元数据、空白、重复的条目都进不来
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join(GONGYI_SOURCES_FILE),
-            r#"{"urls":["https://mirror.example.com/nav/","ftp://x.example.com","http://169.254.169.254/latest","   ","https://mirror.example.com/nav"]}"#,
-        )
-        .unwrap();
-        let cfg = gongyi_source_list(Some(tmp.path()));
-        assert_eq!(cfg.len(), 3, "只有 mirror 那一条合规：{cfg:?}");
-        assert_eq!(cfg[2], "https://mirror.example.com/nav/");
-
-        // 裸数组同样接受；回环源放行（用户自建的本地静态页）
-        std::fs::write(
-            tmp.path().join(GONGYI_SOURCES_FILE),
-            r#"["http://127.0.0.1:8080/nav.html"]"#,
-        )
-        .unwrap();
-        let bare = gongyi_source_list(Some(tmp.path()));
-        assert_eq!(bare.len(), 3, "{bare:?}");
-        assert_eq!(bare[2], "http://127.0.0.1:8080/nav.html");
-
-        // Windows 记事本/PowerShell 写的文件带 UTF-8 BOM：不能因此忽略整份配置
-        std::fs::write(
-            tmp.path().join(GONGYI_SOURCES_FILE),
-            "\u{feff}[\"https://bom.example.com/nav\"]",
-        )
-        .unwrap();
-        let bom = gongyi_source_list(Some(tmp.path()));
-        assert_eq!(bom.len(), 3, "带 BOM 的配置也要生效：{bom:?}");
-        assert_eq!(bom[2], "https://bom.example.com/nav");
-
-        // 写坏的 JSON 不能让刷新整轮失败：退回只用内置源
-        std::fs::write(tmp.path().join(GONGYI_SOURCES_FILE), "{oops").unwrap();
-        assert_eq!(gongyi_source_list(Some(tmp.path())), d);
-    }
-
-    fn free_site(id: &str) -> aigw_store::FreeSite {
-        aigw_store::FreeSite {
-            id: id.into(),
-            name: id.into(),
-            base_url: "https://ok.example.com".into(),
-            url: String::new(),
-            desc: String::new(),
-            enabled: true,
-        }
-    }
-
-    #[test]
-    fn gongyi_attempts_fall_back_to_next_source() {
-        // 首源 503、次源命中：这是多源回退真正要走的分支。
-        let attempts = vec![
-            (
-                "https://a.example.com/nav".to_string(),
-                Err("HTTP 503 Service Unavailable".to_string()),
-            ),
-            (
-                "https://b.example.com/nav".to_string(),
-                Ok((
-                    vec![free_site("free-ok")],
-                    GongyiStats {
-                        items: 1,
-                        ..Default::default()
-                    },
-                )),
-            ),
-        ];
-        let (out, st) = combine_gongyi_attempts(attempts).unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(st.sources.len(), 2, "两个源都要留下痕迹：{:?}", st.sources);
-        assert!(!st.sources[0].ok);
-        assert!(st.sources[0].err.contains("503"));
-        assert!(st.sources[1].ok);
-        assert_eq!(st.sources[1].items, 1);
-        let note = st.sources_note();
-        assert!(note.contains("a.example.com"), "明细要说清谁失败了：{note}");
-        assert!(note.contains("b.example.com"), "明细要说清谁命中了：{note}");
-        // 计数本身仍只统计生效源的那一份
-        assert_eq!(st.items, 1);
-    }
-
-    #[test]
-    fn gongyi_attempts_all_failed_lists_every_source() {
-        let attempts = vec![
-            (
-                "https://a.example.com/nav".to_string(),
-                Err("HTTP 404 Not Found".to_string()),
-            ),
-            (
-                "https://b.example.com/nav".to_string(),
-                Err("itemListElement 数组未闭合".to_string()),
-            ),
-        ];
-        let e = combine_gongyi_attempts(attempts).unwrap_err();
-        assert!(e.contains("全部 2 个聚合源都失败"), "{e}");
-        assert!(e.contains("a.example.com") && e.contains("404"), "{e}");
-        assert!(e.contains("b.example.com"), "{e}");
-        assert!(e.contains("未闭合"), "{e}");
-
-        // 源列表为空也不能静默「成功 0 站」
-        let e2 = combine_gongyi_attempts(Vec::new()).unwrap_err();
-        assert!(e2.contains("没有可用的聚合源"), "{e2}");
-
-        // 单源命中不写噪音
-        let one = combine_gongyi_attempts(vec![(
-            "https://a.example.com/nav".to_string(),
-            Ok((vec![free_site("free-ok")], GongyiStats::default())),
-        )])
-        .unwrap()
-        .1;
-        assert!(one.sources_note().contains("a.example.com"), "{}", one.sources_note());
-    }
-
-    #[test]
-    fn gongyi_html_parser_extracts_nested_list_and_reports_breakage() {
-        let html = r#"<html><body><script type="application/ld+json">
-        {"@type":"ItemList","itemListElement":[{"name":"A","url":"https://a.example.com"}],"x":[1,2]}
-        </script></body></html>"#;
-        let items = parse_gongyi_items(html).expect("应能解析出条目");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].name, "A");
-
-        // 字符串里的 ] 和转义引号不能提前截断数组（括号配对要走 in_str/esc 分支）
-        let tricky = r#""itemListElement": [{"name":"x]y\"z","url":"https://b.example.com"},{"name":"c","url":"https://c.example.com"}]"#;
-        let items = parse_gongyi_items(tricky).expect("字符串里的括号不该截断解析");
-        assert_eq!(items.len(), 2, "{items:?}");
-        assert_eq!(items[1].name, "c");
-
-        // 三种坏页面各自给出可读原因
-        let e = parse_gongyi_items("<html>改版了</html>").unwrap_err();
-        assert!(e.contains("未找到 itemListElement"), "{e}");
-        let e = parse_gongyi_items(r#""itemListElement": {"a":1}"#).unwrap_err();
-        assert!(e.contains("不是数组"), "{e}");
-        let e = parse_gongyi_items(r#""itemListElement": [{"name":"a""#).unwrap_err();
-        assert!(e.contains("未闭合"), "{e}");
-    }
-
     #[tokio::test]
     async fn missing_static_asset_is_404_not_spa_html() {
         // 旧实现：/app-typo.js 走 SPA 回退 → 200 + text/html，浏览器把 HTML 当脚本执行。
@@ -12991,9 +11735,9 @@ stream_dialect = "sse_delta"
         let (fine, _) = accs.add_account("plat-c", "fine", "cookie", "s3");
         let st = state_with_accounts(cred_platform("plat-c"), accs);
         // 402 → 只冻 (账号,模型)：cooling_s > 0、waf_s = 0
-        st.pool.report("plat-c", &cold.id, "m1", false, ErrorClass::Quota, false);
+        st.pool.report("plat-c", &cold.id, "m1", false, ErrorClass::Quota);
         // 401 → 整号拉黑：waf_s > 0
-        st.pool.report("plat-c", &banned.id, "m1", false, ErrorClass::Auth, false);
+        st.pool.report("plat-c", &banned.id, "m1", false, ErrorClass::Auth);
         let app = build_app(st);
         let res = app.oneshot(req("/api/accounts")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -13243,7 +11987,7 @@ stream_dialect = "sse_delta"
         // 免密车道被上游封锁时，池里的键是 `{平台}:anon`（转发时现造账号），
         // 不是占位行的随机 id。面板要按车道键查，否则这条车道被冻 120 秒
         // 在账号表上完全看不出来。
-        st.pool.report("anon-plat", "anon-plat:anon", "m1", false, ErrorClass::LaneLocked, false);
+        st.pool.report("anon-plat", "anon-plat:anon", "m1", false, ErrorClass::LaneLocked);
         let app = build_app(st);
         let res = app.oneshot(req("/api/accounts")).await.unwrap();
         let v: Value = serde_json::from_str(&body_string(res).await).unwrap();
