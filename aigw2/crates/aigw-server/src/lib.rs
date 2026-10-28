@@ -376,6 +376,8 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/model_map", get(mmap_get).post(mmap_set))
         // ★ 2026-10-28（对齐 magpie param-override）：参数覆盖。
         .route("/api/param_override", get(pov_get).post(pov_set))
+        // ★ 2026-10-28（对齐 magpie think-tags）：思考标签处理。
+        .route("/api/think_tags", get(tt_get).post(tt_set))
         .route("/api/backup", get(backup_export).post(backup_restore))
         // 完整备份（含凭据）：前端「⬇ 备份数据」用它，否则导出的备份恢复不回来
         .route("/api/backup/export", post(backup_export_full))
@@ -4253,6 +4255,10 @@ async fn chat_completions(
             //   看到上游真名会算错窗口大小。
             let mut v = v;
             aigw_relay::model_map::restore_global(&mut v);
+            // ★ 2026-10-28（对齐 magpie think-tags）：剥掉模型写进正文的
+            //   <think>…</think> 块。智能体会把正文存进历史并在下一轮原样发回，
+            //   不剥等于每轮都为同一段思考重复付费。
+            aigw_relay::think_tags::apply_global(&mut v);
             let truncated = crate::truncated::outcome_from_chat(&v)
                 .map(|(o, text)| crate::truncated::looks_truncated(o, text))
                 .unwrap_or(false);
@@ -13660,6 +13666,44 @@ async fn pov_set(State(st): State<AppState>, body: Bytes) -> Response {
                 format!("已保存并立即生效：{} 项直设 + {} 条操作", cfg.direct.len(), cfg.ops.len())
             } else {
                 "已关闭参数覆盖".to_string()
+            },
+        })).into_response(),
+        Err(e) => Json(json!({"ok": false, "message": format!("保存失败：{e}")})).into_response(),
+    }
+}
+
+/// ★ 2026-10-28（对齐 magpie think-tags）：读取思考标签处理模式。
+async fn tt_get() -> Json<Value> {
+    Json(json!({ "ok": true, "mode": aigw_relay::think_tags::current_mode() }))
+}
+
+/// ★ 2026-10-28：设置思考标签处理模式（`strip` / `to_content` / null=关闭）。
+async fn tt_set(State(st): State<AppState>, body: Bytes) -> Response {
+    let v: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
+        }
+    };
+    let mode = v.get("mode").and_then(|x| x.as_str());
+    if let Some(m) = mode {
+        if m != "strip" && m != "to_content" {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "mode 只接受 strip / to_content / 不传（关闭）"}))).into_response();
+        }
+    }
+    let dir = st
+        .data_dir
+        .as_ref()
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    match aigw_relay::think_tags::save_and_apply(&dir, mode) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "mode": mode,
+            "message": match mode {
+                Some("strip") => "已开启：剥掉正文开头的 <think> 块（省历史 token）",
+                Some("to_content") => "已开启：把 reasoning_content 塞回正文成 <think> 块",
+                _ => "已关闭思考标签处理",
             },
         })).into_response(),
         Err(e) => Json(json!({"ok": false, "message": format!("保存失败：{e}")})).into_response(),

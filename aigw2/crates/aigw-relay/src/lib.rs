@@ -35,6 +35,7 @@ pub mod history_trim;
 pub mod joycode;
 pub mod model_map;
 pub mod param_override;
+pub mod think_tags;
 /// 重导出 reqwest::Client，供上层 crate（aigw-server）在签名里引用而不必自加依赖。
 pub use reqwest::Client as HttpClient;
 pub mod commandcode;

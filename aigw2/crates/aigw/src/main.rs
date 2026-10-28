@@ -660,6 +660,14 @@ async fn main() {
         }
         aigw_relay::param_override::apply_cfg(&po, !po.is_empty());
     }
+    // ★ 2026-10-28（对齐 magpie think-tags）：启动时加载思考标签模式。
+    {
+        let tt = aigw_relay::think_tags::load(&data_dir());
+        if let Some(m) = &tt {
+            tracing::info!("think_tags：模式 {} 已启用", m);
+        }
+        aigw_relay::think_tags::apply_cfg(tt.as_deref());
+    }
     let client = Arc::new(aigw_relay::OutClient::new());
     // 账号池：双源装载（v2 data/accounts.json 权威；首次从 legacy 只读初始化）
     let legacy_accounts = legacy_dir()
