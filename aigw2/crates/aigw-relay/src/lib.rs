@@ -1841,22 +1841,39 @@ fn backfill_reasoning_content(o: &mut serde_json::Map<String, Value>) -> usize {
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if !(model.contains("deepseek") || model.contains("ds-")) {
+    // ★ 2026-10-28（对齐 cline2api 的 beam/reasoning 修复）：
+    //   **GLM 系**（glm / reflection / beam / ling / dots）在该模型上要求每条历史
+    //   assistant 消息都带**非空** `reasoning_content`，缺失时上游 400
+    //   `Missing required parameter: 'messages[N].reasoning_content'`；
+    //   实测空串同样被拒，必须非空。
+    //   以前只认 deepseek 系 —— 于是 kilo 的 beam-free 系列（kilo-auto/free
+    //   路由到 reflection/beam）第二轮就 400。
+    let is_glm_family = model.contains("glm")
+        || model.contains("reflection")
+        || model.contains("beam")
+        || model.contains("ling")
+        || model.contains("dots");
+    let is_deepseek = model.contains("deepseek") || model.contains("ds-");
+    if !is_deepseek && !is_glm_family {
         return 0;
     }
     let Some(msgs) = o.get("messages").and_then(|m| m.as_array()) else {
         return 0;
     };
-    let has_trace = msgs.iter().any(|m| {
-        let Some(mo) = m.as_object() else { return false };
-        mo.get("reasoning")
-            .and_then(|r| r.as_str())
-            .map(|r| !r.is_empty())
-            .unwrap_or(false)
-            || mo.contains_key("reasoning_content")
-    });
-    if !has_trace {
-        return 0;
+    // deepseek 系沿用旧口径：历史里出现过推理痕迹才补（避免给普通请求塞噪音）。
+    // GLM 系**无条件补**：它按「每条 assistant 都必须有」校验，没痕迹也要占位。
+    if is_deepseek && !is_glm_family {
+        let has_trace = msgs.iter().any(|m| {
+            let Some(mo) = m.as_object() else { return false };
+            mo.get("reasoning")
+                .and_then(|r| r.as_str())
+                .map(|r| !r.is_empty())
+                .unwrap_or(false)
+                || mo.contains_key("reasoning_content")
+        });
+        if !has_trace {
+            return 0;
+        }
     }
     let mut n = 0usize;
     if let Some(msgs) = o.get_mut("messages").and_then(|m| m.as_array_mut()) {
@@ -1865,19 +1882,39 @@ fn backfill_reasoning_content(o: &mut serde_json::Map<String, Value>) -> usize {
             if mo.get("role").and_then(|r| r.as_str()) != Some("assistant") {
                 continue;
             }
-            if mo.contains_key("reasoning_content") {
+            // 已有**非空**值 → 跳过。空串同样算缺失（上游拒绝空串）。
+            let existing_ok = mo
+                .get("reasoning_content")
+                .and_then(|x| x.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if existing_ok {
                 continue;
             }
-            let r = mo
-                .get("reasoning")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
+            // 优先用同消息的 reasoning（客户端回传形态，可能是字符串或块数组）
+            let r = reasoning_text_of(mo.get("reasoning"))
+                .unwrap_or_else(|| ".".to_string()); // 非空占位（上游拒空串）
             mo.insert("reasoning_content".into(), Value::String(r));
             n += 1;
         }
     }
     n
+}
+
+/// 提取推理内容：字符串直接用；块数组拼接 `text` 字段（逐字对齐参考实现）。
+fn reasoning_text_of(v: Option<&Value>) -> Option<String> {
+    match v? {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Array(arr) => {
+            let parts: Vec<String> = arr
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()).map(String::from))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.is_empty() { None } else { Some(parts.join("\n")) }
+        }
+        _ => None,
+    }
 }
 /// 把一个字节流整段收成 UTF-8 文本（WorkBuddy 非流式聚合用）。
 async fn collect_sse_text(
@@ -3545,4 +3582,106 @@ mod wb_ua_realm_tests {
         assert_eq!(err_with_body(r#"{"retry_after": 86400}"#).retry_after_hint(), Some(3600.0));
     }
 
+}
+
+#[cfg(test)]
+mod reasoning_backfill_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run(model: &str, msgs: Value) -> (Value, usize) {
+        let mut o = json!({"model": model, "messages": msgs});
+        let n = {
+            let m = o.as_object_mut().unwrap();
+            backfill_reasoning_content(m)
+        };
+        (o, n)
+    }
+
+    /// ★ 2026-10-28（对齐 cline2api）：GLM 系每条 assistant 都必须有非空
+    /// reasoning_content，否则上游 400。这里锁住「无条件补、且非空」。
+    #[test]
+    fn glm_family_always_backfills_nonempty() {
+        let (o, n) = run(
+            "reflection/beam-free",
+            json!([
+                {"role":"user","content":"q"},
+                {"role":"assistant","content":"a1"},
+                {"role":"user","content":"q2"},
+                {"role":"assistant","content":"a2"}
+            ]),
+        );
+        assert_eq!(n, 2, "两条 assistant 都要补");
+        let msgs = o["messages"].as_array().unwrap();
+        for i in [1usize, 3] {
+            let rc = msgs[i]["reasoning_content"].as_str().unwrap();
+            assert!(!rc.is_empty(), "必须非空（空串上游也拒）");
+            assert_eq!(rc, ".");
+        }
+    }
+
+    #[test]
+    fn glm_uses_reasoning_field_when_present() {
+        let (o, _) = run(
+            "glm-5.3",
+            json!([
+                {"role":"user","content":"q"},
+                {"role":"assistant","content":"a","reasoning":"我的思考"}
+            ]),
+        );
+        assert_eq!(o["messages"][1]["reasoning_content"], "我的思考");
+    }
+
+    #[test]
+    fn glm_reads_reasoning_block_array() {
+        let (o, _) = run(
+            "glm-5.3",
+            json!([
+                {"role":"user","content":"q"},
+                {"role":"assistant","content":"a","reasoning":[{"text":"段一"},{"text":"段二"}]}
+            ]),
+        );
+        assert_eq!(o["messages"][1]["reasoning_content"], "段一\n段二");
+    }
+
+    #[test]
+    fn glm_replaces_empty_string() {
+        let (o, n) = run(
+            "beam-free",
+            json!([
+                {"role":"user","content":"q"},
+                {"role":"assistant","content":"a","reasoning_content":""}
+            ]),
+        );
+        assert_eq!(n, 1, "空串应被视为缺失并补上");
+        assert_eq!(o["messages"][1]["reasoning_content"], ".");
+    }
+
+    #[test]
+    fn glm_keeps_existing_nonempty() {
+        let (o, n) = run(
+            "glm-5.3",
+            json!([
+                {"role":"assistant","content":"a","reasoning_content":"已有"}
+            ]),
+        );
+        assert_eq!(n, 0);
+        assert_eq!(o["messages"][0]["reasoning_content"], "已有");
+    }
+
+    #[test]
+    fn deepseek_still_requires_trace() {
+        // deepseek 系保持旧口径：没有推理痕迹就不补（不给普通请求塞噪音）
+        let (_, n) = run(
+            "deepseek-v4-flash",
+            json!([{"role":"assistant","content":"a"}]),
+        );
+        assert_eq!(n, 0, "deepseek 无痕迹时不该补");
+    }
+
+    #[test]
+    fn unrelated_model_untouched() {
+        let (_, n) = run("gpt-5", json!([{"role":"assistant","content":"a"}]));
+        assert_eq!(n, 0);
+    }
 }
