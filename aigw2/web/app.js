@@ -2192,9 +2192,18 @@ function creditPill(a) {
     else if (leftH <= 48) parts.push(' · 剩 ' + Math.max(1, Math.round(leftH)) + ' 小时到期（优先消耗）');
     else parts.push(' · 约 ' + Math.round(leftH / 24) + ' 天后到期');
   }
+  var soon = typeof a.credit_expire_s === 'number' && a.credit_expire_s > 0
+    && (a.credit_expire_s * 1000 - Date.now()) <= 48 * 3600000;
+  var low = a.credit <= 100;
+  return ' ' + pill(soon || low ? 'warn' : 'mut', parts.join(''));
+}
 // Token 限制器徽标：配了规则的号显示「限 已用/上限 · 翻页剩N分」；
 // 触顶（used>=limit）用 err 色——用户得能一眼看出「这个号本周期已被排除」。
 // 数值全部来自后端 json 数字，无注入面。
+// ★ 2026-10-28 修复：这段原来被插进 creditPill 函数体中间（creditPill 的
+//   return 还没执行就切走了），tokenPill 变成嵌套函数、全局不可见，
+//   账号页整页崩成「加载失败：tokenPill is not defined」。现在把它
+//   移回顶层——先完整定义 creditPill，再定义 tokenPill。
 function tokenPill(a) {
   if (!a || !a.token_rule || typeof a.token_rule.limit !== 'number') return '';
   const used = typeof a.token_used === 'number' ? a.token_used : 0;
@@ -2203,11 +2212,6 @@ function tokenPill(a) {
   const hit = used >= lim;
   const pct = lim ? Math.min(100, Math.round(used * 100 / lim)) : 0;
   return ' ' + pill(hit ? 'err' : (pct >= 80 ? 'warn' : 'mut'), '限 ' + fmt(used) + '/' + fmt(lim));
-}
-  var soon = typeof a.credit_expire_s === 'number' && a.credit_expire_s > 0
-    && (a.credit_expire_s * 1000 - Date.now()) <= 48 * 3600000;
-  var low = a.credit <= 100;
-  return ' ' + pill(soon || low ? 'warn' : 'mut', parts.join(''));
 }
 // 积分总览条：账号页顶部一行看清「共多少分、几个号快到期」。
 // 「48 小时内到期」阈值与后端 pick 的 CREDIT_EXPIRING_WINDOW_SECS 同一口径。
@@ -2326,26 +2330,25 @@ async function acLimit(id) {
     ? ("当前：每 " + Math.round(cur.period_s / 60) + " 分钟 " + cur.limit + " token · 本窗口已用 " + used)
     : "当前：未设置（该账号用量不受限制器控制）";
   const qs = [];
-  qs.push("<div class="note">" + esc(nowLine) + "</div>");
-  qs.push("<label>每周期允许的 Token 总量（in+out 合计）</label>");
-  qs.push("<input class="q mono" id="limN" type="number" min="1" placeholder="例如 500000（0.5M token）" value="" + (cur ? cur.limit : "") + "">");
-  qs.push("<label>周期（窗口按整点对齐翻页；触顶自动跳过，翻页自动恢复）</label>");
-  qs.push("<select class="q" id="limP">");
-  qs.push("<option value="1800">30 分钟</option>");
-  qs.push("<option value="3600">1 小时</option>");
-  qs.push("<option value="43200">12 小时</option>");
-  qs.push("<option value="86400">24 小时</option>");
-  qs.push("</select>");
-  qs.push("<div class="faint small" style="margin-top:6px">用途：免费额度账号用量太猛容易被上游风控——限制器到量就在选号时跳过该号，窗口翻页自动回来。它防的是<b>用量</b>，与低余额优先 / 快到期加权互不冲突。</div>");
-  qs.push("<div class="modal-foot">");
-  qs.push("<button class="btn pri" onclick="acLimitSave(&quot;" + esc(id) + "&quot;)">保存</button>");
-  if (cur) qs.push("<button class="btn" onclick="acLimitClear(&quot;" + esc(id) + "&quot;)">清除限制</button>");
-  qs.push("<button class="btn" onclick="this.closest(&quot;.modal-mask&quot;).remove()">取消</button>");
-  qs.push("</div>");
-  const mk = modalShell("Token 周期限额 · " + esc(a.name || a.id), qs.join("
-"));
-  document.body.insertAdjacentHTML("beforeend", mk);
-  if (cur) document.getElementById("limP").value = String(cur.period_s);
+  qs.push('<div class="note">' + esc(nowLine) + '</div>');
+  qs.push('<label>每周期允许的 Token 总量（in+out 合计）</label>');
+  qs.push('<input class="q mono" id="limN" type="number" min="1" placeholder="例如 500000（0.5M token）" value="' + (cur ? cur.limit : '') + '">');
+  qs.push('<label>周期（窗口按整点对齐翻页；触顶自动跳过，翻页自动恢复）</label>');
+  qs.push('<select class="q" id="limP">');
+  qs.push('<option value="1800">30 分钟</option>');
+  qs.push('<option value="3600">1 小时</option>');
+  qs.push('<option value="43200">12 小时</option>');
+  qs.push('<option value="86400">24 小时</option>');
+  qs.push('</select>');
+  qs.push('<div class="faint small" style="margin-top:6px">用途：免费额度账号用量太猛容易被上游风控——限制器到量就在选号时跳过该号，窗口翻页自动回来。它防的是<b>用量</b>，与低余额优先 / 快到期加权互不冲突。</div>');
+  qs.push('<div class="modal-foot">');
+  qs.push('<button class="btn pri" onclick="acLimitSave(&quot;' + esc(id) + '&quot;)">保存</button>');
+  if (cur) qs.push('<button class="btn" onclick="acLimitClear(&quot;' + esc(id) + '&quot;)">清除限制</button>');
+  qs.push('<button class="btn" onclick="this.closest(&quot;.modal-mask&quot;).remove()">取消</button>');
+  qs.push('</div>');
+  const mk = modalShell('Token 周期限额 · ' + esc(a.name || a.id), qs.join('\n'));
+  document.body.insertAdjacentHTML('beforeend', mk);
+  if (cur) document.getElementById('limP').value = String(cur.period_s);
 }
 
 async function acLimitSave(id) {
