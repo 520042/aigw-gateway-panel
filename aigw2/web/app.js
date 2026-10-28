@@ -496,7 +496,12 @@ async function viewSources(el) {
         <button class="menu-item" onclick="srcMgr('health')">♡ 一键健康检查（积分 / 模型 / 对话）</button>
         <button class="menu-item" onclick="srcMgr('checkin')">◷ 每日签到（wb 加油站 + Lobster）</button>
         <button class="menu-item" onclick="srcMgr('growth')">☑ 成长任务与领奖</button>
+        <div class="menu-sec">成长活动（单步操作）</div>
+        <button class="menu-item" onclick="srcMgr('overview')">▤ 成长概览（等级 / 能量 / 活跃度）</button>
+        <button class="menu-item" onclick="srcMgr('redeem')">◈ 连登奖励兑换</button>
+        <button class="menu-item" onclick="srcMgr('lottery')">✦ 限时抽奖</button>
         <button class="menu-item" onclick="srcMgr('travel')">✈ 猫猫旅行与领奖</button>
+        <button class="menu-item" onclick="srcMgr('buddyq')">◻ 盲盒配额与开盒</button>
       </div>
     </div>
   </div>`;
@@ -2171,6 +2176,64 @@ async function srcMgr(kind) {
   if (m) m.style.display = 'none';
   if (kind === 'checkin') { wbCheckin(); return; }
   if (kind === 'growth') { wbGrowth(); return; }
+
+  // ★ 2026-10-28（对齐 xiaofan6ya/wb2api）：单步成长动作。
+  //   kind → [后端 growth_action, 标题, 结果渲染器]
+  const SINGLE = {
+    overview: ['growth_profile', '成长概览（等级 / 能量 / 活跃度）'],
+    redeem:   ['streak_redeem', '连登奖励兑换'],
+    lottery:  ['lottery_draw', '限时抽奖'],
+    buddyq:   ['buddy_quota', '盲盒配额与开盒'],
+  };
+  if (SINGLE[kind]) {
+    const [act, title] = SINGLE[kind];
+    const mk0 = modalShell(title + ' · 执行中…', '<div class="faint" id="mgrBox">正在向 wb 上游请求，请稍候…</div>');
+    document.body.insertAdjacentHTML('beforeend', mk0);
+    const box0 = document.getElementById('mgrBox');
+    let out = [];
+    try {
+      if (kind === 'overview') {
+        // 概览取三样：档案（等级/完成数）、能量、活跃地图
+        const [pr, en, hm] = await Promise.all([
+          post('/api/checkin', { action: 'growth', platform: 'wb-gateway', growth_action: 'growth_profile' }).catch(() => null),
+          post('/api/checkin', { action: 'growth', platform: 'wb-gateway', growth_action: 'growth_energy' }).catch(() => null),
+          post('/api/checkin', { action: 'growth', platform: 'wb-gateway', growth_action: 'growth_heatmap' }).catch(() => null),
+        ]);
+        const pick = (r) => (((r && r.accounts) || [])[0] || {}).result || {};
+        const p = pick(pr).data || {}, e = pick(en).data || {}, h = pick(hm).data || {};
+        const pd = p.data || p, ed = e.data || e, hd = h.data || h;
+        out.push('等级 <b>' + esc(String(pd.level ?? '—')) + '</b> · 已完成 <b>' + esc(String(pd.completed ?? '—')) + '</b> 个任务');
+        out.push('能量 <b>' + esc(String(ed.balance ?? '—')) + '</b>（累计获得 ' + esc(String(ed.total_earned ?? '—')) + ' / 消耗 ' + esc(String(ed.total_consumed ?? '—')) + '）');
+        const todayActive = hd.today && hd.today.is_active;
+        out.push('今日活跃：' + (todayActive ? '<span class="pill ok">已活跃</span>' : '<span class="pill mut">未活跃</span>'));
+      } else if (kind === 'buddyq') {
+        const r = await post('/api/checkin', { action: 'growth', platform: 'wb-gateway', growth_action: 'buddy_quota' }).catch(() => null);
+        const d = ((((r && r.accounts) || [])[0] || {}).result || {}).data || {};
+        const q = d.data || d;
+        out.push('能量余额 <b>' + esc(String(q.balance ?? '—')) + '</b> · 每次开盒 <b>' + esc(String(q.cost_per_open ?? '—')) + '</b> · 可开 <b>' + esc(String(q.affordable ?? '—')) + '</b> 次');
+        if (Number(q.affordable) > 0) {
+          const r2 = await post('/api/checkin', { action: 'growth', platform: 'wb-gateway', growth_action: 'buddy_open', count: Math.min(Number(q.affordable), 5) }).catch(() => null);
+          const rr = ((((r2 && r2.accounts) || [])[0] || {}).result) || {};
+          out.push(rr.ok ? '✓ 已开盒（结果见下方原始数据）' : '✗ 开盒失败：' + esc(String(rr.message || '')));
+          if (rr.data) out.push('<pre class="mono" style="font-size:11px;max-height:160px;overflow:auto">' + esc(JSON.stringify(rr.data, null, 1).slice(0, 800)) + '</pre>');
+        } else {
+          out.push('<span class="faint">能量不足，攒够 ' + esc(String(q.cost_per_open ?? '?')) + ' 再来</span>');
+        }
+      } else {
+        const r = await post('/api/checkin', { action: 'growth', platform: 'wb-gateway', growth_action: act }).catch((e) => ({ ok: false, message: String(e) }));
+        const res = ((((r && r.accounts) || [])[0] || {}).result) || {};
+        out.push((res.ok ? '✓ ' : '✗ ') + esc(String(res.message || (res.ok ? '完成' : '失败'))));
+        // 兑换/抽奖的明细逐条列出
+        (res.redeemed || []).forEach((x) => out.push('· 档位 ' + esc(String(x.tier)) + '：' + (x.ok ? '✓' : '✗ ' + esc(String(x.message || '')))));
+        (res.draws || []).forEach((x, i) => out.push('· 第 ' + (i + 1) + ' 抽：' + (x.ok ? (x.already ? '已处理（去重）' : '✓') : '✗ ' + esc(String(x.message || '')))));
+        if (res.data) out.push('<pre class="mono" style="font-size:11px;max-height:160px;overflow:auto">' + esc(JSON.stringify(res.data, null, 1).slice(0, 800)) + '</pre>');
+      }
+    } catch (e) {
+      out.push('✗ ' + esc(String(e)));
+    }
+    if (box0) box0.innerHTML = '<div class="note">' + (out.join('<br>') || '无结果') + '</div>';
+    return;
+  }
 
   // health / travel：用统一的结果弹层，逐条显示
   const title = kind === 'health' ? '一键健康检查' : '猫猫旅行与领奖';

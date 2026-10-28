@@ -28,6 +28,9 @@ pub mod proxy;
 pub mod wb;
 pub mod wb_growth;
 pub mod lobster_checkin;
+pub mod wb_checkin;
+/// 重导出 reqwest::Client，供上层 crate（aigw-server）在签名里引用而不必自加依赖。
+pub use reqwest::Client as HttpClient;
 pub mod commandcode;
 pub mod accio;
 pub mod autoclaw;
@@ -91,6 +94,18 @@ pub(crate) const NONSTREAM_TOTAL: Duration = Duration::from_secs(180);
 /// `budget` 传该请求实际生效的超时（调用点各自的 timeout/read_timeout），别写死一个数。
 pub fn network_hint(e: &reqwest::Error, budget: Duration) -> String {
     let base = format!("{e}");
+    // ★ TLS 证书问题要单独说：实测 api.tokenrouter.com 证书过期，reqwest 报
+    //   CERT_HAS_EXPIRED，而旧文案只说「无法连接上游（检查本机代理/网络）」——
+    //   用户会去查自己的代理、重配凭据，白白折腾。这其实是**上游站点**的问题，
+    //   本地做任何事都修不好。
+    {
+        let low = base.to_lowercase();
+        if low.contains("certificate") || low.contains("cert_has_expired") || low.contains("cert") {
+            return format!(
+                "上游 TLS 证书有问题（过期/域名不匹配/链不完整）：{base}。这是**上游站点**的问题，与你的网络和凭据无关，通常只能等上游续期"
+            );
+        }
+    }
     if e.is_timeout() {
         return format!(
             "上游在 {:.0}s 内没有响应（超时）：{base}。可能是该上游当前很慢或不可用，可换模型/平台重试；若长期如此请在「接入源」里停用该平台。",
@@ -101,6 +116,32 @@ pub fn network_hint(e: &reqwest::Error, budget: Duration) -> String {
         return format!("无法连接上游（检查本机代理/网络）：{base}");
     }
     base
+}
+
+/// 验活结论。**三态而不是 bool**：把「探不了」和「凭据死了」混成一个 false，
+/// 会把活凭据报成失效（真实事故：wb 撞 /models 404 被报「鉴权失效」，用户反复重登）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    /// 明确可用（拿到清单 / 明确的鉴权通过响应）
+    Alive,
+    /// 明确失效（401/403、业务码判失效）
+    Dead(String),
+    /// **无法判定**：端点不存在（404/405）、响应不是 API JSON（HTML 首页）、网络失败。
+    /// 语义是「验活这件事本身没做成」——绝不写成「凭据坏了」。
+    Unknown(String),
+}
+
+impl VerifyOutcome {
+    pub fn is_alive(&self) -> bool {
+        matches!(self, VerifyOutcome::Alive)
+    }
+    pub fn describe(&self) -> String {
+        match self {
+            VerifyOutcome::Alive => "验活通过 ✓ 凭据可用".to_string(),
+            VerifyOutcome::Dead(w) => format!("验活未通过：{w}"),
+            VerifyOutcome::Unknown(w) => format!("无法验活（不代表凭据失效）：{w}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -353,64 +394,92 @@ impl OutClient {
         spec: &ProviderSpec,
         secret: &str,
         domain: &str,
-        body: &[u8],
+        _body: &[u8],
     ) -> reqwest::RequestBuilder {
-        const DESKTOP_VERSION: &str = "5.5.6";
-        const CLI_VERSION: &str = "2.137.1";
-        // ★ 2026-10-26（P3 补遗，一手证据来自 workbuddy2api internal/upstream/headers.go）：
-        // **平台段（UA 第二段）必须按 realm 切换**——CN 用 `WorkBuddy`，
-        // 国际版用官方 productName `WorkBuddy AI`（逆向证据：
-        // `WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2`）。
-        // 国际版账号送错平台段（发 `WorkBuddy`）会触发上游 403 code=11140
-        // "request illegal" 风控——这是实测过的硬约束，不是猜测。
+        // ★★ 2026-10-28 对齐 Agent2API 5.8.4 抓包升级（workbuddy2api-hub #381）：
+        // 国际版上游 2026-10 起在对话链路上线**渠道校验**——缺会话头族
+        // （X-Conversation-ID / -Request-ID / -Message-ID / -Root-Request-ID）
+        // 回 400 / code 11-128（「可能不是官方客户端发出的」）。同时按 5.8.4
+        // mitmproxy 抓包修正了多处身份细节（参考实现 workbuddy/adapter.rs
+        // chat_headers，本函数与其逐项对齐）：
+        //   1. UA 按地区取对话链路专用值（intl：WorkBuddy/5.8.4 workbuddy-ai/5.8.4
+        //      CLI/2.161.0；产品段是**小写连字符** workbuddy-ai，不是 WorkBuddy AI）；
+        //   2. X-IDE-Name/Type **两版都是 WorkBuddy**（v2 旧版给 intl 发 WorkBuddy AI
+        //      是错的——product_name 才是 WorkBuddy AI，而 X-Product=SaaS）；
+        //   3. X-IDE-Version 对话链路用 chat_ide_version（intl 5.8.4）——过旧版本号
+        //      本身就是网关特征；
+        //   4. 会话头族**每次请求现生成**（会话=带连字符 UUID、消息=32 hex）——上游
+        //      不拿这些 id 存历史也不做跨请求关联，要的是「有」而不是「稳定」；
+        //      恒定派生值（旧实现从 secret 派生）本身就是网关指纹；
+        //   5. **不再发 X-Session-ID**：官方对话请求不带它，v2 旧版发的恒定派生值
+        //      是另一处网关指纹；
+        //   6. 补 X-Agent-Purpose/Type、X-Private-Data=true、Origin/Referer、
+        //      intl 的 Accept-Language=en-US。
         let is_intl = domain.contains("workbuddy.ai")
             || domain.contains("codebuddy.ai")
             || spec.id.ends_with("-intl");
-        let brand = if is_intl { "WorkBuddy AI" } else { "WorkBuddy" };
+        // 对话链路身份（地区差异化；X-IDE-Name/Type 两版同为 WorkBuddy）
+        let (chat_ua, ide_version, accept_lang) = if is_intl {
+            (
+                "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0",
+                "5.8.4",
+                "en-US",
+            )
+        } else {
+            (
+                "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1",
+                "5.5.4",
+                "zh-CN",
+            )
+        };
         let _ = spec;
         let digest = Self::sha256_hex(secret.as_bytes());
         let uid = digest[..16].to_string();
         let device = |salt: &str| Self::sha256_hex(format!("{salt}:{uid}").as_bytes())[..36].to_string();
-        let trace = digest[..32].to_string();
-        let mid = Self::sha256_hex(format!("{digest}:msg").as_bytes());
-        let mid = mid[..32].to_string();
-        let span = mid[..16].to_string();
-        let conv = serde_json::from_slice::<Value>(body)
-            .ok()
-            .map(|v| Self::wb_turn_key(&v))
-            .unwrap_or_default();
+        // 会话头族：每请求现生成（理由见函数头 4）
+        let conversation_id = {
+            // 带连字符 UUID 形态（8-4-4-4-12）；随机来源复用 rand_hex
+            let h = Self::rand_hex(32);
+            format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+        };
+        let message_id = Self::rand_hex(32);
+        let conversation_request_id = Self::rand_hex(32);
+        let trace = Self::rand_hex(32);
+        let span = trace[..16].to_string();
+        // Origin/Referer 跟域名走（渠道校验按站点认）
+        let origin = if domain.is_empty() {
+            if is_intl { "https://www.workbuddy.ai".to_string() } else { "https://copilot.tencent.com".to_string() }
+        } else {
+            format!("https://{domain}")
+        };
         let rb = rb
-            .header(
-                "User-Agent",
-                format!("{brand}/{DESKTOP_VERSION} {brand}/{DESKTOP_VERSION} CLI/{CLI_VERSION}"),
-            )
-            .header("X-IDE-Name", brand)
-            .header("X-IDE-Type", brand)
+            .header("User-Agent", chat_ua)
+            .header("X-IDE-Name", "WorkBuddy")
+            .header("X-IDE-Type", "WorkBuddy")
+            .header("X-IDE-Version", ide_version)
             .header("X-Product", "SaaS")
-            .header("X-IDE-Version", DESKTOP_VERSION)
             .header("X-CodeBuddy-Request", "1")
             .header("X-Requested-With", "XMLHttpRequest")
-            .header("Accept-Language", "zh-CN")
-            .header("X-Private-Data", "false")
+            .header("Accept-Language", accept_lang)
+            .header("X-Private-Data", "true")
             .header("X-User-Id", &uid)
             .header("X-Machine-ID", device("machine"))
-            .header("X-Session-ID", device("session"))
-            .header("X-Request-ID", &mid)
-            .header("X-Conversation-Message-ID", &mid)
+            .header("X-Agent-Intent", "craft")
+            .header("X-Agent-Purpose", "conversation")
+            .header("X-Agent-Type", "main")
+            .header("Origin", &origin)
+            .header("Referer", format!("{origin}/"))
+            .header("X-Conversation-ID", &conversation_id)
+            .header("X-Conversation-Request-ID", &conversation_request_id)
+            .header("X-Root-Request-ID", &conversation_request_id)
+            .header("X-Conversation-Message-ID", &message_id)
+            .header("X-Request-ID", &message_id)
             .header("X-B3-TraceId", &trace)
             .header("X-B3-SpanId", &span)
             .header("X-B3-Sampled", "1")
             .header("X-Trace-ID", &trace)
             .header("b3", format!("{trace}-{span}-1"))
-            .header("traceparent", format!("00-{trace}-{span}-01"))
-            .header("X-Agent-Intent", "craft");
-        let rb = if conv.is_empty() {
-            rb
-        } else {
-            let rk = if conv.len() > 32 { &conv[..32] } else { conv.as_str() };
-            rb.header("X-Conversation-Request-ID", rk)
-                .header("X-Root-Request-ID", rk)
-        };
+            .header("traceparent", format!("00-{trace}-{span}-01"));
         if domain.is_empty() {
             rb
         } else {
@@ -418,41 +487,6 @@ impl OutClient {
         }
     }
 
-    /// WorkBuddy 的「对话轮」键：优先客户端显式的 conversation 标识，其次最后一条 user
-    /// 消息的文本摘要（对齐官方语义：同一次用户发送内的多轮调用恒等，用户发下一条就换）。
-    fn wb_turn_key(v: &Value) -> String {
-        for k in ["conversation_id", "conversationId", "prompt_cache_key"] {
-            if let Some(s) = v.get(k).and_then(|x| x.as_str()) {
-                if !s.is_empty() {
-                    return s.to_string();
-                }
-            }
-        }
-        let msgs = match v.get("messages").and_then(|m| m.as_array()) {
-            Some(m) => m,
-            None => return String::new(),
-        };
-        for m in msgs.iter().rev() {
-            if m.get("role").and_then(|r| r.as_str()) != Some("user") {
-                continue;
-            }
-            let text = match m.get("content") {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Array(a)) => a
-                    .iter()
-                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(""),
-                _ => String::new(),
-            };
-            if text.is_empty() {
-                return String::new();
-            }
-            let h = Self::sha256_hex(text.as_bytes());
-            return format!("u{}-{}", msgs.len(), &h[..16]);
-        }
-        String::new()
-    }
     /// 非加密安全随机 hex（Loomy traceparent 幂等用，足够）。
     fn rand_hex(n: usize) -> String {
         use rand::Rng;
@@ -743,37 +777,126 @@ impl OutClient {
         }
     }
     /// 账号验活：按 upstream_kind 分派到各平台 adapter（cookie 平台走真实轻量端点）。
-    pub async fn verify_account(&self, spec: &ProviderSpec, secret: &str) -> bool {
+    /// 验活（对外入口）：**二次确认**防网络抖动误判。
+    ///
+    /// ★ 为什么需要：20 个 adapter 的 verify 都是「请求 Ok 就按判据给 bool，
+    ///   请求 Err 一律 false」——把「网络抖动/超时」和「凭据被拒」混成同一个 false。
+    ///   用户网络不好时点「检查」，好账号会被标成「鉴权失效」并写进号池健康，
+    ///   白白重登一次。这里做一层兜底：第一次判死时**隔 300ms 再验一次**：
+    ///   · 第二次活 → 判活（第一次是抖动）；
+    ///   · 第二次无法判定 → 判无法判定（网络确实不通）；
+    ///   · 第二次仍死 → 判死（两次一致，可信）。
+    ///   代价：仅「第一次失败」时多一次请求（用户手动点检查才发生），换来不误杀。
+    pub async fn verify_account(&self, spec: &ProviderSpec, secret: &str) -> VerifyOutcome {
+        let first = self.verify_once(spec, secret).await;
+        if matches!(first, VerifyOutcome::Dead(_)) {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            return match self.verify_once(spec, secret).await {
+                VerifyOutcome::Unknown(w) => VerifyOutcome::Unknown(w),
+                second => second,
+            };
+        }
+        first
+    }
+
+    async fn verify_once(&self, spec: &ProviderSpec, secret: &str) -> VerifyOutcome {
+        // ★ wb 族按 **signer** 认，不是 upstream_kind：它们的 upstream_kind 是 openai
+        //   （同协议透传），真正的身份标记是 signer="wb"。按 kind 分派会让这个分支
+        //   永远不命中 —— 实测症状：wb 的验活消息里出现「对话探测」，说明它走的是
+        //   通用 verify_openai，而 wb::verify（带 X-Domain 的 get-user-resource）
+        //   从未被调用。
+        if spec.signer == "wb" {
+            return wb::verify(&self.http, spec, secret).await;
+        }
         match spec.upstream_kind.as_str() {
-            "doubao" => doubao::verify(&self.http, spec, secret).await,
-            "yuanbao" => yuanbao::verify(&self.http, spec, secret).await,
-            "kuku" => kuku::verify(&self.http, spec, secret).await,
-            "metaso" => metaso::verify(&self.http, spec, secret).await,
-            "qwen-web" => qwen::verify(&self.http, spec, secret).await,
-            "mimo" => mimo::verify(&self.http, spec, secret).await,
-            "kiro" => kiro::verify(&self.http, spec, secret).await,
-            "cloudcode" => cloudcode::verify(&self.http, spec, secret).await,
-            "deepseek-web" => deepseek::verify(&self.http, spec, secret).await,
-            "opencode" => opencode::verify(&self.http, spec, secret).await,
-            "qoder" => qoder::verify(&self.http, spec, secret).await,
-            "trae" => trae::verify(&self.http, spec, secret).await,
-            "coze" => coze::verify(&self.http, spec, secret).await,
-        "devin" => devin::verify(&self.http, spec, secret).await,
+            "doubao" => Self::b2o(doubao::verify(&self.http, spec, secret).await),
+            "yuanbao" => Self::b2o(yuanbao::verify(&self.http, spec, secret).await),
+            "kuku" => Self::b2o(kuku::verify(&self.http, spec, secret).await),
+            "metaso" => Self::b2o(metaso::verify(&self.http, spec, secret).await),
+            "qwen-web" => Self::b2o(qwen::verify(&self.http, spec, secret).await),
+            "mimo" => Self::b2o(mimo::verify(&self.http, spec, secret).await),
+            "kiro" => Self::b2o(kiro::verify(&self.http, spec, secret).await),
+            "cloudcode" => Self::b2o(cloudcode::verify(&self.http, spec, secret).await),
+            "deepseek-web" => Self::b2o(deepseek::verify(&self.http, spec, secret).await),
+            "opencode" => Self::b2o(opencode::verify(&self.http, spec, secret).await),
+            "qoder" => Self::b2o(qoder::verify(&self.http, spec, secret).await),
+            "trae" => Self::b2o(trae::verify(&self.http, spec, secret).await),
+            "coze" => Self::b2o(coze::verify(&self.http, spec, secret).await),
+        "devin" => Self::b2o(devin::verify(&self.http, spec, secret).await),
+        // ★ wb 族（WorkBuddy / CodeBuddy）：通用 verify_openai 会去探 /models，
+        //   而 copilot.tencent.com 没有那个端点 —— 活凭据被判「鉴权失效」（假阴性），
+        //   用户重登多少次都没用。用积分查询端点判（已验证可用的轻量鉴权探测）。
             // ★ 2026-10-26 补齐五个新 adapter 的验活分派。漏了会掉进 verify_openai
             //   通用兜底（GET models_path）：orcaterm/autoclaw 没有 /models → 好凭据
             //   也被报「验活失败」（假阴性）；commandcode 的目录是公开的 → 错 key 也
             //   「验活通过」（假阳性）。两个方向都错，必须逐家分派。
-            "commandcode" => commandcode::verify(&self.http, spec, secret).await,
-            "orcaterm" => orcaterm::verify(&self.http, spec, secret).await,
-            "monkeycode" => monkeycode::verify(&self.http, spec, secret).await,
-            "accio" => accio::verify(&self.http, spec, secret).await,
-            "autoclaw" => autoclaw::verify(&self.http, spec, secret).await,
+            "commandcode" => Self::b2o(commandcode::verify(&self.http, spec, secret).await),
+            "orcaterm" => Self::b2o(orcaterm::verify(&self.http, spec, secret).await),
+            "monkeycode" => Self::b2o(monkeycode::verify(&self.http, spec, secret).await),
+            "accio" => Self::b2o(accio::verify(&self.http, spec, secret).await),
+            "autoclaw" => Self::b2o(autoclaw::verify(&self.http, spec, secret).await),
             _ => self.verify_openai(spec, secret).await,
         }
     }
 
     /// 通用 openai 透传验活：GET models_path，2xx 即有效。
-    async fn verify_openai(&self, spec: &ProviderSpec, secret: &str) -> bool {
+/// 把「探 /models 的响应」判成三态。
+///
+/// ★ 本轮最重要的一处语义修正（真实事故驱动）：
+///   · 旧实现 status.is_success() → 404 判死（6 个源的好凭据被误杀：
+///     mistral-codestral / perplexity / voyageai / wps / codearts / web-glm 都没有
+///     /models 端点），而 200 HTML（apk-nano 首页）与 200 公开清单（cline 免凭据）
+///     又全判活（错 key 也能通过）；
+///   · 现在：401/403 判死；404/405/501（端点不存在）与「2xx 但不是 JSON 清单」
+///     判**无法判定**——验活没做成 ≠ 凭据坏了。
+/// 老 adapter 的 bool 结论桥接成三态：true=活，false=**判死**。
+///
+/// ★ 为什么 adapter 保持 bool 而不逐个改三态：它们内部各自实现了「用该平台的
+///   真实鉴权端点探测」（如 wb 走 get-user-resource、kuku 走 passport），探对了
+///   才返回 bool，语义本来就够；真正会误判的只有通用 verify_openai（探 /models）。
+fn b2o(ok: bool) -> VerifyOutcome {
+    if ok {
+        VerifyOutcome::Alive
+    } else {
+        VerifyOutcome::Dead("上游拒绝了该凭据".to_string())
+    }
+}
+
+pub fn classify_verify_probe(status: u16, body: &str) -> VerifyOutcome {
+    match status {
+        401 | 403 => VerifyOutcome::Dead(format!("HTTP {status}（上游明确拒绝该凭据）")),
+        404 | 405 | 501 => VerifyOutcome::Unknown(format!(
+            "该平台没有 /models 端点（HTTP {status}），无法用清单验活；凭据是否有效请用一次真实对话确认"
+        )),
+        200..=299 => match serde_json::from_str::<Value>(body) {
+            Ok(v) if v.is_object() => {
+                let has_list = v.get("data").map(|d| d.is_array()).unwrap_or(false)
+                    || v.get("models").map(|d| d.is_array()).unwrap_or(false);
+                if has_list {
+                    VerifyOutcome::Alive
+                } else {
+                    VerifyOutcome::Unknown(
+                        "清单响应里没有 data/models 数组（可能不需要凭据或是其它端点），无法据此判活".to_string()
+                    )
+                }
+            }
+            _ => VerifyOutcome::Unknown(
+                "上游返回的不是 JSON 清单（可能是登录页/首页），无法据此判活".to_string()
+            ),
+        },
+        s if s >= 500 => VerifyOutcome::Unknown(format!("上游 {s}（服务端故障，与凭据无关）")),
+        s => VerifyOutcome::Unknown(format!("上游 HTTP {s}，无法据此判定凭据")),
+    }
+}
+
+    async fn verify_openai(&self, spec: &ProviderSpec, secret: &str) -> VerifyOutcome {
+        // ★ verify_chat=true 的源**跳过清单探测**：它们的 /models 是公开的，
+        //   拿它验活等于「错 key 也通过」（cline 实测：无凭据 200 + 469 个模型）。
+        if spec.verify_chat && spec.chat_supported {
+            if let Some(o) = self.verify_via_chat(spec, secret).await {
+                return o;
+            }
+        }
         let path = if spec.models_path.is_empty() {
             "/models".to_string()
         } else {
@@ -781,10 +904,106 @@ impl OutClient {
         };
         let url = format!("{}{}", spec.base_url, path);
         let rb = Self::apply_headers(self.http.get(&url), spec, secret, "", &[]);
-        match rb.timeout(std::time::Duration::from_secs(15)).send().await {
-            Ok(r) => r.status().is_success(),
-            Err(_) => false,
+        let r = match rb.timeout(std::time::Duration::from_secs(15)).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return VerifyOutcome::Unknown(format!(
+                    "网络请求失败（{}）",
+                    network_hint(&e, std::time::Duration::from_secs(15))
+                ))
+            }
+        };
+        let status = r.status().as_u16();
+        let body = r.text().await.unwrap_or_default();
+        let outcome = Self::classify_verify_probe(status, &body);
+        // ★ 二段探测：/models 探不到（404/405 —— 该平台根本没这个端点）时，
+        //   回退到「一次最小对话」判鉴权层。理由：
+        //   · 用户点的是「检查」，他要的答案是「我的 key 到底能不能用」，
+        //     「无法验活」虽然诚实但没回答问题（perplexity / codestral / codearts
+        //     都属于这类 —— 有对话端点、没有清单端点）；
+        //   · 代价是一次 max_tokens=1 的请求（约 1 token），用户主动点才发生，可以接受；
+        //   · 只对 **kind=openai 且 chat_supported** 的源做：其它协议（chatglm 要签名、
+        //     纯 embedding 源根本没有对话端点）用通用请求探只会得到噪音。
+        // ① 清单探不到（Unknown）→ 二段对话探测（前面已处理）。
+        if matches!(outcome, VerifyOutcome::Unknown(_))
+            && spec.upstream_kind == "openai"
+            && spec.chat_supported
+        {
+            if let Some(chat_outcome) = self.verify_via_chat(spec, secret).await {
+                return chat_outcome;
+            }
         }
+        // ② 清单**通过**也不能证明凭据有效 —— 大量平台的 /models 是公开的
+        //    （OpenRouter / NVIDIA / HuggingFace / cline…，实测无凭据就回完整清单），
+        //    错 key 会被判「验活通过」，用户一对话才 401。
+        //    对「需要凭据 + 支持对话」的 openai 源补一次对话探测**证伪**；
+        //    只有明确结论（活/死）才采用，Unknown（模型名不对等）沿用原判定——不误杀。
+        if outcome.is_alive()
+            && spec.upstream_kind == "openai"
+            && spec.chat_supported
+            && !matches!(spec.auth, aigw_registry::AuthKind::Anon)
+        {
+            if let Some(chat_outcome) = self.verify_via_chat(spec, secret).await {
+                match chat_outcome {
+                    VerifyOutcome::Unknown(_) => {}
+                    definitive => return definitive,
+                }
+            }
+        }
+        outcome
+    }
+
+    /// 最小对话探测：发一条 `max_tokens=1` 的 ping，按**鉴权层**的答复判活。
+    ///
+    /// 判据的分界是「鉴权有没有过」而不是「请求成不成功」：
+    ///   · 401/403 → 明确失效；
+    ///   · 2xx → 鉴权通过（模型真答了一个 token）；
+    ///   · **400/422 → 鉴权通过**（上游说「你的参数不对」，前提是它先认了你的 key）；
+    ///   · **429 → 鉴权通过**（能被限流说明身份已被识别）；
+    ///   · 404 → 无法判定（模型名不对或端点不存在，与凭据无关）；
+    ///   · 5xx / 网络失败 → 无法判定。
+    /// 返回 `None` 表示「这次探测本身没做成」，由调用方保留原结论。
+    async fn verify_via_chat(&self, spec: &ProviderSpec, secret: &str) -> Option<VerifyOutcome> {
+        let path = spec.chat_path();
+        let url = format!("{}{}", spec.base_url, path);
+        let model = spec
+            .models
+            .iter()
+            .map(|m| m.trim())
+            .find(|m| !m.is_empty())
+            .unwrap_or("gpt-4o-mini");
+        let payload = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": false
+        });
+        let rb = Self::apply_headers(self.http.post(&url), spec, secret, "", b"");
+        let r = match rb
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+        let status = r.status().as_u16();
+        let body = r.text().await.unwrap_or_default();
+        Some(match status {
+            401 | 403 => VerifyOutcome::Dead(format!("HTTP {status}（对话探测：上游明确拒绝该凭据）")),
+            // 鉴权层通过的两个强信号：限流与服务端说「你的参数不对」
+            429 => VerifyOutcome::Alive,
+            400 | 422 => VerifyOutcome::Alive,
+            200..=299 => VerifyOutcome::Alive,
+            404 => VerifyOutcome::Unknown(format!(
+                "对话探测 HTTP 404（模型名或端点不存在，与凭据无关）：{}",
+                body.chars().take(80).collect::<String>()
+            )),
+            s if s >= 500 => VerifyOutcome::Unknown(format!("对话探测 HTTP {s}（上游故障，与凭据无关）")),
+            s => VerifyOutcome::Unknown(format!("对话探测 HTTP {s}，无法据此判定凭据")),
+        })
     }
 
     /// 流式转发：按 upstream_kind 分派。返回 `(下游流, 统计接收端)`。
@@ -1076,7 +1295,13 @@ impl OutClient {
         body: &[u8],
     ) -> Result<
         (
-            impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send + 'static,
+            std::pin::Pin<
+                Box<
+                    dyn futures_util::Stream<Item = Result<Bytes, std::io::Error>>
+                        + Send
+                        + 'static,
+                >,
+            >,
             mpsc::Receiver<StreamStat>,
         ),
         RelayError,
@@ -1098,6 +1323,24 @@ impl OutClient {
                 class: ErrorClass::from_status(status),
                 body: text.chars().take(800).collect(),
             });
+        }
+        // ★ 上游无视 stream:true 回了非 SSE（自建网关 / 部分免费站很常见）：
+        //   旧实现把裸 JSON 直接塞进 SSE 内容类型往外发 —— 客户端（OpenAI SDK /
+        //   Claude Code / Codex）会按 SSE 解析而拿到一坨 JSON，报
+        //   「stream ended without [DONE]」或直接抛解析异常。实测复现：上游回
+        //   {"id":"c1","object":"chat.completion",…}，网关 content-type 却是
+        //   text/event-stream，body 里没有 data: 前缀。
+        //   修法：识别出非 SSE，整包读下、包成「一帧 data + [DONE]」再发，
+        //   统计口径复用 SseParser（与正常流一致，台账不会因此记 0 token）。
+        let is_sse = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_ascii_lowercase().contains("event-stream"))
+            .unwrap_or(false);
+        if !is_sse {
+            let text = resp.text().await.unwrap_or_default();
+            return Ok(wrap_json_as_sse(text, body.len()));
         }
         Ok(tap_passthrough(resp, body.len()))
     }
@@ -1743,13 +1986,46 @@ fn biz_fingerprint(spec: &ProviderSpec, v: &Value) -> Option<ErrorClass> {
 }
 
 /// 上游 SSE → 原样透传 + tap 统计（mpsc 回传）。
-fn tap_passthrough(
-    resp: reqwest::Response,
-    in_bytes: usize,
-) -> (
-    impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send + 'static,
-    mpsc::Receiver<StreamStat>,
-) {
+/// 把「上游无视 stream:true 回来的整包 JSON」包装成单帧 SSE。
+///
+/// 网关已经用 `text/event-stream` 回了客户端，就必须给客户端 SSE 帧——
+/// 否则 SDK 按 SSE 解析会崩。统计口径与 `tap_passthrough` 一致（同一个 SseParser），
+/// 避免这类平台在用量台账里恒记 0 token。
+fn wrap_json_as_sse(text: String, in_bytes: usize) -> (BoxedByteStream, mpsc::Receiver<StreamStat>) {
+    let (tx, rx) = mpsc::channel::<StreamStat>(1);
+    let t = text.trim().to_string();
+    let mut stat = StreamStat::default();
+    if !t.is_empty() {
+        let mut parser = SseParser::new();
+        let probe = format!("data: {t}\n\n");
+        for ev in parser.feed(probe.as_bytes()) {
+            stat.absorb(&ev);
+        }
+        stat.finish_reason = parser.finish_reason.clone();
+        stat.tokens_in = parser.prompt_tokens;
+        stat.tokens_out = parser.completion_tokens;
+    }
+    stat.fill_missing_tokens(in_bytes);
+    stat.saw_done = true;
+    let _ = tx.try_send(stat);
+    let framed = if t.is_empty() {
+        "data: [DONE]\n\n".to_string()
+    } else {
+        format!("data: {t}\n\ndata: [DONE]\n\n")
+    };
+    (
+        Box::pin(futures_util::stream::once(async move {
+            Ok(Bytes::from(framed))
+        })),
+        rx,
+    )
+}
+
+type BoxedByteStream = std::pin::Pin<
+    Box<dyn futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static>,
+>;
+
+fn tap_passthrough(resp: reqwest::Response, in_bytes: usize) -> (BoxedByteStream, mpsc::Receiver<StreamStat>) {
     let (tx, rx) = mpsc::channel::<StreamStat>(1);
     let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     tokio::spawn(async move {
@@ -1822,7 +2098,7 @@ fn tap_passthrough(
         }
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(bytes_rx);
-    (stream, rx)
+    (Box::pin(stream), rx)
 }
 
 /// 流式 usage 估算。
@@ -2166,6 +2442,284 @@ pub fn classify_with_biz(status: u16, body: &str) -> ErrorClass {
 
 #[cfg(test)]
 mod tests {
+
+    /// ★ 上游无视 stream:true 回整包 JSON 时，必须包装成合法 SSE ——
+    /// 否则客户端（OpenAI SDK / Claude Code）按 SSE 解析会崩。
+    #[tokio::test]
+    async fn json_response_is_wrapped_into_sse() {
+        use futures_util::StreamExt;
+        let body = r#"{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#;
+        let (mut s, mut rx) = wrap_json_as_sse(body.to_string(), 40);
+        let mut acc = String::new();
+        while let Some(item) = s.next().await {
+            acc += &String::from_utf8_lossy(&item.unwrap());
+        }
+        assert!(acc.starts_with("data: {"), "要以 data: 帧开头: {acc}");
+        assert!(acc.ends_with("data: [DONE]\n\n"), "要以 [DONE] 收尾: {acc}");
+        assert!(acc.contains("\"content\":\"hi\""), "原文要完整带出: {acc}");
+        let stat = rx.recv().await.expect("统计应收口");
+        assert!(stat.saw_done, "应标记已见 [DONE]");
+        // 统计口径要吃到 usage（否则这类平台的台账恒记 0 token）
+        assert_eq!(stat.tokens_in, 3, "prompt_tokens 应从 usage 取到");
+        assert_eq!(stat.tokens_out, 2, "completion_tokens 应从 usage 取到");
+    }
+
+    /// 空 body 也不能漏 [DONE]（客户端等它收尾，缺了会挂到超时）。
+    #[tokio::test]
+    async fn empty_json_response_still_terminates_sse() {
+        use futures_util::StreamExt;
+        let (mut s, _rx) = wrap_json_as_sse(String::new(), 0);
+        let mut acc = String::new();
+        while let Some(item) = s.next().await {
+            acc += &String::from_utf8_lossy(&item.unwrap());
+        }
+        assert_eq!(acc, "data: [DONE]\n\n");
+    }
+
+
+
+
+
+
+    /// ★ 二次确认：第一次失败（网络抖动/上游临时抽风）不该直接判死。
+    /// mock 第一次 401、第二次 200 —— 若没有二次确认，好账号会被标「鉴权失效」。
+    #[tokio::test]
+    async fn verify_retries_once_before_declaring_dead() {
+        use axum::routing::get as g_route;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let app = axum::Router::new().route(
+            "/models",
+            g_route(move || {
+                let h = hits2.clone();
+                async move {
+                    let n = h.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        (axum::http::StatusCode::UNAUTHORIZED, "{\"error\":\"blip\"}")
+                    } else {
+                        (
+                            axum::http::StatusCode::OK,
+                            r#"{"object":"list","data":[{"id":"m1"}]}"#,
+                        )
+                    }
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await });
+        let spec: ProviderSpec = serde_json::from_value(serde_json::json!({
+            "id": "rt", "name": "rt", "enabled": true, "auth": "api_key",
+            "base_url": format!("http://{addr}"), "format": "openai",
+            "models": ["m1"], "models_policy": "static", "stream_dialect": "sse_delta",
+            "chat_supported": false
+        }))
+        .expect("spec");
+        let client = OutClient::new();
+        let o = client.verify_account(&spec, "k").await;
+        assert!(matches!(o, VerifyOutcome::Alive), "第一次抖动不该判死: {o:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "应该恰好重试一次");
+    }
+
+    /// ★ 三段式验活的第三段：**清单通过也要证伪**。
+    /// 大量平台 /models 公开，错 key 也会拿到完整清单（实测 59 个源无凭据 200）。
+    /// 补一次对话探测：明确死→判死；明确活→判活；无结论→沿用清单判定（不误杀）。
+    #[tokio::test]
+    async fn alive_models_is_challenged_by_chat_probe() {
+        use axum::routing::{get as g_route, post as p_route};
+        let mk = |chat_status: u16| async move {
+            let app = axum::Router::new()
+                .route(
+                    "/models",
+                    g_route(|| async {
+                        ([(axum::http::header::CONTENT_TYPE, "application/json")],
+                         r#"{"object":"list","data":[{"id":"m1"}]}"#)
+                    }),
+                )
+                .route(
+                    "/chat/completions",
+                    p_route(move || async move {
+                        (axum::http::StatusCode::from_u16(chat_status).unwrap(),
+                         [(axum::http::header::CONTENT_TYPE, "application/json")],
+                         "{\"error\":{\"message\":\"probe\"}}")
+                    }),
+                );
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(l, app).await });
+            addr
+        };
+        let mk_spec = |base: &str, auth: &str| {
+            serde_json::from_value::<ProviderSpec>(serde_json::json!({
+                "id": "pa", "name": "pa", "enabled": true, "auth": auth,
+                "base_url": base, "format": "openai", "models": ["m1"],
+                "models_policy": "static", "stream_dialect": "sse_delta",
+                "chat_supported": true
+            }))
+            .expect("spec")
+        };
+        let client = OutClient::new();
+        // 公开清单 + 对话 401 → 必须判死（旧实现会假阳性判活）
+        let addr = mk(401).await;
+        let o = client
+            .verify_account(&mk_spec(&format!("http://{addr}"), "api_key"), "bad")
+            .await;
+        assert!(matches!(o, VerifyOutcome::Dead(_)), "公开清单不该掩盖错 key: {o:?}");
+        // 公开清单 + 对话 200 → 判活
+        let addr = mk(200).await;
+        let o = client
+            .verify_account(&mk_spec(&format!("http://{addr}"), "api_key"), "good")
+            .await;
+        assert!(matches!(o, VerifyOutcome::Alive), "对话也通过就该判活: {o:?}");
+        // 公开清单 + 对话 404（模型名不对）→ 不误杀，沿用清单的 Alive
+        let addr = mk(404).await;
+        let o = client
+            .verify_account(&mk_spec(&format!("http://{addr}"), "api_key"), "k")
+            .await;
+        assert!(matches!(o, VerifyOutcome::Alive), "对话探测无结论时不该误杀: {o:?}");
+        // anon 源不做对话证伪（本来就没有凭据可证）
+        let addr = mk(401).await;
+        let o = client
+            .verify_account(&mk_spec(&format!("http://{addr}"), "anon"), "k")
+            .await;
+        assert!(matches!(o, VerifyOutcome::Alive), "anon 源不该被对话探测打扰: {o:?}");
+    }
+
+    /// ★ verify_chat=true 的源必须跳过 /models：某些平台清单公开（cline 实测
+    /// 无凭据 200 + 469 个模型），拿它验活等于「错 key 也通过」。
+    #[tokio::test]
+    async fn verify_chat_flag_skips_public_models_list() {
+        use axum::routing::{get as g_route, post as p_route};
+        // /models 公开返回一份合法清单；/chat 回 401（凭据无效）
+        let app = axum::Router::new()
+            .route(
+                "/models",
+                g_route(|| async {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        r#"{"object":"list","data":[{"id":"m1"},{"id":"m2"}]}"#,
+                    )
+                }),
+            )
+            .route(
+                "/chat/completions",
+                p_route(|| async {
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        r#"{"error":{"message":"invalid token"}}"#,
+                    )
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await });
+        let mk = |verify_chat: bool| {
+            let mut s: ProviderSpec = serde_json::from_value(serde_json::json!({
+                "id": "cx", "name": "cx", "enabled": true, "auth": "api_key",
+                "base_url": format!("http://{addr}"), "format": "openai",
+                "models": ["m1"], "models_policy": "static",
+                "stream_dialect": "sse_delta", "chat_supported": true,
+                "verify_chat": verify_chat
+            }))
+            .expect("spec");
+            s.models_path = String::new();
+            s
+        };
+        let client = OutClient::new();
+        // 默认路径：清单 200 公开，但**第三段探测**会用对话证伪 → 也判死。
+        // （verify_chat 字段依然有用：跳过清单探测省一次大响应，cline 的清单 469 条。）
+        let o = client.verify_account(&mk(false), "bad-key").await;
+        assert!(matches!(o, VerifyOutcome::Dead(_)), "默认路径也必须有证伪: {o:?}");
+        // verify_chat=true：跳过清单直连对话 → 同样判死
+        let o = client.verify_account(&mk(true), "bad-key").await;
+        assert!(matches!(o, VerifyOutcome::Dead(_)), "verify_chat 路径必须判死: {o:?}");
+    }
+
+    /// 二段探测判据：/models 404 时用「一次最小对话」判鉴权层。
+    /// 分界是**鉴权过没过**，不是「请求成不成功」——400/429 都算通过。
+    #[tokio::test]
+    async fn verify_falls_back_to_chat_probe_when_models_missing() {
+        use axum::routing::{get as g_route, post as p_route};
+        // mock：/models 一律 404；/chat/completions 按需返回状态码
+        let mk = |chat_status: u16| async move {
+            let app = axum::Router::new()
+                .route("/models", g_route(|| async { (axum::http::StatusCode::NOT_FOUND, "{}") }))
+                .route(
+                    "/chat/completions",
+                    p_route(move || async move {
+                        (
+                            axum::http::StatusCode::from_u16(chat_status).unwrap(),
+                            [(axum::http::header::CONTENT_TYPE, "application/json")],
+                            "{\"error\":{\"message\":\"probe\"}}",
+                        )
+                    }),
+                );
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(l, app).await });
+            addr
+        };
+        let mk_spec = |base: &str, chat_ok: bool| {
+            let mut s: ProviderSpec = serde_json::from_value(serde_json::json!({
+                "id": "px", "name": "px", "enabled": true, "auth": "api_key",
+                "base_url": base, "format": "openai", "models": ["m1"],
+                "models_policy": "static", "stream_dialect": "sse_delta",
+                "chat_supported": chat_ok
+            }))
+            .expect("spec");
+            s.models_path = String::new();
+            s
+        };
+        let client = OutClient::new();
+        // 401 → 明确失效
+        let addr = mk(401).await;
+        let spec = mk_spec(&format!("http://{addr}"), true);
+        let o = client.verify_account(&spec, "k").await;
+        assert!(matches!(o, VerifyOutcome::Dead(_)), "对话探测 401 应判死: {o:?}");
+        // 400 → 鉴权通过（上游先认了 key 才谈参数）
+        let addr = mk(400).await;
+        let spec = mk_spec(&format!("http://{addr}"), true);
+        let o = client.verify_account(&spec, "k").await;
+        assert!(matches!(o, VerifyOutcome::Alive), "对话探测 400 应判活（鉴权已过）: {o:?}");
+        // 429 → 鉴权通过（能被限流说明身份已识别）
+        let addr = mk(429).await;
+        let spec = mk_spec(&format!("http://{addr}"), true);
+        let o = client.verify_account(&spec, "k").await;
+        assert!(matches!(o, VerifyOutcome::Alive), "对话探测 429 应判活: {o:?}");
+        // chat_supported=false → **不**做对话探测，保持无法判定（别给 embedding 源发对话）
+        let addr = mk(200).await;
+        let spec = mk_spec(&format!("http://{addr}"), false);
+        let o = client.verify_account(&spec, "k").await;
+        assert!(matches!(o, VerifyOutcome::Unknown(_)), "不支持对话的源不该做对话探测: {o:?}");
+    }
+
+    /// 验活三态分类：**「探不了」绝不能判死**（6 个源的好凭据曾被 404 误杀），
+    /// 「200 但不是 API 清单」也绝不能判活（apk-nano 首页 / cline 公开清单）。
+    #[test]
+    fn classify_verify_probe_is_three_state() {
+        use VerifyOutcome::*;
+        // 明确拒绝 → 死
+        assert!(matches!(OutClient::classify_verify_probe(401, ""), Dead(_)));
+        assert!(matches!(OutClient::classify_verify_probe(403, ""), Dead(_)));
+        // 端点不存在 → 无法判定（不判死）
+        for s in [404u16, 405, 501] {
+            assert!(matches!(OutClient::classify_verify_probe(s, ""), Unknown(_)), "HTTP {s} 不该判死");
+        }
+        // 2xx + 真清单 → 活
+        let list = r#"{"object":"list","data":[{"id":"gpt-5"}]}"#;
+        assert!(matches!(OutClient::classify_verify_probe(200, list), Alive));
+        let google = r#"{"models":[{"name":"models/gemini-2.5-pro"}]}"#;
+        assert!(matches!(OutClient::classify_verify_probe(200, google), Alive));
+        // 2xx + HTML 首页（apk-nano）→ 无法判定（旧实现判活 = 假阳性）
+        assert!(matches!(OutClient::classify_verify_probe(200, "<!doctype html><html></html>"), Unknown(_)));
+        // 2xx + JSON 但没有清单数组（cline 公开响应是这个形状）→ 无法判定
+        assert!(matches!(OutClient::classify_verify_probe(200, r#"{"ok":true}"#), Unknown(_)));
+        // 5xx → 无法判定（上游故障与凭据无关）
+        assert!(matches!(OutClient::classify_verify_probe(502, ""), Unknown(_)));
+    }
+
 
 
     /// 流式 usage 解析必须支持别名（与非流式 dialect::extract_usage 同一口径）。

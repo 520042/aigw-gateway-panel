@@ -2180,6 +2180,13 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
                 return Json(json!({"ok": false, "message": format!("{platform} 还没有账号，先登录")})).into_response();
             }
             let mut all: Vec<Value> = Vec::new();
+            // ★ 2026-10-28（对齐 xiaofan6ya/wb2api admin/backend.py）：
+            //   带 growth_action 时只跑**单个**成长域动作（查状态/兑换/抽奖/旅行…），
+            //   不带时跑既有的「一键全做」闭环。这样面板既能一键，也能逐步排查。
+            let single = req
+                .get("growth_action")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             for (acc_id, secret) in accounts {
                 // uid：成长任务的桌面指纹要 userId。Account 没有独立 uid 字段，
                 // 用账号 id（登录时由上游 uid 派生）当稳定标识即可——同账号恒定。
@@ -2196,10 +2203,14 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string();
-                let r = aigw_relay::wb_growth::run_all_growth(
-                    &http, base, web_base, &secret, &acc_id, &nick,
-                )
-                .await;
+                let r = if let Some(act) = single.as_deref() {
+                    run_single_growth(&http, base, web_base, &secret, &acc_id, act, &req).await
+                } else {
+                    aigw_relay::wb_growth::run_all_growth(
+                        &http, base, web_base, &secret, &acc_id, &nick,
+                    )
+                    .await
+                };
                 all.push(json!({"account": acc_id, "result": r}));
             }
             Json(json!({"ok": true, "platform": platform, "accounts": all})).into_response()
@@ -2271,6 +2282,111 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
 ///   而且不会报错（循环里直接 continue），完全静默。抽成常量后由测试盯住它与
 ///   `wb_checkin_base` 的一致性。
 pub(crate) const WB_CREDIT_PLATFORMS: &[&str] = &["wb-gateway", "codebuddy", "wb-gateway-intl"];
+
+/// ★ 2026-10-28（对齐 xiaofan6ya/wb2api admin/backend.py）：单个成长域动作。
+///
+/// 与 `run_all_growth`（一键全做）互补：这里只跑一个动作，返回**上游原始响应**，
+/// 供面板「逐步排查 / 手动操作」用。三类动作有特殊处理：
+/// - `streak_redeem`：先查 streak 拿到可兑换档位，再逐档兑换（token 由档位+当月派生）
+/// - `lottery_draw`：先查次数，非 0 才抽（token 随机，409 duplicate 视为已处理）
+/// - `task_claim`：走 web 域（与其它动作不同域），需 `task_code` 参数
+async fn run_single_growth(
+    http: &aigw_relay::HttpClient,
+    base: &str,
+    web_base: &str,
+    secret: &str,
+    acc_id: &str,
+    action: &str,
+    req: &Value,
+) -> Value {
+    // 需要 task_code 的动作
+    if action == "task_claim" {
+        let Some(code) = req.get("task_code").and_then(|v| v.as_str()) else {
+            return json!({"ok": false, "message": "task_claim 需要 task_code 参数"});
+        };
+        return match aigw_relay::wb_checkin::claim_task_reward(http, web_base, secret, code).await {
+            Ok(v) => json!({"ok": true, "action": action, "task_code": code, "data": v}),
+            Err(e) => json!({"ok": false, "action": action, "task_code": code, "message": e}),
+        };
+    }
+
+    // 连登兑换：先查档位再逐档兑换（token 必须按 档位+当月 派生，重放安全）
+    if action == "streak_redeem" {
+        let streak = match aigw_relay::wb_checkin::growth_call(http, base, secret, "streak_status", None).await {
+            Ok(v) => v,
+            Err(e) => return json!({"ok": false, "action": action, "message": format!("查连登状态失败：{e}")}),
+        };
+        let tiers = aigw_relay::wb_checkin::eligible_redeem_tiers(&streak);
+        if tiers.is_empty() {
+            return json!({"ok": true, "action": action, "data": streak,
+                          "message": "暂无可用兑换档位（未达标或本月已领）", "redeemed": []});
+        }
+        let month = aigw_relay::wb_checkin::yyyymm_now();
+        let mut redeemed: Vec<Value> = Vec::new();
+        for tier in &tiers {
+            let token = aigw_relay::wb_checkin::redeem_token(acc_id, tier, &month);
+            let body = json!({"tier": tier, "client_token": token});
+            match aigw_relay::wb_checkin::growth_call(http, base, secret, "streak_redeem", Some(body)).await {
+                Ok(v) => redeemed.push(json!({"tier": tier, "ok": true, "data": v})),
+                Err(e) => redeemed.push(json!({"tier": tier, "ok": false, "message": e})),
+            }
+        }
+        let ok_n = redeemed.iter().filter(|r| r.get("ok").and_then(|x| x.as_bool()).unwrap_or(false)).count();
+        return json!({"ok": ok_n > 0, "action": action, "redeemed": redeemed,
+                      "message": format!("兑换 {ok_n}/{} 个档位", tiers.len())});
+    }
+
+    // 抽奖：先查次数，>0 才抽
+    if action == "lottery_draw" {
+        let chances = match aigw_relay::wb_checkin::growth_call(http, base, secret, "lottery_chances", None).await {
+            Ok(v) => v,
+            Err(e) => return json!({"ok": false, "action": action, "message": format!("查抽奖次数失败：{e}")}),
+        };
+        let n = aigw_relay::wb_checkin::lottery_balance(&chances);
+        if n <= 0 {
+            return json!({"ok": true, "action": action, "chances": 0, "data": chances,
+                          "message": "暂无免费抽奖次数"});
+        }
+        // 参考项目口径：一次最多连抽 5 次，每次一个新 token
+        let mut draws: Vec<Value> = Vec::new();
+        for _ in 0..n.min(5) {
+            let token = aigw_relay::wb_checkin::draw_token();
+            let body = json!({"client_token": token});
+            match aigw_relay::wb_checkin::growth_call(http, base, secret, "lottery_draw", Some(body)).await {
+                Ok(v) => draws.push(json!({"ok": true, "data": v})),
+                Err(e) => {
+                    let dup = e.contains("duplicate") || e.contains("409");
+                    draws.push(json!({"ok": dup, "already": dup, "message": e}));
+                    if dup { continue; }
+                    break;
+                }
+            }
+        }
+        return json!({"ok": true, "action": action, "chances": n, "draws": draws,
+                      "message": format!("抽奖 {} 次（可用 {n} 次，单轮上限 5）", draws.len())});
+    }
+
+    // 其余动作：直接透传（buddy_open 需要 count，默认 1）
+    let mut body = None;
+    if action == "buddy_open" {
+        let cnt = req.get("count").and_then(|v| v.as_i64()).unwrap_or(1).max(1);
+        body = Some(json!({"count": cnt}));
+    } else if action == "buddy_agreement" {
+        body = Some(json!({"agree": true}));
+    } else if action == "tasks_accept" {
+        if let Some(codes) = req.get("task_codes") {
+            body = Some(json!({"taskCodes": codes}));
+        }
+    }
+    match aigw_relay::wb_checkin::growth_call(http, base, secret, action, body).await {
+        Ok(v) => {
+            // 顺手把能量/积分写进号池快照（供「快过期优先」选号用）
+            json!({"ok": true, "action": action, "data": v})
+        }
+        Err(e) => json!({"ok": false, "action": action, "message": e}),
+    }
+}
+
 pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
     let http = aigw_relay::auth_login::auth_http();
     let mut results: Vec<Value> = Vec::new();
