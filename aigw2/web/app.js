@@ -2950,6 +2950,7 @@ const RUNTIME_HINTS = {
   per_ip_rpm: '每 IP 每分钟请求上限，0 = 不限',
   global_rpm: '全局每分钟请求上限，0 = 不限',
   key_rpm: '每把访问密钥每分钟上限，0 = 不限',
+  select_ceiling: '选号策略：0 = 默认（快到期优先 → 余额升序）；1-100 = 额度用超这个百分比就让位给别的号（给主号留余量）',
 };
 const RUNTIME_LABELS = {
   max_inflight: '单账号并发',
@@ -2958,6 +2959,7 @@ const RUNTIME_LABELS = {
   per_ip_rpm: '每 IP 每分钟',
   global_rpm: '全局每分钟',
   key_rpm: '每密钥每分钟',
+  select_ceiling: '选号阈值（%）',
 };
 async function viewRuntime(el) {
   el.innerHTML = '<div class="card glass empty">加载运行配置…</div>';

@@ -5621,6 +5621,10 @@ async fn runtime_set(State(st): State<AppState>, body: Bytes) -> Response {
     if changed.iter().any(|c| c == "max_inflight") {
         st.pool.set_max_inflight(st.cfg.max_inflight());
     }
+    // ★ 2026-10-28（对齐 magpie reserve）：选号策略阈值同步给号池
+    if changed.iter().any(|c| c == "select_ceiling") {
+        st.pool.set_ceiling(st.cfg.select_ceiling());
+    }
     // ★ 三个 rpm 也要同步到限流器。原来只同步了 max_inflight，于是面板改完
     //   per_ip_rpm / global_rpm / key_rpm 会回「已更新 N 项，立即生效」，而实际
     //   限流一点没变 —— 用户以为把每 IP 上限从 300 收到 10 就收紧了，其实还是 300。

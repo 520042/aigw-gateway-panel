@@ -29,6 +29,8 @@ pub struct RuntimeCfg {
     global_rpm: AtomicU64,
     /// 每把访问密钥每分钟上限（0 = 不限）。
     key_rpm: AtomicU64,
+    /// ★ 2026-10-28：选号策略阈值（0=默认，1-100=reserve/ceiling 百分比）。
+    select_ceiling: AtomicU64,
     /// 改配置的时刻（面板显示「上次修改」用）。
     updated_at: AtomicU64,
     path: std::path::PathBuf,
@@ -44,6 +46,8 @@ pub const FIELDS: &[(&str, u64, u64, u64)] = &[
     ("per_ip_rpm", 0, 0, 100000),
     ("global_rpm", 0, 0, 1000000),
     ("key_rpm", 0, 0, 100000),
+    // ★ 2026-10-28（对齐 magpie reserve）：选号策略阈值。0=默认策略，1-100=reserve/ceiling
+    ("select_ceiling", 0, 0, 100),
 ];
 
 fn clamp_of(name: &str, v: u64) -> u64 {
@@ -77,6 +81,7 @@ impl RuntimeCfg {
             per_ip_rpm: AtomicU64::new(get("per_ip_rpm", 0)),
             global_rpm: AtomicU64::new(get("global_rpm", 0)),
             key_rpm: AtomicU64::new(get("key_rpm", 0)),
+            select_ceiling: AtomicU64::new(get("select_ceiling", 0)),
             updated_at: AtomicU64::new(updated_at),
             path,
         })
@@ -97,6 +102,11 @@ impl RuntimeCfg {
     pub fn global_rpm(&self) -> u64 {
         self.global_rpm.load(Ordering::Relaxed)
     }
+    /// ★ 2026-10-28：选号策略阈值（0=默认，1-100=reserve/ceiling）。
+    pub fn select_ceiling(&self) -> u32 {
+        self.select_ceiling.load(Ordering::Relaxed) as u32
+    }
+
     pub fn key_rpm(&self) -> u64 {
         self.key_rpm.load(Ordering::Relaxed)
     }
@@ -110,6 +120,7 @@ impl RuntimeCfg {
             "per_ip_rpm": self.per_ip_rpm(),
             "global_rpm": self.global_rpm(),
             "key_rpm": self.key_rpm(),
+            "select_ceiling": self.select_ceiling(),
             "updated_at": self.updated_at.load(Ordering::Relaxed),
             // 字段元信息随快照下发，前端不用硬编码边界
             "fields": FIELDS.iter().map(|(n, d, lo, hi)| json!({
@@ -141,6 +152,7 @@ impl RuntimeCfg {
                 "per_ip_rpm" => &self.per_ip_rpm,
                 "global_rpm" => &self.global_rpm,
                 "key_rpm" => &self.key_rpm,
+                "select_ceiling" => &self.select_ceiling,
                 _ => continue,
             };
             if slot.swap(v, Ordering::Relaxed) != v {
@@ -166,6 +178,7 @@ impl RuntimeCfg {
             "per_ip_rpm": self.per_ip_rpm(),
             "global_rpm": self.global_rpm(),
             "key_rpm": self.key_rpm(),
+            "select_ceiling": self.select_ceiling(),
             "updated_at": self.updated_at.load(Ordering::Relaxed),
         });
         if let Some(dir) = self.path.parent() {

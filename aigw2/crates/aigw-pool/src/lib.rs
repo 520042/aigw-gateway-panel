@@ -29,6 +29,17 @@ const WAF_SECS: f64 = 1800.0; // 30min
 /// 冻太久反而让车道在恢复后还白等半小时。
 const LANE_COOL_SECS: f64 = 120.0; // 2min
 const RECENT_WINDOW: Duration = Duration::from_secs(60);
+const CREDIT_TTL: Duration = Duration::from_secs(25 * 3600);
+/// 积分快照的有效期。
+///
+/// ★ 快照的刷新时机是**签到成功后**（每日一次），所以有效期要比签到周期长一点。
+///   设 25 小时而不是 24：签到只要偶尔晚几分钟，24 小时就会让快照在「今天还没签」
+///   的那段空窗里过期，选号忽然失去依据。多留 1 小时缓冲。
+///
+/// ★ 过期快照必须当作「没有快照」：不这样的话，一个号的积分早已用尽（或早已充值）
+///   而快照还是旧值，排序会一直照旧 —— 旧值偏低则反复挑中一个没额度的号去撞 402，
+///   旧值偏高则有额度的号永远排在后面。两种情况都没有任何日志，只有「怎么也跑不通」
+///   或「某个号一直不用」。
 
 /// 额度（402）按日重置的上游：冻到**次日 04:00**（本地时区）再放行。
 /// 对齐 workbuddy2api 的「402 硬冷却至次日 04:00」口径——按日额度在零点前后
@@ -51,12 +62,36 @@ fn quota_hold_secs() -> f64 {
     }
     (delta as f64).max(3600.0)
 }
+
+/// 退避多久：(冷却秒数, 新 strikes)。抖动/限流两类冷却共用同一条曲线。
+///
+/// ★ 上游给了 Retry-After 就照上游，不递增 strikes —— 它有准确的恢复时间，
+///   下一次理应从轻档重新开始，而不是带着历史惩罚继续翻倍。
+/// 拿不到提示才走本地指数退避：30s × 2^strikes（封顶 15min）× 抖动[0.5,1.5)。
+/// 抖动是必要的：同一时刻被限流的一批号如果同时解冻，会一起撞回上游。
+fn backoff_secs(strikes: u32, hint: Option<f64>) -> (f64, u32) {
+    match hint {
+        Some(h) => (h, strikes),
+        None => {
+            let exp = COOL_BASE_SECS * 2f64.powi(strikes.min(5) as i32);
+            let jitter = rand::thread_rng().gen_range(0.5..1.5);
+            (exp.min(COOL_CAP_SECS) * jitter, strikes + 1)
+        }
+    }
+}
 const RECENT_YIELD: usize = 2;
 
 #[derive(Debug, Clone)]
 struct CoolState {
     until: Instant,
     strikes: u32,
+    /// 硬冷却：到期前**不允许半开探测放行**。
+    ///
+    /// 只有「上游明确说了额度没了」这类结论才置位（402 额度耗尽 / 地域封锁）。
+    /// 半开的假设是「冷却也许已经过期，探一次就知道」；但额度类冷却的到期时间
+    /// 是照上游的额度重置点算出来的，探一次只会再拿一个 402，还拖慢真实恢复
+    /// （每个请求都先白打一次上游）。软冷却（抖动/限流）保持原行为。
+    hard: bool,
 }
 
 /// 账号健康结论：Pool::report 按错误类别写入，面板账号表直接展示。
@@ -77,16 +112,42 @@ struct Inner {
     cooldown: HashMap<(String, String), CoolState>,
     /// account -> 拉黑截止
     waf: HashMap<String, Instant>,
+    /// account -> Token 周期限制规则（面板配置，随账号表载）
+    token_rules: HashMap<String, TokenRule>,
+    /// account -> (当前窗口起点, 窗口内已用 tokens)。只给配了规则的号建条目。
+    token_used: HashMap<String, (i64, u64)>,
     /// account -> 60s 窗口内被选时间
     recent: HashMap<String, Vec<Instant>>,
     /// account -> 最近一次真实结果（面板「健康」列直接读它）。
     /// 只存内存不落盘：进程重启后旧结论未必成立，重新验活比读历史更准。
     health: HashMap<String, HealthState>,
-    /// ★ 2026-10-26（P1）：account -> 积分余额快照（值, 记录时刻）。
+    /// account -> 积分余额快照（值, 记录时刻, **最早到期的资源包时刻** epoch 秒）。
     /// 供「快过期积分优先」选号用：积分少且久未刷新的号先消耗掉，
     /// 避免小余额账号永远排在后面、积分到期作废。
-    credits: HashMap<String, (f64, Instant)>,
+    credits: HashMap<String, CreditSnap>,
 }
+/// 积分快照：余额、记录时刻，以及**最早到期的资源包时刻**（epoch 秒）。
+///
+/// ★ 为什么要存到期时刻：WB 的积分不是一个数，是**多个资源包**
+///   （套餐基础包 / 每日包 / 赠送包各有不同到期时间）。「快过期加权」要的是
+///   「先消耗快到期那个号」，光有余额高低不够 —— 余额 5000 但明天到期的号，
+///   应当排在余额 100 但下月才到期的号前面。缺失（None）= 上游没给到期字段，
+///   只按余额排序，不惩罚也不加分。
+#[derive(Clone, Copy)]
+pub struct CreditSnap {
+    pub value: f64,
+    pub at: Instant,
+    pub expire_at: Option<i64>,
+}
+
+/// 「快到期」判定窗口：48 小时内到期的号优先消耗。
+///
+/// ★ 为什么是 48 小时：WB 的每日包按自然日重置、套餐包按 30 天周期。
+///   24 小时太紧（签到每天才刷一次快照，很容易全天没有一个号命中，等于没做）；
+///   72 小时太松（几乎全部号都命中，又退回纯余额排序）。48h 是「今天+明天」
+///   两天的量，签到周期内必然反映出来。
+pub const CREDIT_EXPIRING_WINDOW_SECS: i64 = 48 * 3600;
+
 /// 一个账号当前的阻断状态（面板账号表「健康」列用）。
 ///
 /// `waf_s` 是整号限速剩余秒数，`cooling_s` 是该号在任一模型上最长的冷却剩余。
@@ -113,6 +174,9 @@ pub struct Pool {
     max_inflight: std::sync::atomic::AtomicU32,
     /// ★ 2026-10-26（P3）：状态落盘路径（None = 不持久化，测试用）。
     state_path: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// ★ 2026-10-28（对齐 magpie reserve）：选号策略。
+    /// 0 = 默认（快过期优先 → 余额升序）；>0 = reserve/ceiling 的百分比阈值。
+    ceiling: std::sync::atomic::AtomicU32,
 }
 
 /// 并发租约：Drop 自动归还在飞计数。
@@ -136,6 +200,7 @@ impl Pool {
             inner: Mutex::new(Inner::default()),
             max_inflight: std::sync::atomic::AtomicU32::new(0),
             state_path: std::sync::Mutex::new(None),
+            ceiling: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
@@ -153,6 +218,7 @@ impl Pool {
             inner: Mutex::new(Inner::default()),
             max_inflight: std::sync::atomic::AtomicU32::new(0),
             state_path: std::sync::Mutex::new(Some(data_dir.join("pool-state.json"))),
+            ceiling: std::sync::atomic::AtomicU32::new(0),
         };
         let arc = Arc::new(pool);
         arc.restore();
@@ -191,6 +257,9 @@ impl Pool {
                     CoolState {
                         until: now + Duration::from_secs_f64(remain),
                         strikes: strikes as u32,
+                        // 落盘格式没记 hard：按硬冷却恢复。软冷却跨重启被当硬冷却的代价
+                        // 只是「少探一次」，反过来则会让额度冷却在重启后被反复探测。
+                        hard: true,
                     },
                 );
                 n_cool += 1;
@@ -236,7 +305,15 @@ impl Pool {
                     item.get("account").and_then(|x| x.as_str()),
                     item.get("credit").and_then(|x| x.as_f64()),
                 ) {
-                    g.credits.insert(acc.to_string(), (c, now));
+                    let expire_at = item.get("expire_at").and_then(|x| x.as_i64());
+                    g.credits.insert(
+                        acc.to_string(),
+                        CreditSnap {
+                            value: c,
+                            at: now,
+                            expire_at,
+                        },
+                    );
                 }
             }
         }
@@ -280,7 +357,9 @@ impl Pool {
         let credits: Vec<serde_json::Value> = g
             .credits
             .iter()
-            .map(|(acc, (c, _))| serde_json::json!({"account": acc, "credit": c}))
+            .map(|(acc, s)| {
+                serde_json::json!({"account": acc, "credit": s.value, "expire_at": s.expire_at})
+            })
             .collect();
         let v = serde_json::json!({
             "saved_at": std::time::SystemTime::now()
@@ -307,6 +386,39 @@ impl Pool {
     pub fn set_max_inflight(&self, n: u32) {
         self.max_inflight
             .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// ★ 2026-10-28（对齐 magpie reserve）：设置选号策略。
+    ///
+    /// `ceiling` = 0 关闭（走默认：快到期优先 → 余额升序）；
+    /// `ceiling` = 1..100 启用 reserve/ceiling 语义 ——
+    /// **按「额度已用百分比」分层**：未达阈值的（tier 0）优先，
+    /// 达阈值的（tier 1）让位，冷却中的（tier 2）最后。
+    /// 所有号都超阈值时，按使用率**从低到高**（用得少的先用）。
+    ///
+    /// 这与默认策略互补：默认看「积分余额绝对值」，reserve 看「相对用掉多少」。
+    /// 典型用法：给主号留 20%（ceiling=80），网关只用掉八成。
+    pub fn set_ceiling(&self, ceiling: u32) {
+        self.ceiling
+            .store(ceiling.min(100), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn ceiling(&self) -> u32 {
+        self.ceiling.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 某账号当前周期的额度使用百分比（0-100）。无规则/无用量 → None（视为「未知」，算未超阈值）。
+    fn usage_pct(g: &Inner, account: &str, now_epoch: i64) -> Option<f64> {
+        let rule = g.token_rules.get(account)?;
+        let win = now_epoch.div_euclid(rule.period_s) * rule.period_s;
+        let (w, used) = *g.token_used.get(account)?;
+        if w != win {
+            return Some(0.0); // 本期还没用过
+        }
+        if rule.limit == 0 {
+            return None;
+        }
+        Some((used as f64 / rule.limit as f64) * 100.0)
     }
 
     /// 当前生效的最大并发。
@@ -365,12 +477,17 @@ impl Pool {
         model: &str,
     ) -> Option<String> {
         let now = Instant::now();
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         // 锁中毒不能静默返回 None：那会让 pick 表现得像「全部被挡」，进而把整个平台的
         // 请求变成 503（或旧版那样越过隔离硬走）。统一 into_inner 继续用里面的数据。
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // 三种「挡住」的原因必须分开记：冷却中的可以半开探测，纯让位的可以放行，
         // 而在飞已满的账号**不能**被半开选中（否则 pick 说可用、acquire 立刻判 429）。
-        let mut cooling: Vec<(String, f64)> = Vec::new(); // (account, 冷却剩余秒)
+        // (account, 冷却剩余秒, 是否硬冷却)：硬冷却不参与半开探测
+        let mut cooling: Vec<(String, f64, bool)> = Vec::new();
         let mut yielded: Vec<String> = Vec::new(); // 仅 RecentPick 让位
         let mut busy = 0usize; // 在飞已满
         // ★ 2026-10-26（P1，对齐 workbuddy2api「快过期积分加权」）：
@@ -379,8 +496,14 @@ impl Pool {
         // 账号池按添加顺序排列，于是永远只用第一个号，其余号的积分到期作废。
         // 排序口径：有余额快照的按余额升序（少的下次先用掉），没快照的排最后
         // （不知道余额就不该抢在已知小余额的号前面）。
-        let mut candidates: Vec<(f64, bool, usize, String)> = Vec::new(); // (credit, 有快照, 原序, account)
+        // (快到期键, credit, 原序, account) —— 键序见下方 sort
+        let mut candidates: Vec<(bool, f64, usize, String)> = Vec::new();
         for (idx, a) in accounts.iter().enumerate() {
+            // ★ 限制器：本周期用量触顶的号直接不参与候选（不是冷却——冷却会
+            //   自动衰减回来，触顶要到**窗口翻页**才回来，判据不同层）。
+            if token_block_at(&g, a, now_epoch).is_some() {
+                continue;
+            }
             if g.waf.get(a).map(|t| *t > now).unwrap_or(false) {
                 continue;
             }
@@ -395,22 +518,88 @@ impl Pool {
             }
             if let Some(cs) = g.cooldown.get(&(a.to_string(), model.to_string())) {
                 if cs.until > now {
-                    cooling.push((a.clone(), cs.until.duration_since(now).as_secs_f64()));
+                    cooling.push((
+                        a.clone(),
+                        cs.until.duration_since(now).as_secs_f64(),
+                        cs.hard,
+                    ));
                     continue;
                 }
             }
-            let (credit, has) = match g.credits.get(a) {
-                Some((c, _)) => (*c, true),
-                None => (f64::MAX, false),
+            // 过期快照视同「没有快照」（排最后），理由见 CREDIT_TTL。
+            // ★ 余额 < 1 的快照**同样**降级为无快照：低余额优先的本意是
+            //   「小而易废的额度先花掉」，不是「把流量砸向已知没余额的号」。
+            //   x0.79 一组的倍率下 1 分连一次请求都不够付，把它排最前只会
+            //   让每个冷却窗都白撞一次 402 才轮到可用号。
+            //   ★ 只降级**路由**——面板仍如实显示 0（那是真实余额，隐藏它
+            //   才是说谎）。两个口径不同是有意的。
+            let (credit, exp_soon) = match g.credits.get(a) {
+                Some(s) if now.duration_since(s.at) <= CREDIT_TTL && s.value >= 1.0 => {
+                    let soon = s
+                        .expire_at
+                        .map(|e| e <= now_epoch + CREDIT_EXPIRING_WINDOW_SECS)
+                        .unwrap_or(false);
+                    (s.value, soon)
+                }
+                _ => (f64::MAX, false),
             };
-            candidates.push((credit, has, idx, a.clone()));
+            // 主键取反（!exp_soon）：sort 升序时 false 在前 → 「快到期」的号排最前
+            candidates.push((!exp_soon, credit, idx, a.clone()));
         }
-        // 余额升序；同余额/都没快照时保持原有顺序（稳定排序，不打乱既有行为）
-        candidates.sort_by(|x, y| {
-            x.0.partial_cmp(&y.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(x.2.cmp(&y.2))
-        });
+        // 排序：快到期优先 → 余额升序 → 原序（稳定，不打乱既有行为）。
+        // 「快到期优先」正是目标里那条加权：余额再多，明天到期就该先花掉，
+        // 否则整包作废——比「余额低」更硬的损失。
+        //
+        // ★ 2026-10-28（对齐 magpie reserve）：ceiling > 0 时改用
+        //   reserve/ceiling 语义 —— 按「额度已用百分比」分层，而不是积分绝对值：
+        //   tier 0 = 未达阈值（优先）、tier 1 = 已达阈值（让位）、tier 2 = 冷却中（最后）。
+        //   全部超阈值时按使用率从低到高（用得少的先用）。
+        let ceil_pct = self.ceiling();
+        if ceil_pct > 0 {
+            let now_epoch = epoch_secs();
+            // (tier, usage_pct, 原序, account)
+            let mut ranked: Vec<(u8, f64, usize, String)> = candidates
+                .iter()
+                .map(|(_, _, idx, a)| {
+                    let pct = Self::usage_pct(&g, a, now_epoch);
+                    let tier = match pct {
+                        // 未知额度（无 token 规则 / API Key 类）→ 视为未达阈值
+                        None => 0u8,
+                        Some(p) if p >= ceil_pct as f64 => 1,
+                        _ => 0,
+                    };
+                    (tier, pct.unwrap_or(0.0), *idx, a.clone())
+                })
+                .collect();
+            ranked.sort_by(|x, y| {
+                x.0.cmp(&y.0)
+                    .then(x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .then(x.2.cmp(&y.2))
+            });
+            for (_, _, _, a) in &ranked {
+                let picks = g
+                    .recent
+                    .get(a)
+                    .map(|v| v.iter().filter(|t| now.duration_since(**t) < RECENT_WINDOW).count())
+                    .unwrap_or(0);
+                if picks >= RECENT_YIELD {
+                    yielded.push(a.clone());
+                    continue;
+                }
+                g.recent.entry(a.to_string()).or_default().push(now);
+                if let Some(v) = g.recent.get_mut(a) {
+                    v.retain(|t| now.duration_since(*t) < RECENT_WINDOW);
+                }
+                return Some(a.clone());
+            }
+            // 全部被挡 → 走与默认策略相同的半开兜底（下面继续执行）
+        } else {
+            candidates.sort_by(|x, y| {
+                x.0.cmp(&y.0)
+                    .then(x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .then(x.2.cmp(&y.2))
+            });
+        }
         for (_, _, _, a) in &candidates {
             // RecentPick：60s 窗口 ≥2 次 → 有更早候选可用时让位
             let picks = g
@@ -428,16 +617,30 @@ impl Pool {
             }
             return Some(a.clone());
         }
-        // 全被挡 → 半开：优先真正在冷却的（剩余最短者，清冷却探测）
+        // 全被挡 → 半开：优先真正在冷却的（剩余最短者，清冷却探测）。
+        //
+        // ★ 硬冷却（402 额度耗尽 / 地域封锁）不参与：它的到期时间是照上游的额度
+        //   重置点算出来的，探一次只是再拿一个同样的错误。放行它等于在重置之前
+        //   每个请求都先白打一次上游，既拖慢面板响应，也让「额度不足」的报错
+        //   和真实请求交替出现、看起来像时好时坏。
+        //   全池只剩硬冷却时 pick 返回 None，上层按「账号当前全部不可用」回 503，
+        //   这才是这段时间里诚实的答案。
         cooling.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        if let Some((account, remain)) = cooling.first() {
+        if let Some((account, remain, _)) = cooling.iter().find(|c| !c.2) {
+            let account = account.clone();
             g.cooldown.remove(&(account.clone(), model.to_string()));
             tracing::warn!(
                 "pool 半开：全部候选被挡，清冷却探测 {}（剩余 {:.0}s）",
                 account,
                 remain
             );
-            return Some(account.clone());
+            return Some(account);
+        }
+        if cooling.iter().any(|c| c.2) {
+            tracing::warn!(
+                "pool：{} 的候选全部处于硬冷却（额度/地域），本轮不放行探测",
+                platform
+            );
         }
         // 其次放行「只是最近被选多了一次」的账号，并清空它的 recent 窗口。
         // 旧实现只 return、不重置 recent，于是下次 pick 又看到它 ≥2 次、又走同一分支，
@@ -451,12 +654,18 @@ impl Pool {
         None
     }
 
-    /// 该 (账号,模型) 当前是否可直接使用（未 WAF 拉黑、未冷却）。
-    /// 会话粘性路由命中后必须再过这一关，否则粘性会把请求钉死在刚被拉黑的账号上。
+    /// 该 (账号,模型) 当前是否可直接使用：未 WAF 拉黑、未冷却、**未触顶限额**。
+    /// 会话粘性路由命中后必须再过这一关，否则粘性会把请求钉死在刚被拉黑
+    /// 或刚触顶的账号上——「限额防用量」的安全属性会被粘性整体绕过：
+    /// 绑定过的号每请求都烧，限了等于没限。判据与 pick 共用 token_block_at。
     pub fn available(&self, account: &str, model: &str) -> bool {
         let now = Instant::now();
+        let now_epoch = epoch_secs();
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.waf.get(account).map(|t| *t > now).unwrap_or(false) {
+            return false;
+        }
+        if token_block_at(&g, account, now_epoch).is_some() {
             return false;
         }
         match g.cooldown.get(&(account.to_string(), model.to_string())) {
@@ -466,6 +675,10 @@ impl Pool {
     }
 
     /// 上报结果：成功清冷却/拉黑；失败按归因冷却或拉黑。
+    /// 判定只依赖 `class`。早期版本还有一个 waf_fingerprint 形参（HTTP 200 + 业务码
+    /// 失败 = 上游假成功），但拉黑改由 class 统一决定后它只剩一条消警语句 —— 留着会
+    /// 让调用方以为「传 true 才拉黑」，于是流式路径长期传 false、假成功不给号池任何
+    /// 信号。已删除。
     pub fn report(
         &self,
         platform: &str,
@@ -473,9 +686,8 @@ impl Pool {
         model: &str,
         ok: bool,
         class: ErrorClass,
-        waf_fingerprint: bool,
     ) {
-        self.report_with_hint(platform, account, model, ok, class, waf_fingerprint, None)
+        self.report_with_hint(platform, account, model, ok, class, None)
     }
 
     /// 带「上游给的 Retry-After」的 report。
@@ -497,7 +709,6 @@ impl Pool {
         model: &str,
         ok: bool,
         class: ErrorClass,
-        waf_fingerprint: bool,
         retry_after: Option<f64>,
     ) {
         let _ = platform;
@@ -529,7 +740,6 @@ impl Pool {
                             at: now,
                         },
                     );
-                    let _ = waf_fingerprint;
                 }
                 ErrorClass::Quota => {
                     // ★ 额度耗尽不能复用 waf（账号级 30min 拉黑）：很多上游的额度是按小时/
@@ -549,6 +759,8 @@ impl Pool {
                             until: now + Duration::from_secs_f64(WAF_SECS.max(quota_secs)),
                             // 不递增 strikes：额度耗尽不是「这个模型不稳」，别把指数退避带偏
                             strikes,
+                            // 额度重置点是算出来的，探一次也不会提前 —— 不许半开放行
+                            hard: true,
                         },
                     );
                     g.health.insert(
@@ -578,6 +790,8 @@ impl Pool {
                         CoolState {
                             until: now + Duration::from_secs_f64(LANE_COOL_SECS),
                             strikes,
+                            // 地域/车道封锁与账号无关：探测换不回正常响应
+                            hard: true,
                         },
                     );
                     let (status, label) = if class == ErrorClass::Region {
@@ -602,19 +816,13 @@ impl Pool {
                     let key = (account.to_string(), model.to_string());
                     let strikes = g.cooldown.get(&key).map(|c| c.strikes).unwrap_or(0);
                     // 上游说了就照上游：不递增 strikes（它有准确恢复时间，下次该从轻档重新开始）
-                    let (secs, next_strikes) = match hint {
-                        Some(h) => (h, strikes),
-                        None => {
-                            let exp = COOL_BASE_SECS * 2f64.powi(strikes.min(5) as i32);
-                            let jitter = rand::thread_rng().gen_range(0.5..1.5);
-                            (exp.min(COOL_CAP_SECS) * jitter, strikes + 1)
-                        }
-                    };
+                    let (secs, next_strikes) = backoff_secs(strikes, hint);
                     g.cooldown.insert(
                         key,
                         CoolState {
                             until: now + Duration::from_secs_f64(secs),
                             strikes: next_strikes,
+                            hard: false,
                         },
                     );
                     g.health.insert(
@@ -631,19 +839,13 @@ impl Pool {
                     let _ = other;
                     let key = (account.to_string(), model.to_string());
                     let strikes = g.cooldown.get(&key).map(|c| c.strikes).unwrap_or(0);
-                    let (secs, next_strikes) = match hint {
-                        Some(h) => (h, strikes),
-                        None => {
-                            let exp = COOL_BASE_SECS * 2f64.powi(strikes.min(5) as i32);
-                            let jitter = rand::thread_rng().gen_range(0.5..1.5);
-                            (exp.min(COOL_CAP_SECS) * jitter, strikes + 1)
-                        }
-                    };
+                    let (secs, next_strikes) = backoff_secs(strikes, hint);
                     g.cooldown.insert(
                         key,
                         CoolState {
                             until: now + Duration::from_secs_f64(secs),
                             strikes: next_strikes,
+                            hard: false,
                         },
                     );
                 }
@@ -700,15 +902,89 @@ impl Pool {
     /// 由签到/成长任务/余额查询路径在拿到真实余额时调用。`None` 表示上游没给数字，
     /// 此时不记录（不能用 0 覆盖已有值——0 会被误判成「余额耗尽」）。
     pub fn record_credit(&self, account: &str, credit: Option<f64>) {
-        let Some(c) = credit else { return };
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        g.credits.insert(account.to_string(), (c, Instant::now()));
+        self.record_credit_exp(account, credit, None);
     }
 
-    /// 某账号的积分余额（面板展示用）。`None` = 从未记录过。
-    pub fn credit_of(&self, account: &str) -> Option<f64> {
+    /// 同 `record_credit`，但带上「最早到期的资源包时刻」（epoch 秒）。
+    /// `expire_at=None` 表示上游没给到期字段 —— 只按余额加权，不假装知道到期。
+    pub fn record_credit_exp(
+        &self,
+        account: &str,
+        credit: Option<f64>,
+        expire_at: Option<i64>,
+    ) {
+        let Some(c) = credit else { return };
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.credits.insert(
+            account.to_string(),
+            CreditSnap {
+                value: c,
+                at: Instant::now(),
+                expire_at,
+            },
+        );
+    }
+
+    /// 清除某账号的积分快照。
+    ///
+    /// ★ 为什么需要：余额查询**明确判出凭据失效**（HTTP 401/403）时，
+    ///   旧快照留着有害——死号的余额永不清零，「快到期优先」会把它排到最前，
+    ///   每次路由都先撞死号。网络抖动不清（旧值可能仍然成立）。
+    pub fn clear_credit(&self, account: &str) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.credits.remove(account);
+    }
+    /// 某账号的积分余额快照（含**快照年龄**，秒）。`None` = 从未记录或已过期。
+    ///
+    /// ★ 与 `pick` 的选号判据**同一口径**：过期快照视同没有。否则面板会显示
+    ///   「余额 100」，而选号逻辑早就把它当没数据了 —— 同一个数在两处有两种解释，
+    ///   用户看到的排名依据与实际排名对不上。
+    /// 返回（余额, 快照年龄秒, 最早到期 epoch 秒）。过期视同没有。
+    pub fn credit_snapshot(&self, account: &str) -> Option<(f64, u64, Option<i64>)> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        g.credits.get(account).map(|(c, _)| *c)
+        let s = g.credits.get(account)?;
+        let age = s.at.elapsed();
+        if age > CREDIT_TTL {
+            return None;
+        }
+        Some((s.value, age.as_secs(), s.expire_at))
+    }
+
+    /// 全池积分聚合（概览页一行读懂资产用）。
+    ///
+    /// ★ 口径与 pick **完全一致**：过 TTL 的快照不算、<1 的降级不算、
+    ///   「快到期」= 48h 窗口。否则概览页说的和选号逻辑做的又是两套账——
+    ///   界面显示 9000 分而实际只有 3 个号能用，比不显示更糟。
+    /// 返回 (有效快照数, 余额总和, 快到期数, 最早到期 epoch 秒)。
+    pub fn credit_summary(&self) -> (usize, f64, usize, Option<i64>) {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut n = 0usize;
+        let mut total = 0.0f64;
+        let mut soon = 0usize;
+        let mut earliest: Option<i64> = None;
+        for s in g.credits.values() {
+            if now.duration_since(s.at) > CREDIT_TTL || s.value < 1.0 {
+                continue;
+            }
+            n += 1;
+            total += s.value;
+            if let Some(e) = s.expire_at {
+                if e <= now_epoch + CREDIT_EXPIRING_WINDOW_SECS {
+                    soon += 1;
+                }
+                earliest = Some(earliest.map_or(e, |c| c.min(e)));
+            }
+        }
+        (n, total, soon, earliest)
+    }
+    /// 某账号的积分余额（面板展示用）。`None` = 从未记录过或已过期。
+    pub fn credit_of(&self, account: &str) -> Option<f64> {
+        self.credit_snapshot(account).map(|(c, _, _)| c)
     }
 
     /// 查一个账号此刻是否被冷却 / WAF 整号限速。
@@ -922,9 +1198,367 @@ impl StickyRouter {
     }
 }
 
+
+// ── Token 周期限制器（对齐 Agent2API core/limiter.rs 的 v2 形态）──────────
+//
+// ★ 解决什么问题：号池的冷却/拉黑都是**事后反应**（撞了 429 才冷却）。
+//   而免费额度账号被上游盯上往往是因为**用量太猛**——等 429 出现时已经在
+//   风险名单上了。限制器是事前主动控制：「这个账号每周期最多用 N 个 Token」，
+//   到量就在选号时跳过，窗口翻页自动恢复，无需人工。
+//
+// ── 与参考实现同款的三个要点 ────────────────────────────────
+//   1. 规则按**账号**配置（不是全局一刀切）；
+//   2. 窗口按自然时间对齐（floor(now/period)*period）——「每小时 50 万」
+//      指整点翻页，不是滑动窗口，读数可预期；
+//   3. **拿得出证据才拦**：窗口里没有累计记录 = 0 消耗 = 不拦。重启后
+//      事实表是空的，宁可用满也不误拦（误拦的账号会永远饿死在池里）。
+
+/// 账号的 Token 限制规则。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenRule {
+    /// 每周期允许的 token 上限（in+out 合计）
+    pub limit: u64,
+    /// 周期秒数（30min ~ 24h，set 处夹住）
+    pub period_s: i64,
+}
+
+/// 允许范围：30 分钟 ~ 24 小时（参考实现评审结论：窗口太短会「刚恢复又
+/// 被拦」反复出现，太长失去保护意义）。
+pub const MIN_TOKEN_PERIOD_SECS: i64 = 1_800;
+pub const MAX_TOKEN_PERIOD_SECS: i64 = 86_400;
+
+/// 限制器现场：触顶时返回 (已用, 上限, 距窗口翻页的秒数)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenLimited {
+    pub used: u64,
+    pub limit: u64,
+    pub reset_in_s: i64,
+}
+
+fn epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 持锁版触顶判定（pick 循环内用；公开方法 `token_block` 自己拿锁）。
+fn token_block_at(g: &Inner, account: &str, now_epoch: i64) -> Option<TokenLimited> {
+    let rule = g.token_rules.get(account)?;
+    let win = now_epoch.div_euclid(rule.period_s) * rule.period_s;
+    let (w, used) = *g.token_used.get(account)?;
+    if w != win {
+        return None;
+    }
+    if used >= rule.limit {
+        Some(TokenLimited {
+            used,
+            limit: rule.limit,
+            reset_in_s: (win + rule.period_s - now_epoch).max(0),
+        })
+    } else {
+        None
+    }
+}
+impl Pool {
+    /// 设置/清除账号的 Token 限制（limit=None 清除）。周期越界夹进
+    /// [30min, 24h]，不报错——面板传错值也要有确定行为。
+    pub fn set_token_rule(&self, account: &str, limit: Option<u64>, period_s: i64) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match limit {
+            Some(l) if l > 0 => {
+                let p = period_s.clamp(MIN_TOKEN_PERIOD_SECS, MAX_TOKEN_PERIOD_SECS);
+                g.token_rules
+                    .insert(account.to_string(), TokenRule { limit: l, period_s: p });
+            }
+            _ => {
+                g.token_rules.remove(account);
+            }
+        }
+    }
+
+    /// 测试辅助：直接写本窗口用量（模拟已用 N token）。
+    #[cfg(test)]
+    pub fn mark_token_usage_for_test(&self, account: &str, used: u64) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let win = epoch_secs().div_euclid(3600) * 3600;
+        g.token_used.insert(account.to_string(), (win, used));
+    }
+
+    /// 请求收尾记账（tin+tout 合计）。**只对配了规则的账号累计**——
+    /// 没配规则的号不占事实表内存。记账即建窗：第一次用量就落进当前窗口。
+    pub fn add_tokens_used(&self, account: &str, n: u64) {        if n == 0 {
+            return;
+        }
+        let now_epoch = epoch_secs();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(rule) = g.token_rules.get(account).copied() else { return };
+        let win = now_epoch.div_euclid(rule.period_s) * rule.period_s;
+        let e = g.token_used.entry(account.to_string()).or_insert((win, 0));
+        // 窗口翻页：重置起点重新累计（旧窗口读数直接作废，不结转）
+        if e.0 != win {
+            *e = (win, 0);
+        }
+        e.1 = e.1.saturating_add(n);
+    }
+
+    /// 该账号此刻是否触顶。None = 没配规则 / 未触顶 / 读数缺失（证据不足不拦）。
+    pub fn token_block(&self, account: &str) -> Option<TokenLimited> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        token_block_at(&g, account, epoch_secs())
+    }
+
+    /// 全池触顶概况：(触顶账号数, 最早的窗口翻页秒数)。给 503 文案用——
+    /// 用户得知道「是限制器在挡，多久自动恢复」，而不是被误导去重新登录。
+    pub fn token_hit_info(&self, accounts: &[String]) -> Option<(usize, i64)> {
+        let now_epoch = epoch_secs();
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = 0usize;
+        let mut soonest: Option<i64> = None;
+        for a in accounts {
+            if let Some(b) = token_block_at(&g, a, now_epoch) {
+                n += 1;
+                soonest = Some(soonest.map_or(b.reset_in_s, |s| s.min(b.reset_in_s)));
+            }
+        }
+        (n > 0).then_some((n, soonest.unwrap_or(0)))
+    }
+    /// 面板行内展示：账号的限制配置与当前窗口用量。
+    pub fn token_view(&self, account: &str) -> Option<(TokenRule, u64)> {
+        let now_epoch = epoch_secs();
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let rule = *g.token_rules.get(account)?;
+        let win = now_epoch.div_euclid(rule.period_s) * rule.period_s;
+        let used = match g.token_used.get(account) {
+            Some((w, u)) if *w == win => *u,
+            _ => 0,
+        };
+        Some((rule, used))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 过期的积分快照必须当作「没有快照」，不参与排序。
+    ///
+    /// ★ 快照只在**签到成功后**刷新（每日一次）。不过期的话，一个号的积分早已
+    ///   用尽而快照还是旧值，排序会一直照旧 —— 旧值偏低则反复挑中没额度的号去
+    ///   撞 402，旧值偏高则有额度的号永远排在后面。两种情况都没有任何日志。
+    #[test]
+    fn stale_credit_snapshot_is_ignored() {
+        let pool = Pool::new();
+        // 两个号：a 的快照很旧且余额低，b 的快照新鲜且余额高。
+        // 若旧快照生效，a 会被优先选中；正确行为是 a 视同无快照（排最后）。
+        {
+            let mut g = pool.inner.lock().unwrap();
+            let stale = Instant::now() - CREDIT_TTL - Duration::from_secs(60);
+            g.credits.insert("a".to_string(), CreditSnap { value: 1.0, at: stale, expire_at: None });
+            g.credits.insert("b".to_string(), CreditSnap { value: 999.0, at: Instant::now(), expire_at: None });
+        }
+        let accs = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            pool.pick("p", &accs, "m").as_deref(),
+            Some("b"),
+            "过期快照不该让 a 排在前面"
+        );
+    }
+
+    /// 聚合口径必须与 pick 一致：TTL 过期、<1、48h 窗口三者都要验。
+    #[test]
+    fn credit_summary_matches_pick_criteria() {
+        let pool = Pool::new();
+        let now_e = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        {
+            let mut g = pool.inner.lock().unwrap();
+            g.credits.insert("a".to_string(), CreditSnap { value: 500.0, at: Instant::now(), expire_at: Some(now_e + 24*3600) });
+            g.credits.insert("b".to_string(), CreditSnap { value: 300.0, at: Instant::now(), expire_at: Some(now_e + 30*86400) });
+            // 以下三个都不该计入
+            g.credits.insert("dead".to_string(), CreditSnap { value: 0.0, at: Instant::now(), expire_at: None });
+            g.credits.insert("stale".to_string(), CreditSnap { value: 999.0, at: Instant::now() - CREDIT_TTL - Duration::from_secs(60), expire_at: None });
+        }
+        let (n, total, soon, earliest) = pool.credit_summary();
+        assert_eq!(n, 2);
+        assert_eq!(total, 800.0);
+        assert_eq!(soon, 1);
+        assert_eq!(earliest, Some(now_e + 24*3600));
+    }
+    /// 余额 0 的号不许占「低余额优先」的第一名：它会把每个冷却窗都变成
+    /// 一次白撞的 402。可用号（哪怕余额更高）必须排在它前面。
+    #[test]
+    fn zero_balance_account_yields_to_usable_ones() {
+        let pool = Pool::new();
+        {
+            let mut g = pool.inner.lock().unwrap();
+            g.credits.insert("dead".to_string(), CreditSnap { value: 0.0, at: Instant::now(), expire_at: None });
+            g.credits.insert("alive".to_string(), CreditSnap { value: 400.0, at: Instant::now(), expire_at: None });
+        }
+        let accs = vec!["dead".to_string(), "alive".to_string()];
+        assert_eq!(pool.pick("p", &accs, "m").as_deref(), Some("alive"));
+        // 全是死余额时照常给出一个（总得有人试，冷却语义会接手）——不许返回 None
+        {
+            let mut g = pool.inner.lock().unwrap();
+            g.credits.insert("alive".to_string(), CreditSnap { value: 0.5, at: Instant::now(), expire_at: None });
+        }
+        assert!(pool.pick("p", &accs, "m").is_some());
+    }
+    /// 限制器三态：未触顶正常用 → 触顶被跳过（别的号接手）→ 证据不足不拦。
+    #[test]
+    fn token_limiter_blocks_only_on_evidence() {
+        let pool = Pool::new();
+        pool.set_token_rule("a", Some(1000), 3600);
+        let accs = vec!["a".to_string(), "b".to_string()];
+        // 没记过账 = 没证据 = 不拦（重启后事实表为空的场景）
+        assert!(pool.token_block("a").is_none());
+        assert_eq!(pool.pick("p", &accs, "m").as_deref(), Some("a"));
+        // 用量堆到触顶：a 被跳过，b 接手
+        pool.add_tokens_used("a", 1000);
+        assert!(pool.token_block("a").is_some());
+        assert_eq!(pool.pick("p", &accs, "m2").as_deref(), Some("b"));
+        // 没配规则的账号记账是 no-op（不占事实表）
+        pool.add_tokens_used("b", 999999);
+        assert!(pool.token_block("b").is_none());
+        // 清除规则后 a 恢复可用
+        pool.set_token_rule("a", None, 3600);
+        assert!(pool.token_block("a").is_none());
+    }
+
+    /// available() 是粘性命中的最后一道闸——触顶号必须被拒（否则限额被绕过）。
+    #[test]
+    fn available_rejects_token_capped_account() {
+        let pool = Pool::new();
+        pool.set_token_rule("a", Some(100), 3600);
+        assert!(pool.available("a", "m"), "零用量无证据，不拦");
+        pool.add_tokens_used("a", 120);
+        assert!(!pool.available("a", "m"), "触顶必须被粘性关卡拒绝");
+        assert!(pool.available("b", "m"), "没规则的号不受影响");
+    }
+    /// 503 文案数据源：token_hit_info 数出触顶账号数、给出最早翻页秒数。
+    #[test]
+    fn token_hit_info_counts_blocked_accounts() {
+        let pool = Pool::new();
+        pool.set_token_rule("a", Some(100), 3600);
+        pool.set_token_rule("b", Some(100), 3600);
+        let accs = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        // 有规则但零量（证据不足不拦）；没规则的 c 也不拦
+        assert_eq!(pool.token_hit_info(&accs), None);
+        pool.add_tokens_used("a", 150);
+        pool.add_tokens_used("b", 200);
+        let (n, soonest) = pool.token_hit_info(&accs).unwrap();
+        assert_eq!(n, 2);
+        assert!(soonest > 0 && soonest <= 3600);
+    }
+    /// 周期越界夹进 [30min, 24h]：错配置要有确定行为而不是报错。
+    #[test]
+    fn token_period_clamped() {
+        let pool = Pool::new();
+        pool.set_token_rule("a", Some(500), 5);
+        let (rule, _) = pool.token_view("a").unwrap();
+        assert_eq!(rule.period_s, 1800);
+        pool.set_token_rule("b", Some(500), 999999);
+        let (rule2, _) = pool.token_view("b").unwrap();
+        assert_eq!(rule2.period_s, 86400);
+        assert_eq!(rule2.limit, 500);
+        // token_view 的用量读数对没记过的号是 0（不是 None 缺失）
+        assert_eq!(pool.token_view("b").unwrap().1, 0);
+    }
+    /// 401 判出的死号必须能清掉旧快照：死号的余额永不清零，
+    /// 「快到期优先」会把每次路由都先撞向死号。
+    #[test]
+    fn clear_credit_removes_the_snapshot() {
+        let pool = Pool::new();
+        pool.record_credit_exp("a", Some(900.0), None);
+        assert!(pool.credit_snapshot("a").is_some());
+        pool.clear_credit("a");
+        assert!(pool.credit_snapshot("a").is_none());
+        // 清不存在的号不炸
+        pool.clear_credit("ghost");
+    }
+    /// ★ 快到期必须赢过低余额：余额 5000 但 24h 后到期的号先消耗，
+    /// 否则整包作废——这是比「余额低」更硬的损失（目标里的「快过期加权」）。
+    #[test]
+    fn expiring_soon_beats_low_balance() {
+        let pool = Pool::new();
+        let soon = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            + 24 * 3600;
+        let far = soon + 29 * 86400;
+        {
+            let mut g = pool.inner.lock().unwrap();
+            g.credits.insert("a".to_string(), CreditSnap { value: 5000.0, at: Instant::now(), expire_at: Some(soon) });
+            g.credits.insert("b".to_string(), CreditSnap { value: 10.0, at: Instant::now(), expire_at: Some(far) });
+        }
+        let accs = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            pool.pick("p", &accs, "m").as_deref(),
+            Some("a"),
+            "24h 内到期的 a 必须排在低余额的 b 前面"
+        );
+    }
+    /// 到期时刻必须随快照一起落盘：只记进程内，重启后「快到期优先」就失明。
+    #[test]
+    fn credit_expire_survives_persist_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("aigw-pool-expire-{:?}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let soon = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            + 24 * 3600;
+        {
+            let pool = Pool::open(&dir);
+            pool.record_credit_exp("a", Some(500.0), Some(soon));
+            pool.persist();
+        }
+        let pool2 = Pool::open(&dir);
+        let snap = pool2.credit_snapshot("a");
+        assert!(snap.is_some(), "重启后快照必须恢复");
+        let (c, _age, exp) = snap.unwrap();
+        assert_eq!(c, 500.0);
+        assert_eq!(exp, Some(soon), "到期时刻必须随快照落盘");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// 未过期的快照仍要按余额升序（少的下次先用掉）。
+    #[test]
+    fn fresh_credit_snapshot_still_orders_by_balance() {
+        let pool = Pool::new();
+        pool.record_credit("a", Some(500.0));
+        pool.record_credit("b", Some(10.0));
+        let accs = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            pool.pick("p", &accs, "m").as_deref(),
+            Some("b"),
+            "余额少的应先被消耗"
+        );
+    }
+
+    #[test]
+    fn quota_cooldown_is_not_reopened_by_half_open() {
+        // 半开的本意是「冷却可能已经过期了，探测一次」。但 402 额度耗尽的冷却
+        // 是按「次日 04:00」算出来的硬窗口：上游明确说了额度没了，探测不可能成功。
+        // 旧实现里 pick 的半开分支会清掉冷却放行，于是每个请求都白打一次上游
+        // （面板上表现为「额度不足」和真实请求交替出现，额度重置前一直空转）。
+        let pool = Pool::new();
+        let one = vec!["solo".to_string()];
+        pool.report("p", "solo", "m", false, ErrorClass::Quota);
+        assert!(pool.blocked_of("solo").cooling_s > 0.0, "402 应进入冷却");
+        assert_eq!(pool.pick("p", &one, "m"), None, "额度冷却期间不该被半开放行");
+    }
+
+    #[test]
+    fn transient_cooldown_is_still_reopened_by_half_open() {
+        // 对照：普通抖动类冷却必须继续享受半开探测（否则全池冻死时永远没人探路）。
+        let pool = Pool::new();
+        let one = vec!["solo".to_string()];
+        pool.report("p", "solo", "m", false, ErrorClass::Transient);
+        assert_eq!(pool.pick("p", &one, "m").as_deref(), Some("solo"), "抖动类冷却仍应半开");
+    }
 
     fn accs(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("acc-{i}")).collect()
@@ -996,7 +1630,7 @@ mod tests {
         // 三次失败（Transient）→ 抖动后的冷却区间断言（避免 flake）
         let left_after = |n: u32| {
             for _ in 0..n {
-                pool.report("p", "a", "m", false, ErrorClass::Transient, false);
+                pool.report("p", "a", "m", false, ErrorClass::Transient);
             }
             let snap = pool.snapshot();
             let arr = snap["cooling"].as_array().unwrap();
@@ -1013,15 +1647,20 @@ mod tests {
         //   rand 的 gen_range 在浮点模式下确实可能返回非常接近 0.5 的值，再叠加
         //   「report 里 now 到 snapshot 里 now 之间的流逝 + round()」，14.5 的下界
         //   在一次全量并行跑里红过（实测）。上界不动：「没触顶」这条照样咬得住。
-        assert!((14.0..45.0).contains(&first), "首次 30×[0.5,1.5)，得 {first}");
+        // ★ 上界必须是**闭**区间：jitter 取值域 [0.5,1.5) 的上界是开的，但
+        //   `30 × 1.4999…` 经 round() 后**正好等于 45.0**（同理 90.0 / 1350.0）。
+        //   旧写法 `(14.0..45.0)` 把 45 排除在外 —— 约 1.7% 的运行会偶发失败
+        //   （实测：同一份代码连跑三次红一次，报「首次 30×[0.5,1.5)，得 45」）。
+        //   「没触顶」的语义由 `..=45.0` 照样咬得住（46 及以上才算越界）。
+        assert!((14.0..=45.0).contains(&first), "首次 30×[0.5,1.5)，得 {first}");
         let second = left_after(2);
-        assert!((28.0..90.0).contains(&second), "二次 60×[0.5,1.5)，得 {second}");
+        assert!((28.0..=90.0).contains(&second), "二次 60×[0.5,1.5)，得 {second}");
         let capped = left_after(9);
         // 下界取 0.5×900 的 0.99 倍再留 1 秒余量：抖动下限是标准值，但 `left_s` 是取快照
         // 时重新算 remaining 的，9 次 report 之间流逝的毫秒会把它压到 450 以下一点点。
-        // 上界仍是 1350（1.5×900），所以「没触顶 / 提前触顶」照样咬得住。
+        // 上界 1350（1.5×900）同理改闭区间，见上面的 round() 说明。
         assert!(
-            (444.0..1350.0).contains(&capped),
+            (444.0..=1350.0).contains(&capped),
             "9 次后应触顶 900×[0.5,1.5)，得 {capped}"
         );
     }
@@ -1029,7 +1668,7 @@ mod tests {
     #[test]
     fn cooldown_expires_allows_pick_again() {
         let pool = Pool::new();
-        pool.report("p", "a", "m", false, ErrorClass::Transient, false);
+        pool.report("p", "a", "m", false, ErrorClass::Transient);
         // 手动把冷却时间拨到过去（借 forget+report 不可行，直接改内部：用半开探测代替）
         // 半开应放行且清冷却
         let picked = pool.pick("p", &["a".to_string()], "m");
@@ -1043,7 +1682,7 @@ mod tests {
     #[test]
     fn waf_blacklists_account_30min() {
         let pool = Pool::new();
-        pool.report("p", "a", "m", false, ErrorClass::Auth, true);
+        pool.report("p", "a", "m", false, ErrorClass::Auth);
         let snap = pool.snapshot();
         let waf = snap["waf"].as_array().unwrap();
         assert_eq!(waf.len(), 1);
@@ -1058,7 +1697,7 @@ mod tests {
         // 车道级封锁（OpenCode 403 FreeTierError）绝不能走 Auth 分支：
         // 匿名车道没有凭据可重登，把账号拉黑 30min 只会让整条车道白白停摆。
         let pool = Pool::new();
-        pool.report("p", "a", "m", false, ErrorClass::LaneLocked, false);
+        pool.report("p", "a", "m", false, ErrorClass::LaneLocked);
         let snap = pool.snapshot();
         assert_eq!(
             snap["waf"].as_array().unwrap().len(),
@@ -1080,7 +1719,7 @@ mod tests {
     #[test]
     fn region_lock_is_labelled_region_and_never_waf() {
         let pool = Pool::new();
-        pool.report("p", "a", "m", false, ErrorClass::Region, false);
+        pool.report("p", "a", "m", false, ErrorClass::Region);
         let snap = pool.snapshot();
         assert_eq!(snap["waf"].as_array().unwrap().len(), 0);
         assert_eq!(pool.health_of("a").unwrap().0, "region");
@@ -1099,8 +1738,8 @@ mod tests {
     #[test]
     fn success_resets_state() {
         let pool = Pool::new();
-        pool.report("p", "a", "m", false, ErrorClass::Rate, false);
-        pool.report("p", "a", "m", true, ErrorClass::Transient, false);
+        pool.report("p", "a", "m", false, ErrorClass::Rate);
+        pool.report("p", "a", "m", true, ErrorClass::Transient);
         let snap = pool.snapshot();
         assert_eq!(snap["cooling"].as_array().unwrap().len(), 0);
     }
@@ -1108,8 +1747,8 @@ mod tests {
     #[test]
     fn forget_clears_everything() {
         let pool = Pool::new();
-        pool.report("p", "a", "m", false, ErrorClass::Auth, true); // WAF
-        pool.report("p", "a", "m2", false, ErrorClass::Transient, false); // 冷却
+        pool.report("p", "a", "m", false, ErrorClass::Auth); // WAF
+        pool.report("p", "a", "m2", false, ErrorClass::Transient); // 冷却
         let _ = pool.acquire("p", "a", "m3").unwrap();
         pool.forget_account("a");
         let snap = pool.snapshot();
@@ -1122,7 +1761,7 @@ mod tests {
     fn transient_does_not_waf_account() {
         // 「5xx 不怪账号」：Transient 只冻 (账号,模型)，换模型立即可用
         let pool = Pool::new();
-        pool.report("p", "a", "m", false, ErrorClass::Transient, false);
+        pool.report("p", "a", "m", false, ErrorClass::Transient);
         assert_eq!(pool.pick("p", &["a".to_string()], "other").as_deref(), Some("a"));
     }
 
@@ -1197,10 +1836,10 @@ mod tests {
     #[test]
     fn thaw_clears_blocking_but_keeps_the_failure_record() {
         let p = Pool::new();
-        p.report("plat", "acc-1", "m1", false, ErrorClass::Quota, false);
-        p.report("plat", "acc-1", "m2", false, ErrorClass::Quota, false);
-        p.report("plat", "acc-1", "m1", false, ErrorClass::Auth, false);
-        p.report("plat", "acc-2", "m1", false, ErrorClass::Quota, false);
+        p.report("plat", "acc-1", "m1", false, ErrorClass::Quota);
+        p.report("plat", "acc-1", "m2", false, ErrorClass::Quota);
+        p.report("plat", "acc-1", "m1", false, ErrorClass::Auth);
+        p.report("plat", "acc-2", "m1", false, ErrorClass::Quota);
         let b = p.blocked_of("acc-1");
         assert!(b.waf_s > 0.0 && b.cooling_s > 0.0, "种子没生效");
 
@@ -1227,14 +1866,14 @@ mod tests {
         assert!(b.is_clear(), "新账号不该被标阻断：{b:?}");
 
         // 402 只冻 (账号, 模型) → cooling_s > 0，waf_s 仍为 0
-        pool.report("p", "a", "m1", false, ErrorClass::Quota, false);
+        pool.report("p", "a", "m1", false, ErrorClass::Quota);
         let b = pool.blocked_of("a");
         assert!(b.cooling_s > 0.0, "模型级冷却必须体现：{b:?}");
         assert_eq!(b.waf_s, 0.0, "402 不该算整号限速：{b:?}");
         assert!(!b.is_clear(), "{b:?}");
 
         // 另一个模型也冷却：取最长，不是累加
-        pool.report("p", "a", "m2", false, ErrorClass::Auth, false);
+        pool.report("p", "a", "m2", false, ErrorClass::Auth);
         let b2 = pool.blocked_of("a");
         assert!(b2.waf_s > 0.0, "401 必须算整号限速：{b2:?}");
         // 只比大小会因两次调用间的微秒流逝而误判，给 2 秒容差。
@@ -1247,14 +1886,14 @@ mod tests {
         assert!(pool.blocked_of("b").is_clear(), "别的账号不该被牵连");
 
         // 成功一次 → 该号冷却与拉黑都清掉
-        pool.report("p", "a", "m1", true, ErrorClass::Transient, false);
+        pool.report("p", "a", "m1", true, ErrorClass::Transient);
         assert!(pool.blocked_of("a").is_clear(), "成功后必须清干净");
     }
 
     #[test]
     fn quota_does_not_blacklist_account_globally() {
         let pool = Pool::new();
-        pool.report("p", "a", "m1", false, ErrorClass::Quota, false);
+        pool.report("p", "a", "m1", false, ErrorClass::Quota);
         // 402 只冻 (账号, 模型)：同一账号的别的模型照常可用
         assert!(pool.available("a", "m2"), "402 不应账号级拉黑");
         assert!(!pool.available("a", "m1"), "该模型应进冷却");
@@ -1266,7 +1905,7 @@ mod tests {
     #[test]
     fn auth_blacklists_account_globally() {
         let pool = Pool::new();
-        pool.report("p", "a", "m1", false, ErrorClass::Auth, false);
+        pool.report("p", "a", "m1", false, ErrorClass::Auth);
         assert!(!pool.available("a", "m2"), "401 应账号级拉黑，其余模型也不能用");
         assert_eq!(pool.pick("p", &["a".to_string()], "m2"), None, "被拉黑的账号不该被 pick");
     }
@@ -1288,20 +1927,20 @@ mod tests {
     fn health_reflects_outcome_per_class() {
         let p = Pool::new();
         // 401 → 面板要能直接看出「这个号过期了」
-        p.report("plat", "acc", "m", false, ErrorClass::Auth, false);
+        p.report("plat", "acc", "m", false, ErrorClass::Auth);
         let (status, label, _) = p.health_of("acc").expect("auth 后应有健康结论");
         assert_eq!(status, "auth");
         assert!(label.contains("鉴权失败"), "label={label}");
         // 成功 → 立刻恢复「正常」
-        p.report("plat", "acc", "m", true, ErrorClass::Transient, false);
+        p.report("plat", "acc", "m", true, ErrorClass::Transient);
         assert_eq!(p.health_of("acc").unwrap().0, "ok");
         // 网络抖动不该把号标成坏号
-        p.report("plat", "acc", "m", false, ErrorClass::Transient, false);
+        p.report("plat", "acc", "m", false, ErrorClass::Transient);
         assert_eq!(p.health_of("acc").unwrap().0, "ok", "Transient 不应覆盖健康结论");
         // 402 / 429 有各自的状态
-        p.report("plat", "acc", "m", false, ErrorClass::Quota, false);
+        p.report("plat", "acc", "m", false, ErrorClass::Quota);
         assert_eq!(p.health_of("acc").unwrap().0, "quota");
-        p.report("plat", "acc", "m", false, ErrorClass::Rate, false);
+        p.report("plat", "acc", "m", false, ErrorClass::Rate);
         assert_eq!(p.health_of("acc").unwrap().0, "rate");
     }
 
@@ -1339,7 +1978,7 @@ mod persist_tests {
         {
             let p = Pool::open(&d);
             // 制造一条 402 冷却
-            p.report("test-plat", "acc-1", "m1", false, ErrorClass::Quota, false);
+            p.report("test-plat", "acc-1", "m1", false, ErrorClass::Quota);
             p.persist();
             assert!(p.blocked_of("acc-1").cooling_s > 0.0, "冷却应生效");
         }
@@ -1385,7 +2024,7 @@ mod persist_tests {
     fn retry_after_hint_is_adopted_verbatim() {
         // 上游说「60 秒后再来」就冻 60s，而不是按本地曲线（30s×抖动）猜
         let p = Pool::new();
-        p.report_with_hint("pl", "a1", "m", false, ErrorClass::Rate, false, Some(60.0));
+        p.report_with_hint("pl", "a1", "m", false, ErrorClass::Rate, Some(60.0));
         assert!(!p.available("a1", "m"), "应按上游给的秒数进入冷却");
         let left = p.blocked_of("a1").cooling_s;
         assert!(left > 55.0 && left <= 60.5, "冷却时长应≈60s，实际 {left}");
@@ -1395,12 +2034,12 @@ mod persist_tests {
     fn retry_after_hint_is_clamped_to_cap() {
         // 上游偶尔回 "retry after 86400"：照做等于把这个号冻一整天
         let p = Pool::new();
-        p.report_with_hint("pl", "a1", "m", false, ErrorClass::Rate, false, Some(86_400.0));
+        p.report_with_hint("pl", "a1", "m", false, ErrorClass::Rate, Some(86_400.0));
         let left = p.blocked_of("a1").cooling_s;
         assert!(left <= 901.0, "应夹到 900s 上限，实际 {left}");
         // 0 / 负数同样不能变成「立刻重试」的死循环
         let p2 = Pool::new();
-        p2.report_with_hint("pl", "a2", "m", false, ErrorClass::Rate, false, Some(0.0));
+        p2.report_with_hint("pl", "a2", "m", false, ErrorClass::Rate, Some(0.0));
         let left2 = p2.blocked_of("a2").cooling_s;
         // blocked_of 用的是「到现在还剩多久」，读取时刻已过了几微秒 → 允许亚秒余量
         assert!(left2 >= 0.9, "下限 1s（允许读取误差），实际 {left2}");
@@ -1411,7 +2050,7 @@ mod persist_tests {
         // 上游给了准确恢复时间 → 下次从轻档重新开始，不该带着历史惩罚
         let p = Pool::new();
         for _ in 0..3 {
-            p.report_with_hint("pl", "a1", "m", false, ErrorClass::Rate, false, Some(5.0));
+            p.report_with_hint("pl", "a1", "m", false, ErrorClass::Rate, Some(5.0));
         }
         let left = p.blocked_of("a1").cooling_s;
         assert!(left <= 5.5, "连续有提示时仍是 5s 档而不是指数退避，实际 {left}");
@@ -1421,9 +2060,75 @@ mod persist_tests {
     fn report_without_hint_still_uses_local_backoff() {
         // 老路径（不带提示）必须完全不变：首次约 30s×抖动
         let p = Pool::new();
-        p.report("pl", "a1", "m", false, ErrorClass::Rate, false);
+        p.report("pl", "a1", "m", false, ErrorClass::Rate);
         let left = p.blocked_of("a1").cooling_s;
         assert!(left >= 15.0 && left <= 45.0, "本地退避应约 30s，实际 {left}");
     }
 
+
+    /// 401 后清快照：死号的旧余额不能再参与加权。
+    #[test]
+    fn clear_credit_removes_the_snapshot() {
+        let pool = Pool::new();
+        pool.record_credit_exp("a", Some(900.0), None);
+        assert!(pool.credit_snapshot("a").is_some());
+        pool.clear_credit("a");
+        assert!(pool.credit_snapshot("a").is_none());
+        // 不存在的账号清除是无操作（不许 panic）
+        pool.clear_credit("ghost");
+    }
+}
+
+#[cfg(test)]
+mod reserve_tests {
+    use super::*;
+
+    /// ★ 2026-10-28（对齐 magpie reserve/ceiling）：
+    /// 未达阈值的账号应优先被选中；达阈值的让位；全部超阈值时按使用率取最低。
+    #[test]
+    fn ceiling_lets_under_quota_accounts_go_first() {
+        let p = Pool::new();
+        p.set_ceiling(80);
+        // acc-a 已用 90%（超阈值），acc-b 已用 10%
+        p.set_token_rule("acc-a", Some(1000), 3600);
+        p.set_token_rule("acc-b", Some(1000), 3600);
+        // 直接写用量（测试用：模拟本窗口已用）
+        p.mark_token_usage_for_test("acc-a", 900);
+        p.mark_token_usage_for_test("acc-b", 100);
+
+        let pick = p.pick("plat", &["acc-a".into(), "acc-b".into()], "m");
+        assert_eq!(
+            pick,
+            Some("acc-b".into()),
+            "acc-a 已用 90% 超阈值，应让 acc-b 先上"
+        );
+    }
+
+    #[test]
+    fn ceiling_off_keeps_default_order() {
+        let p = Pool::new();
+        // 不设 ceiling → 默认策略（无 credit 快照时保持原序）
+        p.set_token_rule("acc-a", Some(1000), 3600);
+        p.set_token_rule("acc-b", Some(1000), 3600);
+        p.mark_token_usage_for_test("acc-a", 900);
+        p.mark_token_usage_for_test("acc-b", 100);
+        let pick = p.pick("plat", &["acc-a".into(), "acc-b".into()], "m");
+        assert_eq!(pick, Some("acc-a".into()), "ceiling 关闭时应保持原序");
+    }
+
+    #[test]
+    fn all_over_ceiling_picks_least_used() {
+        let p = Pool::new();
+        p.set_ceiling(50);
+        p.set_token_rule("acc-a", Some(1000), 3600);
+        p.set_token_rule("acc-b", Some(1000), 3600);
+        p.mark_token_usage_for_test("acc-a", 900); // 90%
+        p.mark_token_usage_for_test("acc-b", 600); // 60%
+        let pick = p.pick("plat", &["acc-a".into(), "acc-b".into()], "m");
+        assert_eq!(
+            pick,
+            Some("acc-b".into()),
+            "两个都超 50% 阈值时，取使用率较低的 acc-b（60% < 90%）"
+        );
+    }
 }
