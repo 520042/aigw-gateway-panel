@@ -1,0 +1,23 @@
+# River —— OpenAI 兼容推理（api_key）
+# 一手来源：magpie-community/plugins packages/river（151★ 社区插件库）
+#   "River serves an OpenAI-compatible inference API at https://api.river.ai/v1"
+# 实测（2026-10-28）：GET /v1/models 无 key → 401
+#   {"error":{"message":"Missing or invalid Authorization header. Expected: Bearer <api-key>"}}
+#   说明端点真实存在、标准 Bearer 鉴权，不是占位符。
+id = "api-river"
+name = "River"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.river.ai/v1"
+format = "openai"
+
+# 清单以实时 /models 为准（参考插件的做法：按账号逐个列出 key 能用的模型）
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://console.river.ai/keys"
+
+notes = "River 按量计费推理；Key 形如 rv_…，在 Console → API Keys 创建。模型与价格以 /v1/models 与官方定价页实时为准。"

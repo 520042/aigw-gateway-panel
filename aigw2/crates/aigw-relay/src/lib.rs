@@ -31,6 +31,7 @@ pub mod lobster_checkin;
 pub mod wb_checkin;
 pub mod raccoon_checkin;
 pub mod sysprompt;
+pub mod history_trim;
 /// 重导出 reqwest::Client，供上层 crate（aigw-server）在签名里引用而不必自加依赖。
 pub use reqwest::Client as HttpClient;
 pub mod commandcode;
@@ -579,6 +580,13 @@ impl OutClient {
             match serde_json::from_slice::<Value>(body) {
                 Ok(mut v) => {
                     let mut dirty = false;
+                    // ★ 2026-10-28（对齐 magpie history-trim）：先裁历史省 token，
+                    //   再注入用户提示词 —— 裁的是客户端历史（大头），注的是我们这句
+                    //   （小），顺序反了会让刚注入的提示词也被算进「历史」里重复删。
+                    if history_trim::apply_global(&mut v) {
+                        tracing::debug!("已裁剪历史（省 token）");
+                        dirty = true;
+                    }
                     if sysprompt::apply_global(&mut v, sysprompt::Proto::Chat) {
                         tracing::debug!("已注入自定义系统提示词");
                         dirty = true;
@@ -623,9 +631,13 @@ impl OutClient {
                         dirty = true;
                     }
                 }
-                // ★ 2026-10-28（对齐 magpie system-prompt 插件）：注入用户自定义
-                //   系统提示词。**必须在脱敏之后** —— 顺序反了会把用户写的话
-                //   当成客户端指纹一起改写。
+                // ★ 2026-10-28（对齐 magpie history-trim + system-prompt）：
+                //   脱敏 → 裁历史（省 token）→ 注入用户提示词。
+                //   裁在注之前：裁的是客户端历史（大头），注的是我们这一句（小）；
+                //   顺序反了会让刚注入的提示词也被当成「历史」参与重复删除。
+                if history_trim::apply_global(&mut v) {
+                    dirty = true;
+                }
                 if sysprompt::apply_global(&mut v, sysprompt::Proto::Chat) {
                     dirty = true;
                 }
@@ -1094,8 +1106,11 @@ pub fn classify_verify_probe(status: u16, body: &str) -> VerifyOutcome {
                             dirty = true;
                         }
                     }
-                    // ★ 2026-10-28（对齐 magpie system-prompt）：流式路径同样注入
-                    //   用户自定义系统提示词（脱敏之后）。
+                    // ★ 2026-10-28（对齐 magpie history-trim + system-prompt）：
+                    //   流式路径同样「裁历史 → 注入提示词」（脱敏之后）。
+                    if history_trim::apply_global(&mut v) {
+                        dirty = true;
+                    }
                     if sysprompt::apply_global(&mut v, sysprompt::Proto::Chat) {
                         dirty = true;
                     }

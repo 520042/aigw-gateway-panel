@@ -632,6 +632,18 @@ async fn main() {
         }
         aigw_relay::sysprompt::apply_cfg(&sp);
     }
+    // ★ 2026-10-28（对齐 magpie history-trim）：启动时加载历史裁剪配置（默认开启）。
+    {
+        let ht = aigw_relay::history_trim::load(&data_dir());
+        if ht.compress_tool_results {
+            tracing::info!(
+                "history_trim：已开启（工具结果上限 {} 字符，system 保护 {}）",
+                ht.max_tool_len,
+                if ht.preserve_system { "开" } else { "关" }
+            );
+        }
+        aigw_relay::history_trim::apply_cfg(&ht, ht.compress_tool_results);
+    }
     let client = Arc::new(aigw_relay::OutClient::new());
     // 账号池：双源装载（v2 data/accounts.json 权威；首次从 legacy 只读初始化）
     let legacy_accounts = legacy_dir()

@@ -370,6 +370,8 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/runtime", get(runtime_get).post(runtime_set))
         // ★ 2026-10-28（对齐 magpie system-prompt 插件）：自定义系统提示词注入。
         .route("/api/sysprompt", get(sysprompt_get).post(sysprompt_set))
+        // ★ 2026-10-28（对齐 magpie history-trim）：历史裁剪省 token。
+        .route("/api/history_trim", get(htrim_get).post(htrim_set))
         .route("/api/backup", get(backup_export).post(backup_restore))
         // 完整备份（含凭据）：前端「⬇ 备份数据」用它，否则导出的备份恢复不回来
         .route("/api/backup/export", post(backup_export_full))
@@ -5510,6 +5512,61 @@ async fn sysprompt_set(State(st): State<AppState>, body: Bytes) -> Response {
     }
 }
 
+/// ★ 2026-10-28（对齐 magpie history-trim）：读取历史裁剪配置。
+async fn htrim_get() -> Json<Value> {
+    let c = aigw_relay::history_trim::current();
+    Json(json!({
+        "ok": true,
+        "cfg": match c {
+            Some(c) => json!({
+                "enabled": c.compress_tool_results,
+                "maxToolLength": c.max_tool_len,
+                "compressToolResults": c.compress_tool_results,
+                "preserveSystemPrompt": c.preserve_system,
+            }),
+            None => json!({
+                "enabled": false,
+                "maxToolLength": aigw_relay::history_trim::DEFAULT_MAX_TOOL_LEN,
+                "compressToolResults": false,
+                "preserveSystemPrompt": false,
+            }),
+        }
+    }))
+}
+
+/// ★ 2026-10-28：保存历史裁剪配置并立即生效。
+async fn htrim_set(State(st): State<AppState>, body: Bytes) -> Response {
+    let v: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
+        }
+    };
+    let cfgv = v.get("cfg").cloned().unwrap_or(v);
+    let cfg = aigw_relay::history_trim::TrimCfg::from_json(&cfgv);
+    let enabled = cfgv.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    let dir = st
+        .data_dir
+        .as_ref()
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    match aigw_relay::history_trim::save_and_apply(&dir, &cfg, enabled) {
+        Ok(()) => {
+            let msg = if enabled {
+                format!(
+                    "已保存并立即生效：历史裁剪开启（工具结果上限 {} 字符{}）",
+                    cfg.max_tool_len,
+                    if cfg.preserve_system { "，保护 system 消息" } else { "" }
+                )
+            } else {
+                "已关闭历史裁剪".to_string()
+            };
+            Json(json!({"ok": true, "message": msg})).into_response()
+        }
+        Err(e) => Json(json!({"ok": false, "message": format!("保存失败：{e}")})).into_response(),
+    }
+}
+
 /// ★ 2026-10-26（P3）：运行时配置热更新（面板 POST /api/runtime）。
 ///
 /// 改完**立即生效**：正在飞的请求不受影响（它们已取过自己的值），
@@ -5577,7 +5634,8 @@ async fn runtime_set(State(st): State<AppState>, body: Bytes) -> Response {
 
 /// /v1/messages/count_tokens：Claude Code 等客户端在发送前会调它做预算。
 /// 这是本地估算（不消耗上游额度），把 Anthropic 请求转成 OpenAI 形状后按字符估算。
-async fn count_tokens(    State(_st): State<AppState>,
+async fn count_tokens(
+    State(_st): State<AppState>,
     key: Option<Extension<AccessKeyCtx>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
