@@ -2987,7 +2987,79 @@ async function viewRuntime(el) {
       <button class="btn gh" onclick="route()">刷新</button>
     </div>
     <div id="rtMsg" style="margin-top:10px"></div>
+  </section>
+  ${await sysPromptCard()}`;
+}
+
+// ★ 2026-10-28（对齐 magpie system-prompt 插件）：自定义系统提示词注入。
+// 语义：请求本来没有 system 就用这句；有的话默认不动，勾「覆盖叠加」才叠加；
+// 位置 append 放后面（保住客户端的 prompt 缓存），prepend 放前面。
+async function sysPromptCard() {
+  let c = {};
+  try {
+    const r = await api('/api/sysprompt');
+    c = (r && r.cfg) || {};
+  } catch (_) {}
+  const pos = c.position || 'append';
+  return `<section class="card glass" style="margin-top:14px">
+    <div class="card-t"><b>系统提示词注入</b>
+      <span class="faint small" style="margin-left:8px">给所有请求加一句自己的约束（如「用中文回答」）</span></div>
+    <div class="faint small" style="margin-bottom:12px">
+      请求本来没有系统提示词 → 直接注入这句；请求已自带 → 默认不动（保护客户端自己的提示词）。
+      注入位置 <span class="mono">append</span> 放后面可保住客户端的 prompt 缓存，<span class="mono">prepend</span> 放前面会让上游每轮重读全部提示词。
+      存 <span class="mono">data/sysprompt.json</span>，改完立即生效。
+    </div>
+    <label>提示词内容（留空 = 关闭注入）</label>
+    <textarea id="spText" rows="3" style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:inherit;font-size:13px"
+      placeholder="例如：回答请使用简体中文，不要输出道歉或客套话。">${esc(c.system_prompt || '')}</textarea>
+    <div class="row" style="margin-top:10px;gap:14px;align-items:center">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="spOverride" ${c.override ? 'checked' : ''} style="width:auto">
+        <span>覆盖叠加（请求已有提示词时也加上）</span></label>
+      <label style="display:flex;align-items:center;gap:6px">
+        <span class="faint">位置</span>
+        <select id="spPos" class="q" style="width:auto">
+          <option value="append" ${pos === 'append' ? 'selected' : ''}>append（追加，保住缓存）</option>
+          <option value="prepend" ${pos === 'prepend' ? 'selected' : ''}>prepend（前置）</option>
+        </select></label>
+      <label style="display:flex;align-items:center;gap:6px">
+        <span class="faint">模型前缀（留空=全部）</span>
+        <input id="spModels" class="q mono" style="width:180px" value="${esc((c.models || []).join(','))}" placeholder="glm,deepseek"></label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn pri" onclick="sysPromptSave()">保存并立即生效</button>
+      <button class="btn gh" onclick="sysPromptClear()">清空（关闭注入）</button>
+    </div>
+    <div id="spMsg" style="margin-top:10px"></div>
   </section>`;
+}
+async function sysPromptSave() {
+  const box = document.getElementById('spMsg');
+  const models = (document.getElementById('spModels').value || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const cfg = {
+    system_prompt: (document.getElementById('spText').value || '').trim(),
+    override: !!document.getElementById('spOverride').checked,
+    position: document.getElementById('spPos').value,
+    models,
+  };
+  if (box) box.innerHTML = '<span class="faint">保存中…</span>';
+  const r = await post('/api/sysprompt', { cfg }).catch((e) => ({ ok: false, message: String(e) }));
+  if (!box) return;
+  box.innerHTML = r && r.ok
+    ? `<div class="note oknote">${esc(r.message || '已保存')}</div>`
+    : `<div class="note errnote">保存失败：${esc((r && r.message) || '未知错误')}</div>`;
+}
+async function sysPromptClear() {
+  const box = document.getElementById('spMsg');
+  const txt = document.getElementById('spText');
+  if (txt) txt.value = '';
+  if (box) box.innerHTML = '<span class="faint">清空中…</span>';
+  const r = await post('/api/sysprompt', { cfg: { system_prompt: '', override: false, position: 'append', models: [] } }).catch((e) => ({ ok: false, message: String(e) }));
+  if (!box) return;
+  box.innerHTML = r && r.ok
+    ? `<div class="note oknote">${esc(r.message || '已清空')}</div>`
+    : `<div class="note errnote">清空失败：${esc((r && r.message) || '未知错误')}</div>`;
 }
 async function runtimeSave() {
   const box = document.getElementById('rtMsg');

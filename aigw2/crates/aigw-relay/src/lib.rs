@@ -29,6 +29,8 @@ pub mod wb;
 pub mod wb_growth;
 pub mod lobster_checkin;
 pub mod wb_checkin;
+pub mod raccoon_checkin;
+pub mod sysprompt;
 /// 重导出 reqwest::Client，供上层 crate（aigw-server）在签名里引用而不必自加依赖。
 pub use reqwest::Client as HttpClient;
 pub mod commandcode;
@@ -567,6 +569,30 @@ impl OutClient {
                 ),
             });
         }
+        // ★ 2026-10-28（对齐 magpie system-prompt）：**所有**上游都要能注入自定义
+        //   系统提示词，因此必须放在各 upsteam_kind/signer 分发**之前**。
+        //   早期实现把注入写在脱敏旁边（分发之后），wb 族在这里就 return 了，
+        //   注入永远跑不到 —— 实测 wb 账号上「提示词不生效」正是这个原因。
+        //   顺序：先注入用户提示词，再脱敏（用户写的话不该被当成客户端指纹改写）。
+        let sp_body;
+        let body = {
+            match serde_json::from_slice::<Value>(body) {
+                Ok(mut v) => {
+                    let mut dirty = false;
+                    if sysprompt::apply_global(&mut v, sysprompt::Proto::Chat) {
+                        tracing::debug!("已注入自定义系统提示词");
+                        dirty = true;
+                    }
+                    if dirty {
+                        sp_body = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
+                        sp_body.as_slice()
+                    } else {
+                        body
+                    }
+                }
+                Err(_) => body,
+            }
+        };
         // WorkBuddy 族上游**只支持流式**（实测非流式一律 400 code=11101，报文里
         // stream:false 会被判「请求内容不合法」）。这里自己改成流式发出去再聚合成一个
         // 完整 JSON，而不是让调用方收到一个看不懂的 11101。
@@ -585,22 +611,29 @@ impl OutClient {
         let owned;
         let body = match serde_json::from_slice::<Value>(body) {
             Ok(mut v) => {
+                let mut dirty = false;
                 if sanitize::degrade_active() {
                     if sanitize::neutralize_request_body(&mut v) {
-                        owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
-                        owned.as_slice()
-                    } else {
-                        body
+                        dirty = true;
                     }
                 } else {
                     let sc = sanitize::sanitize_request_body(&mut v);
-                    if sc.is_empty() {
-                        body
-                    } else {
+                    if !sc.is_empty() {
                         tracing::debug!(changed = ?sc, "出站请求体已做指纹脱敏（非流式）");
-                        owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
-                        owned.as_slice()
+                        dirty = true;
                     }
+                }
+                // ★ 2026-10-28（对齐 magpie system-prompt 插件）：注入用户自定义
+                //   系统提示词。**必须在脱敏之后** —— 顺序反了会把用户写的话
+                //   当成客户端指纹一起改写。
+                if sysprompt::apply_global(&mut v, sysprompt::Proto::Chat) {
+                    dirty = true;
+                }
+                if dirty {
+                    owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
+                    owned.as_slice()
+                } else {
+                    body
                 }
             }
             Err(_) => body,
@@ -1060,6 +1093,11 @@ pub fn classify_verify_probe(status: u16, body: &str) -> VerifyOutcome {
                             tracing::debug!(changed = ?sc, "出站请求体已做指纹脱敏");
                             dirty = true;
                         }
+                    }
+                    // ★ 2026-10-28（对齐 magpie system-prompt）：流式路径同样注入
+                    //   用户自定义系统提示词（脱敏之后）。
+                    if sysprompt::apply_global(&mut v, sysprompt::Proto::Chat) {
+                        dirty = true;
                     }
                     if dirty {
                         owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());

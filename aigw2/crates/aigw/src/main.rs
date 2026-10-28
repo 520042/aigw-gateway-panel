@@ -56,8 +56,262 @@ struct Cli {
     /// 缺省读环境变量 AIGW_PANEL_TOKEN；对外监听（非回环）时未设置会自动生成并打印一次。
     #[arg(long)]
     token: Option<String>,
+    /// 接入源体检：逐个用真实代码去拉模型清单，打印「谁通、谁挂、为什么」后退出。
+    ///
+    /// 用途：上游改版/反代失效时，面板上只能看到「近24h 失败 N 次」，说不出是哪个
+    /// 端点变了。这个模式把每个源的结论直接打出来，是排查「接入源是不是废了」的
+    /// 第一手段。不启动服务、不写数据。
+    #[arg(long, default_value_t = false)]
+    doctor: bool,
+    /// 配合 --doctor：只体检 id 含该子串的源（可重复传）。
+    #[arg(long)]
+    only: Vec<String>,
 }
 
+/// 接入源体检：用**真实转发代码**逐个去拉模型清单，把结论打出来。
+///
+/// 为什么不用 curl 手工试：每个源的鉴权方式、头组、签名、私有协议都不一样
+/// （qoder 要 COSY 签名、trae 要 Cloud-IDE-JWT、doubao 走 samantha 私有 SSE）。
+/// 手工拼的请求与代码发出的请求不是一回事，手测「通」不能证明代码可用。
+///
+/// 判定口径与运行时一致：
+/// - Ok(n)     → 端点通（n=0 表示上游给了合法空清单，不是失败）
+/// - 401/403   → **端点活着**，只是本机没凭据（不算失效）
+/// - 其它 Err  → 真失败（超时 / 4xx / 5xx / 解析不了），需要人工跟进
+/// 把 URL 里的 host 解析成 IP。返回 `Some(false)` = **DNS 查不到这个域名**。
+///
+/// ★ 为什么要单独查 DNS：体检把「连不上」统一归成 [NET]，但里面混着三类完全
+///   不同的事 —— ① 域名已经不存在（ENOTFOUND，源真的没了）② 域名在但被 WAF 拦
+///   ③ 海外源本机没配代理。三类都显示「连不上」时，用户只能一个个手工 dig。
+///   先查一次 DNS 就能把 ① 单独摘出来，那才是真正需要处理的。
+fn host_resolves(base_url: &str) -> Option<bool> {
+    let rest = base_url.split("://").nth(1)?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let host = host.split(':').next()?;
+    if host.is_empty() {
+        return None;
+    }
+    use std::net::ToSocketAddrs;
+    Some((host, 443u16).to_socket_addrs().map(|mut it| it.next().is_some()).unwrap_or(false))
+}
+/// 从代理 URL 抠出 (host, port)：转调 relay 的唯一实现（面板「测试连通」共用）。
+fn proxy_host_port(url: &str) -> Option<(String, u16)> {
+    aigw_relay::proxy::parse_host_port(url)
+}
+async fn run_doctor(specs: Vec<aigw_registry::ProviderSpec>, only: &[String]) -> i32 {
+    use aigw_relay::OutClient;
+    let targets: Vec<_> = specs
+        .into_iter()
+        // ★ 只体检声明了 live 清单的源。Static/None 策略的源**本来就没有**
+        //   /models 上游（秘塔、豆包、元宝、Trae 都是私有协议，清单靠静态表或后缀路由），
+        //   拿 /models 去探必然 404 —— 那不是失效，是这边探错了地方。
+        // static 源里只有显式声明了 models_path 的才值得核对静态清单
+        // （其余的私有协议源本来就没有清单端点，拿 /models 去探必然 404）。
+        // ★ 现在**所有**启用源都参与体检。做法分两档（见下面的探测分支）：
+        //   ① 有清单端点的（live / static+models_path）→ 拉清单，顺带核对静态表；
+        //   ② 没有清单端点的（none / static 无 models_path）→ 探**根路径**判可达。
+        //   之前只覆盖 ①，导致 31 个源（大量逆向协议源 + 4 家自定义 adapter）
+        //   从来没人探过，端点是死是活只能等用户配好凭据才发现。
+        // 已停用的源不体检：它们多半就是「上游已废」才被停掉的，报出来只是噪音。
+        .filter(|s| s.enabled)
+        // 占位符源（base_url 以 @ 开头 = 用户还没填地址）没有可探测的端点：
+        // 硬探会得到一个非法 URL，然后被归进 [NET]「连不上」—— 那是假故障。
+        .filter(|s| !s.base_url.starts_with('@'))
+        .filter(|s| {
+            if only.is_empty() {
+                return true;
+            }
+            only.iter().any(|k| s.id.contains(k.as_str()))
+        })
+        .collect();
+    if targets.is_empty() {
+        eprintln!("没有匹配的接入源（--only 过滤后为空）");
+        return 2;
+    }
+    let client = std::sync::Arc::new(OutClient::new());
+    println!(
+        "接入源体检：{} 个 live 源（并发 8，单源 12s 超时）\n",
+        targets.len()
+    );
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+    let mut handles = Vec::new();
+    for spec in targets {
+        let c = client.clone();
+        let s2 = sem.clone();
+        handles.push(tokio::spawn(async move {
+            let _p = s2.acquire_owned().await;
+            // 无凭据拉清单：有 Key 的源会回 401/403，那也是「端点活着」的证据。
+            // ★ none 策略的源**没有清单端点**（清单靠静态表或 模型@平台 后缀），
+            //   拿 /models 去探必然 404 —— 那是探错了地方，不是端点失效。
+            //   对它们改探**根路径**：只要拿到任何 HTTP 状态（而非连接失败/超时），
+            //   就说明「域名与网关还在」。这条覆盖的价值在实测中体现过：
+            //   orcaterm / monkeycode / accio 这类自定义 adapter 之前完全没被探过。
+            let has_models_endpoint = spec.models_policy == aigw_registry::ModelsPolicy::Live
+                || (spec.models_policy == aigw_registry::ModelsPolicy::Static
+                    && !spec.models_path.is_empty());
+            let r = if !has_models_endpoint {
+                let (st, err) = aigw_relay::OutClient::probe_reachable(c.http(), &spec.base_url).await;
+                match err {
+                    Some(e) => Err((0u16, e)),
+                    None => Ok(vec![format!("http-{st}")]),
+                }
+            } else {
+                c.fetch_models_with_secret(&spec, "")
+                    .await
+                    .map_err(|e| (e.status, e.body))
+            };
+            (
+                spec.id.clone(),
+                spec.base_url.clone(),
+                // 有静态表就参与比对（不只 static 源）：live 源的静态表同样是
+                // 「实时拉不到时的兜底」，里面躺着已下线的模型一样会让用户选到 404。
+                !spec.models.is_empty(),
+                spec.models.clone(),
+                spec.models_filter.clone(),
+                r,
+            )
+        }));
+    }
+    let mut rows = Vec::new();
+    for h in handles {
+        if let Ok(x) = h.await {
+            rows.push(x);
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut alive = 0usize;
+    let mut nokey = 0usize;
+    let mut dead = Vec::new();
+    let mut unreachable_net = Vec::new();
+    let mut throttled = Vec::new();
+    let mut drift = Vec::new();
+    for (id, base, has_static, declared, mfilter, r) in &rows {
+        match r {
+            Ok(ids) => {
+                alive += 1;
+                // ★ 静态清单漂移检测：static 策略的源，toml 里的模型表就是唯一真相，
+                //   上游下架了模型它不会自己知道。anon-zen 里曾躺着一个已下架的
+                //   minimax-m3.1-flash-free（上游清单里早没了），用户选它只会拿到 404。
+                //   这类「配置与上游脱节」唯有实时比对能发现。
+                    // ★ `!ids.is_empty()` 这条**不能省**：拉不到清单时 ids 是空的，
+                    //   拿空集去比会让静态表里的每一个模型都被判成「已下架」。
+                    //   实测 loomy 的 /models 回 HTTP 200 + {"code":"100002","desc":"缺少 token"}
+                    //   （无 data），于是它整张静态表被误报成 6 个模型全下架。
+                    //   空清单的含义是「这次没拿到」，不是「上游一个模型都没有」。
+                // ★ 根路径探测的「ids」是 http-<状态码> 标记，**不是模型清单**：
+                //   拿它去比静态表会把每一个模型都判成「已下架」（实测一次冒出 28 个假漂移）。
+                let probed_root = ids.first().map(|s| s.starts_with("http-")).unwrap_or(false);
+                if *has_static
+                    && !declared.is_empty()
+                    && mfilter.is_empty()
+                    && !ids.is_empty()
+                    && !probed_root
+                {
+                    // ★ 有 models_filter 的源**跳过比对**（如 kilo 的 isFree）。
+                    //   原因：fetch_models_with_secret 返回的本来就是**过滤后**的清单，
+                    //   拿它去比静态表，「静态表列了非免费模型」会被误报成「上游已下架」
+                    //   —— 实测 kilo 的 kilo-auto/frontier / balanced 在上游确实存在，
+                    //   只是 isFree 为假。要准确比对必须先拿到未过滤的原始清单，
+                    //   而当前接口拿不到；与其误报，不如不判。
+                    let gone: Vec<&String> =
+                        declared.iter().filter(|m| !ids.contains(m)).collect();
+                    if gone.is_empty() {
+                        // 静态表是上游的子集：不报警。刻意只暴露免费档 / 某个切片的源
+                        // 本来就列不全，而「少列」不会让用户拿到 404。
+                        // 真正会造成失败的是下面那条（列了上游已经没有的）。
+                        println!("  [OK ]  {:<22} 静态表 {} 个模型均在上游", id, declared.len());
+                    } else {
+                        println!("  [DRIFT] {:<22} 静态表里有上游已下架的模型", id);
+                        println!("          已下架：{:?}", gone);
+                        println!(
+                            "          影响：这些模型会出现在 /v1/models 里，选了就是 404"
+                        );
+                        drift.push(id.clone());
+                    }
+                } else if ids.first().map(|s| s.starts_with("http-")).unwrap_or(false) {
+                    // none 策略源：探的是根路径，拿到的「条目」是 http-<状态码> 标记，
+                    // 不是模型清单 —— 文案要说清楚是「可达」而不是「有 N 个模型」。
+                    let code = ids.first().map(|s| s.trim_start_matches("http-").to_string()).unwrap_or_default();
+                    println!("  [OK ]  {:<22} 端点可达（根路径 HTTP {code}；该源无清单端点，模型靠静态表/后缀路由）", id);
+                } else {
+                    println!("  [OK ]  {:<22} 清单 {} 条", id, ids.len());
+                }
+            }
+            Err((st, body)) if *st == 401 || *st == 403 => {
+                nokey += 1;
+                println!("  [KEY]  {:<22} HTTP {}（端点活着，本机无凭据）", id, st);
+                // ★ 401 也要看一眼 body：它能区分「这个 401 是 API 端点给的」
+                //   （典型是 {"error":{"code":"invalid_api_key"...}}）还是「某个
+                //   网站/WAF 给的」。后者说明 base_url 可能打到了网页而不是 API ——
+                //   只看状态码的话，两种都长得一样。
+                let head = body.chars().take(80).collect::<String>().replace('\n', " ");
+                if !head.trim().is_empty() {
+                    println!("           {}", head);
+                }
+            }
+            Err((st, body)) => {
+                let why = body.chars().take(90).collect::<String>().replace('\n', " ");
+                // ★ HTTP 0 = 连接层失败（超时/拒绝连接）。海外源在本机没配代理时必然
+                //   落到这一类，把它和「端点真的变了」分开报，否则一次体检会冒出几十
+                //   条假故障，真问题反而被淹没。
+                if *st == 0 {
+                    // 先分「域名没了」与「连不上」：前者是真要处理的，后者多半是没配代理。
+                    if host_resolves(base) == Some(false) {
+                        dead.push(id.clone());
+                        println!("  [DNS]  {:<22} 域名解析失败（ENOTFOUND，源可能已下线）", id);
+                        println!("           base_url = {}", base);
+                    } else {
+                        unreachable_net.push(id.clone());
+                        // ★ 把原因摘要打出来：「证书过期」「代理拒连」「超时」在 user
+                        //   眼里是同一行「连不上」，但处置完全不同（等上游续期 /
+                        //   检查代理 / 重试）。旧实现只打一句固定的「超时/拒连」，
+                        //   实测 api-tokenrouter 证书过期时用户会去查自己的网络。
+                        let brief: String = why.chars().take(110).collect();
+                        if brief.trim().is_empty() {
+                            println!("  [NET]  {:<22} 连不上（超时/拒连）", id);
+                        } else {
+                            println!("  [NET]  {:<22} 连不上：{}", id, brief);
+                        }
+                    }
+                } else if *st == 429 {
+                    // 429 = 上游限流，是**临时状态**而不是「端点变了」。
+                    // 混进「需跟进」里会让每次体检都挂着几条待办，真问题反而被稀释；
+                    // 单独一类，稍后重跑即可。
+                    throttled.push(id.clone());
+                    println!("  [429]  {:<22} 被上游限流（稍后重跑即可）", id);
+                } else {
+                    dead.push(id.clone());
+                    println!("  [FAIL] {:<22} HTTP {} {}", id, st, why);
+                    println!("           base_url = {}", base);
+                }
+            }
+        }
+    }
+    println!(
+        "\n小结：通 {} / 需凭据 {} / 连不上 {} / 被限流 {} / 失败 {} / 清单漂移 {}",
+        alive,
+        nokey,
+        unreachable_net.len(),
+        throttled.len(),
+        dead.len(),
+        drift.len()
+    );
+    if !throttled.is_empty() {
+        println!("被上游限流（临时状态，稍后重跑）：{}", throttled.join("，"));
+    }
+    if !drift.is_empty() {
+        println!("静态表与上游不一致：{}", drift.join("，"));
+    }
+    if !unreachable_net.is_empty() {
+        println!("连不上（多为海外源，需配代理后复检）：{}", unreachable_net.join("，"));
+    }
+    if !dead.is_empty() {
+        println!("失败（端点可能已变，需跟进）：{}", dead.join("，"));
+    }
+    println!("注：[KEY] 不是故障（官方 API 源要粘贴 Key）；[NET] 多为本机无代理，也不是故障。");
+    println!("只有 [FAIL] 是需要跟进的。");
+    0
+}
 /// 本机回环判定（`127.0.0.0/8` / `localhost` / `::1`）。
 fn is_loopback(host: &str) -> bool {
     let h = host.trim().trim_start_matches('[').trim_end_matches(']');
@@ -173,8 +427,14 @@ fn init_tracing(dd: &std::path::Path) {
     let level = log_level_from_env();
     match aigw_store::rotlog::Tee::new(dd) {
         Ok(tee) => {
+            // ★ 关掉 ANSI 颜色：Tee 同时写终端与落盘文件，开着颜色时转义码
+            //   （\x1b[2m 等）会跟着进 aigw.log —— 面板「日志」页显示的是文件，
+            //   用户复制日志贴群里就是乱码，且 grep 关键词会切开转义码
+            //   归档产物就该是纯文本；终端失去配色是小事（计划任务跑的进程
+            //   本来就没人盯着看）。
             tracing_subscriber::fmt()
                 .with_max_level(level)
+                .with_ansi(false)
                 .with_writer(tee)
                 .init();
         }
@@ -252,6 +512,51 @@ async fn main() {
         }
     };
 
+    // 体检模式：打完报告就返回，不启动服务、不写数据。
+    //
+    // ★ 这里必须用 return 而不是 std::process::exit：exit 在 tokio 运行时里会
+    //   跳过栈上所有析构（Arc/Mutex 守卫/未完成的 spawn 任务），实测全量体检
+    //   偶发 0xC0000005 —— 报告明明已打完，崩在收尾阶段。正常返回让运行时
+    //   自己收尾就没有这个问题。
+    if cli.doctor {
+        // ★ 体检也要走代理。旧实现在这里直接 return，而 `proxy::load/apply` 在下面几十行
+        //   之后 —— 于是 --doctor **永远走直连**，海外源一律报 [NET]「连不上」。
+        //   而体检的首要用途正是「上游改版/反代失效时，逐个源确认谁挂了」，海外源
+        //   恰恰是最需要排查的那批。读代理配置是只读操作，不违反「不写数据」的约定。
+        let pcfg = aigw_relay::proxy::load(&data_dir());
+        aigw_relay::proxy::apply(&pcfg);
+        if pcfg.mode != "direct" {
+            println!(
+                "出站代理：{} {}（来自 data/proxy.json；改它用面板「代理」页或 /api/proxy）",
+                pcfg.mode, pcfg.url
+            );
+            // ★ 预检代理本身活不活。代理进程退了但 proxy.json 还是 global 时，
+            //   所有源（连国内站都不例外）都会被引向死端口 —— 实测 2026-10-27：
+            //   Clash 退出后国内站 TCP 直连明明正常，体检却报 140/141 [NET]。
+            //   用户对着满屏「连不上」只会以为上游全挂了，**永远想不到是自家
+            //   代理软件没开** —— 报告必须把最可能的根因放在最前面说。
+            if let Some((host, port)) = proxy_host_port(&pcfg.url) {
+                let probe = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    tokio::net::TcpStream::connect((host.as_str(), port)),
+                )
+                .await;
+                let dead = match &probe {
+                    Ok(Ok(_)) => false,
+                    Ok(Err(_)) | Err(_) => true,
+                };
+                if dead {
+                    println!(
+                        "\n⚠⚠ 代理 {}:{} 连不上（模式仍是 {}）。下面的 [NET]「连不上」大概率全是**代理软件没运行**\n    造成的，不是上游失效；国内站直连通常本来可用。先启动代理再重跑 --doctor，报告才有诊断价值。\n",
+                        host, port, pcfg.mode
+                    );
+                }
+            }
+        }
+        let _code = run_doctor(specs, &cli.only).await;
+        return;
+    }
+
     // settings：旧版 settings.json 只读导入占位符键（@lobster → lobster_server）
     let mut settings: std::collections::BTreeMap<String, String> = Default::default();
     if let Some(legacy) = legacy_dir() {
@@ -313,6 +618,19 @@ async fn main() {
     aigw_relay::proxy::apply(&pcfg);
     if pcfg.mode != "direct" {
         tracing::info!("proxy：mode={} url={}", pcfg.mode, pcfg.url);
+    }
+    // ★ 2026-10-28（对齐 magpie system-prompt）：启动时加载自定义系统提示词配置。
+    {
+        let sp = aigw_relay::sysprompt::load(&data_dir());
+        if sp.is_enabled() {
+            tracing::info!(
+                "sysprompt：已启用（{} 模式，注入位置 {}，模型过滤 {} 条）",
+                if sp.override_existing { "覆盖" } else { "仅缺省时" },
+                if sp.prepend { "前置" } else { "追加" },
+                sp.models.len()
+            );
+        }
+        aigw_relay::sysprompt::apply_cfg(&sp);
     }
     let client = Arc::new(aigw_relay::OutClient::new());
     // 账号池：双源装载（v2 data/accounts.json 权威；首次从 legacy 只读初始化）
@@ -546,6 +864,46 @@ async fn main() {
             .await;
         });
     }
+    // ★ 回灌在线倍率缓存（data/model-rates.json）：上次刷新成功过的话，
+    //   启动即用在线值，不用等第一个 6 小时周期。文件缺/坏静默用离线表。
+    aigw_server::model_rates::load_cache(&dd);
+    // ★ Token 限制器规则回灌：限制存于 accounts.json（账号字段），号池事实表
+    //   在内存——启动必须把规则装回池里，否则「重启一次限制就失效」。
+    {
+        let snap = state.accounts.rows_snapshot();
+        if let Some(rows) = snap.get("rows").and_then(|r| r.as_array()) {
+            for row in rows {
+                let id = row.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                let limit = row.get("token_limit").and_then(|x| x.as_u64());
+                let period = row.get("token_period_s").and_then(|x| x.as_i64()).unwrap_or(3600);
+                if !id.is_empty() {
+                    if let Some(l) = limit {
+                        state.pool.set_token_rule(id, Some(l), period);
+                    }
+                }
+            }
+        }
+    }
+    // ★ 2026-10-27：积分快照周期刷新（只读查询，无需开关）。快照 TTL 25h，
+    //   6h 一轮 —— 用户不点「积分」不签到时，「快到期优先」与积分总览条也有数。
+    {
+        let tasks = state.tasks.clone();
+        let st7 = state.clone();
+        state.tasks.declare("credits_refresh");
+        tokio::spawn(async move {
+            aigw_server::supervise_loop_now(
+                "credits_refresh",
+                tasks,
+                std::time::Duration::from_secs(6 * 3600),
+                std::time::Duration::from_secs(30 * 60),
+                move || {
+                    let st8 = st7.clone();
+                    async move { Ok(aigw_server::refresh_credits_all(&st8).await) }
+                },
+            )
+            .await;
+        });
+    }
     // ★ 2026-10-26（P3）：号池状态定期落盘。冷却/健康/积分快照每 60 秒存一次，
     // 进程被强杀最多丢 60 秒的治理状态——比「重启全丢」好得多。
     {
@@ -577,15 +935,28 @@ async fn main() {
                             return Ok("自动成长任务未开启（面板账号页可打开），跳过".to_string());
                         }
                         let mut lines: Vec<String> = Vec::new();
-                        for platform in ["wb-gateway", "codebuddy"] {
-                            let Some(base) = aigw_relay::wb::wb_checkin_base(platform) else { continue };
-                            let web_base = if platform == "codebuddy" {
-                                "https://www.codebuddy.cn"
-                            } else {
-                                "https://www.workbuddy.cn"
+                        // ★ 按 **signer == "wb"** 枚举，不写死平台 id：
+                        //   实测漏过一次 —— 列表里只有 wb-gateway/codebuddy（后者还是个
+                        //   不存在的历史遗留），**国际版 wb-gateway-intl 从来没跑过成长任务**；
+                        //   而且 web_base 写死成 workbuddy.cn，就算遍历到 intl 也会打错域。
+                        //   spec.domain 是站点域的唯一来源（wb-gateway=workbuddy.cn /
+                        //   wb-gateway-intl=workbuddy.ai / codebuddy=codebuddy.cn）。
+                        let wb_specs: Vec<aigw_registry::ProviderSpec> = st6
+                            .all_specs()
+                            .into_iter()
+                            .filter(|s| s.signer == "wb")
+                            .collect();
+                        for spec in wb_specs {
+                            let platform = spec.id.clone();
+                            let Some(base) = aigw_relay::wb::wb_checkin_base(&platform) else {
+                                continue;
                             };
+                            let Some(web_base) = aigw_relay::wb::web_base_for(&spec) else {
+                                continue;
+                            };
+                            let web_base = web_base.as_str();
                             let http = aigw_relay::auth_login::auth_http();
-                            for (acc_id, secret) in st6.accounts.secrets_for(platform) {
+                            for (acc_id, secret) in st6.accounts.secrets_for(&platform) {
                                 let nick = st6
                                     .accounts
                                     .rows_snapshot()
@@ -682,6 +1053,16 @@ async fn main() {
 }
 #[cfg(test)]
 mod tests {
+    /// 代理 URL 抠 host:port：预检要连的端点得解析对，三种形态 + 两个非法。
+    #[test]
+    fn parses_common_proxy_urls_for_precheck() {
+        assert_eq!(proxy_host_port("http://127.0.0.1:7890"), Some(("127.0.0.1".into(), 7890u16)));
+        assert_eq!(proxy_host_port("http://u:p@127.0.0.1:7897"), Some(("127.0.0.1".into(), 7897u16)));
+        assert_eq!(proxy_host_port("http://proxy.local"), Some(("proxy.local".into(), 80u16)));
+        assert_eq!(proxy_host_port(""), None);
+        assert_eq!(proxy_host_port("http://h:notaport"), None);
+    }
+
     use super::*;
 
     #[test]

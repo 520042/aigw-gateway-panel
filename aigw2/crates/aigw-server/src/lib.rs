@@ -368,6 +368,8 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/checkin", get(checkin_status_all).post(checkin_claim_all))
         // ★ 2026-10-26（P3）：运行时配置热更新（并发/超时/重试/限流）。
         .route("/api/runtime", get(runtime_get).post(runtime_set))
+        // ★ 2026-10-28（对齐 magpie system-prompt 插件）：自定义系统提示词注入。
+        .route("/api/sysprompt", get(sysprompt_get).post(sysprompt_set))
         .route("/api/backup", get(backup_export).post(backup_restore))
         // 完整备份（含凭据）：前端「⬇ 备份数据」用它，否则导出的备份恢复不回来
         .route("/api/backup/export", post(backup_export_full))
@@ -2429,6 +2431,26 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
             let r = aigw_relay::lobster_checkin::daily_checkin(&http, &secret).await;
             results.push(json!({
                 "platform": "lobster",
+                "account": acc_id,
+                "action": "claim",
+                "ok": r.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+                "data": r,
+            }));
+        }
+        // ★ 2026-10-28（对齐 magpie-community/plugins packages/raccoon）：
+        //   商汤小浣熊每日登录积分发放。参考项目实测口径：
+        //   · **POST** `/api/web/desktop/v1/login/points/grant`（不是 GET，GET 会 405）
+        //   · 必须带桌面客户端头 X-Client-Platform + X-Client-Version: v1.0.0
+        //   · granted=true 才是真发了分；false = 今天已领过（幂等成功）
+        //   同时回读积分余额，面板一次就能看到「领了多少 / 现在多少」。
+        for (acc_id, secret) in st.accounts.secrets_for("apk-raccoon") {
+            let r = aigw_relay::raccoon_checkin::checkin_with_balance(&http, &secret).await;
+            // 余额写进号池快照（供「快过期优先」选号用）
+            if let Some(c) = r.get("available_points").and_then(|x| x.as_f64()) {
+                st.pool.record_credit(&acc_id, Some(c));
+            }
+            results.push(json!({
+                "platform": "apk-raccoon",
                 "account": acc_id,
                 "action": "claim",
                 "ok": r.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
@@ -5440,6 +5462,52 @@ async fn search_messages(
 /// ★ 2026-10-26（P3）：运行时配置读取（面板 GET /api/runtime）。
 async fn runtime_get(State(st): State<AppState>) -> Json<Value> {
     Json(json!({"ok": true, "cfg": st.cfg.snapshot()}))
+}
+
+/// ★ 2026-10-28（对齐 magpie system-prompt）：读取自定义系统提示词配置。
+async fn sysprompt_get() -> Json<Value> {
+    let c = aigw_relay::sysprompt::current();
+    Json(json!({
+        "ok": true,
+        "cfg": {
+            "system_prompt": c.prompt,
+            "override": c.override_existing,
+            "position": if c.prepend { "prepend" } else { "append" },
+            "models": c.models,
+        }
+    }))
+}
+
+/// ★ 2026-10-28：保存并立即生效（写 data/sysprompt.json + 热更新全局）。
+async fn sysprompt_set(State(st): State<AppState>, body: Bytes) -> Response {
+    let v: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
+        }
+    };
+    let cfgv = v.get("cfg").cloned().unwrap_or(v);
+    let cfg = aigw_relay::sysprompt::SystemPromptCfg::from_json(&cfgv);
+    let dir = st
+        .data_dir
+        .as_ref()
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    match aigw_relay::sysprompt::save_and_apply(&dir, &cfg) {
+        Ok(()) => {
+            let msg = if cfg.is_enabled() {
+                format!(
+                    "已保存并立即生效：{} 模式，注入位置 {}",
+                    if cfg.override_existing { "覆盖叠加" } else { "仅在无系统提示词时" },
+                    if cfg.prepend { "前置" } else { "追加" }
+                )
+            } else {
+                "已清空：不再注入系统提示词".to_string()
+            };
+            Json(json!({"ok": true, "message": msg})).into_response()
+        }
+        Err(e) => Json(json!({"ok": false, "message": format!("保存失败：{e}")})).into_response(),
+    }
 }
 
 /// ★ 2026-10-26（P3）：运行时配置热更新（面板 POST /api/runtime）。
