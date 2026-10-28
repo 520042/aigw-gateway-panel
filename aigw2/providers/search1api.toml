@@ -1,0 +1,27 @@
+# Search1API —— 联网搜索工具后端（api_key / OAuth）
+# 一手来源：magpie-community/plugins packages/search1api/src/types.ts + request.ts
+#   base: https://api.search1api.com
+#   调用：POST https://api.search1api.com/{tool}，Bearer <token>
+#   工具：search / news / ask / crawl / sitemap / trending / feedback
+# 实测（2026-10-28，无 key）：
+#   POST /search → 402（需付费/余额）  POST /ask → 401（需鉴权）
+#   其余工具 402 —— 全部端点真实存在，只差凭据。
+# ★ 这是**搜索/工具类**后端，不是 chat provider：它不产出对话，只给
+#   /v1/search/messages 提供检索结果。凭据在 s1.dev 创建。
+id = "search1api"
+name = "Search1API（联网搜索）"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.search1api.com"
+format = "openai"
+
+# 工具名作为「模型」暴露：search1api/search、search1api/news …
+models = ["search", "news", "ask", "crawl", "sitemap", "trending"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+login_url = "https://s1.dev/"
+
+notes = "Search1API 联网搜索后端（供 /v1/search/messages 使用）。凭据在 s1.dev 创建后粘贴；按调用计费。工具：search / news / ask / crawl / sitemap / trending。"

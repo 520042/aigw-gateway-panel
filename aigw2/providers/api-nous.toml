@@ -1,0 +1,25 @@
+# Nous Portal —— OpenAI 兼容推理（api_key / OAuth 设备码）
+# 一手来源：magpie-community/plugins packages/nous/oauth.mjs
+#   inference: https://inference-api.nousresearch.com/v1
+#   portal:    https://portal.nousresearch.com
+#   welcome:   https://welcome-api.nousresearch.com/v1
+# 实测（2026-10-28）：GET https://inference-api.nousresearch.com/v1/models → 401
+#   端点真实存在、标准 Bearer 鉴权。
+# 登录：portal.nousresearch.com 的 OAuth Device Authorization 流程
+#   （与我们的 MiniMax 设备码同构：申请码 → 浏览器输码 → 轮询换 token）
+id = "api-nous"
+name = "Nous Portal"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://inference-api.nousresearch.com/v1"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://portal.nousresearch.com"
+
+notes = "Nous Research 的 Portal 推理服务。凭据可在 portal 创建 API Key 后粘贴，或走设备码 OAuth（面板暂用粘贴制）。"

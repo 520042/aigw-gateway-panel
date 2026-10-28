@@ -1,0 +1,22 @@
+# Factory（Droid）—— 订阅反代（WorkOS OAuth）
+# 一手来源：magpie-community/plugins packages/factory/index.mjs
+#   api:    https://api.factory.ai
+#   api-eu: https://api.eu.factory.ai（欧洲区）
+#   auth:   https://api.workos.com/user_management（WorkOS OAuth）
+# 支持 Anthropic / OpenAI / Gemini 三种协议形态（插件内含 anthropic-tools 转换）。
+id = "sub-factory"
+name = "Factory（Droid）"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.factory.ai"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://app.factory.ai"
+
+notes = "Factory Droid 订阅。WorkOS OAuth 登录后取 access token；欧洲账号把 base_url 换成 https://api.eu.factory.ai。"

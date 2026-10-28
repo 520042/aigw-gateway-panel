@@ -32,6 +32,7 @@ pub mod wb_checkin;
 pub mod raccoon_checkin;
 pub mod sysprompt;
 pub mod history_trim;
+pub mod joycode;
 /// 重导出 reqwest::Client，供上层 crate（aigw-server）在签名里引用而不必自加依赖。
 pub use reqwest::Client as HttpClient;
 pub mod commandcode;
@@ -670,6 +671,9 @@ impl OutClient {
             "qoder" => qoder::chat_nonstream(&self.http, spec, secret, body).await,
             "trae" => trae::chat_nonstream(&self.http, spec, secret, body).await,
             "coze" => coze::chat_nonstream(&self.http, spec, secret, body).await,
+            "joycode" => joycode::chat_nonstream(&self.http, secret, body)
+                .await
+                .map_err(|e| RelayError { status: 502, class: ErrorClass::Transient, body: e }),
         "devin" => devin::chat_nonstream(&self.http, spec, secret, body).await,
             _ => {
                 let r = self.post_openai_nonstream(spec, secret, domain, body).await;
@@ -867,6 +871,7 @@ impl OutClient {
             "qoder" => Self::b2o(qoder::verify(&self.http, spec, secret).await),
             "trae" => Self::b2o(trae::verify(&self.http, spec, secret).await),
             "coze" => Self::b2o(coze::verify(&self.http, spec, secret).await),
+            "joycode" => Self::b2o(joycode::verify(&self.http, secret).await),
         "devin" => Self::b2o(devin::verify(&self.http, spec, secret).await),
         // ★ wb 族（WorkBuddy / CodeBuddy）：通用 verify_openai 会去探 /models，
         //   而 copilot.tencent.com 没有那个端点 —— 活凭据被判「鉴权失效」（假阴性），
@@ -1199,6 +1204,21 @@ pub fn classify_verify_probe(status: u16, body: &str) -> VerifyOutcome {
             }
             "coze" => {
                 let (s, rx) = coze::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
+            // ★ 2026-10-28（对齐 magpie packages/joycode）：京东云 JoyCode 的对话
+            //   走带签名查询串的网关（appid/functionId/t/sign），不是标准 OpenAI 透传。
+            //   暂只做非流式：调一次非流式再伪造成单帧 SSE，保住流式调用方不报错。
+            "joycode" => {
+                let v = joycode::chat_nonstream(&self.http, secret, body).await.map_err(|e| {
+                    RelayError { status: 502, class: ErrorClass::Transient, body: e }
+                })?;
+                let (tx, rx) = tokio::sync::mpsc::channel::<crate::StreamStat>(1);
+                let frame = format!("data: {}\n\ndata: [DONE]\n\n", v);
+                let _ = tx.send(crate::StreamStat::default()).await;
+                let s = futures_util::stream::once(async move {
+                    Ok::<_, std::io::Error>(bytes::Bytes::from(frame))
+                });
                 Ok((Box::pin(s), rx))
             }
             "devin" => {

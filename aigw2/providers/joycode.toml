@@ -1,0 +1,24 @@
+# 京东云 JoyCode（JoyCoder IDE 自带模型额度）
+# 一手来源：magpie-community/plugins packages/joycode/index.mjs
+#   网关：https://api-ai.jd.com
+#   登录：https://joycode.jd.com/login/（IDE 内 OAuth 回调）
+#   请求：POST https://api-ai.jd.com/api?appid=joycode_ide&functionId=chat_completions&t=<ms>&sign=<hmac>
+# ★ 注意：它有**自定义 HMAC 签名**（sign 参数），不是标准 OpenAI 透传。
+#   format=openai 只是响应形态；真正出站需要 signer 支持。
+id = "joycode"
+name = "京东云 JoyCode"
+enabled = true
+region = "cn"
+
+auth = "api_key"
+base_url = "https://api-ai.jd.com/v1"
+format = "openai"
+upstream_kind = "joycode"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://joycode.jd.com/login/"
+
+notes = "京东云 JoyCode（JoyCoder IDE 内置模型额度）。凭据填 ptKey（或 JSON {ptKey,tenant}）—— IDE 登录后从本地取。上游走带签名查询串的网关（appid/functionId/t/sign HMAC-SHA256），已在本面板实现 signer。"

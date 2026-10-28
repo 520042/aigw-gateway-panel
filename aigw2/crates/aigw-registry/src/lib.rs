@@ -128,6 +128,22 @@ pub struct ProviderSpec {
     /// 目前仅 WPS 灵犀、360 纳米（仅登录/验活，官方逆向需浏览器或只有付费 API）。
     #[serde(default = "default_true")]
     pub chat_supported: bool,
+    /// 验活时**跳过 /models、直接用一次最小对话探测**（默认 false）。
+    ///
+    /// ★ 用途：某些平台的 /models 是**公开**的（无需凭据也回完整清单），
+    ///   拿它验活等于「错 key 也通过」——真实事故：cline 的 /api/v1/models
+    ///   无凭据返回 469 个模型，任何 key 都被判「验活通过」，用户一对话才 401。
+    ///   这类平台把本字段置 true，验活改走 chat/completions（鉴权层才会拒）。
+    #[serde(default)]
+    pub verify_chat: bool,
+    /// 上游站点域（wb 族用）：同一个端点 `copilot.tencent.com` 同时服务国内站与国际站，
+    /// 上游按 `X-Domain` 头判定这个请求属于哪个站点。留空 = 不区分（绝大多数平台）。
+    ///
+    /// ★ 为什么放在 spec：验活与积分查询都要带这个头，而它们的调用链
+    ///   （verify_account / query_balance）拿不到账号记录上的 domain ——
+    ///   塞进 spec 是最短的路径，不必给 20 个 adapter 都加参数。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub domain: String,
     /// 站点区域：`cn`（国内站）| `intl`（国际站/海外，国内直连通常要代理）| `global`（同一入口、全球可达）。
     ///
     /// ★ 有国内/国际**双站点**的平台（Kimi、MiniMax、智谱 ↔ Z.AI、Qoder、Trae、WorkBuddy）
@@ -233,8 +249,8 @@ pub fn validate(spec: &ProviderSpec) -> Result<(), String> {
         ));
     }
     match spec.signer.as_str() {
-        "" | "glm" | "codearts" | "loomy" | "wb" => {}
-        other => return Err(format!("signer 非法：{other}（空|glm|codearts|loomy|wb）")),
+        "" | "glm" | "codearts" | "loomy" | "wb" | "officeace" => {}
+        other => return Err(format!("signer 非法：{other}（空|glm|codearts|loomy|wb|officeace）")),
     }
     if spec.upstream_kind == "chatglm" && spec.signer != "glm" {
         return Err("upstream_kind=chatglm 要求 signer=glm".into());
@@ -270,6 +286,13 @@ pub const KNOWN_UPSTREAM_KINDS: &[&str] = &[
     "trae",
     "coze",
     "devin",
+    "commandcode",
+    "orcaterm",
+    "monkeycode",
+    "accio",
+    "autoclaw",
+    // ★ 2026-10-28：京东云 JoyCode（带签名查询串的网关，见 aigw-relay/src/joycode.rs）
+    "joycode",
 ];
 
 /// 从字符串解析并校验（测试与加载器共用）。
@@ -551,6 +574,44 @@ User-Agent = "opencode/1.18.31"
     /// 「出码 + 轮询」实现；否则面板会给用户画一个永远扫不出结果的二维码。
     /// 反之 relay 有实现、toml 却写成 cookie 的平台也会掉进「填 Cookie」分支，
     /// 扫码入口根本到不了（2026-10 的 Loomy 就是这个坑，排查花了很久）。
+    /// ★ 每个启用平台都必须有一条**不依赖浏览器**的录入路径（paste / device）。
+    ///
+    /// 为什么必须有这条：项目铁律是「不做扫码、不做浏览器自动化」。一个平台如果
+    /// 只声明 qr / sms（扫码或短信），用户就**根本没有办法把凭据录进来** ——
+    /// 平台在面板上看得见、点了用不了。真实事故：apk-loomy 原先写的是
+    /// login_methods = [sms, pwd, qr]，而它的凭据本质就是一个 token 字符串，
+    /// 完全可以粘贴 —— 漏写 paste 等于把一个可用的平台废掉了。
+    #[test]
+    fn every_platform_has_a_non_browser_login_path() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("providers");
+        if !dir.is_dir() {
+            eprintln!("跳过：找不到 {}（非源码树环境）", dir.display());
+            return;
+        }
+        let (specs, _) = load_dir_lenient(&dir).expect("providers 目录应可读");
+        let mut bad: Vec<String> = Vec::new();
+        for s in &specs {
+            if !s.enabled {
+                continue;
+            }
+            let methods = s.login_methods();
+            // 匿名平台不需要登录；有 paste / device 的算合规。
+            if methods.is_empty() {
+                continue;
+            }
+            if methods.iter().any(|m| *m == "paste" || *m == "device") {
+                continue;
+            }
+            bad.push(format!("{}（login_methods={methods:?}）", s.id));
+        }
+        assert!(
+            bad.is_empty(),
+            "这些平台没有任何「不依赖浏览器」的录入路径，用户无法接入：{bad:?}"
+        );
+    }
     #[test]
     fn qr_scan_platforms_have_a_matching_relay_implementation() {
         // relay 的 LoginEngine::start 里真正实现了扫码轮询的平台 id。

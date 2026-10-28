@@ -1,0 +1,20 @@
+# GitHub Copilot —— 订阅反代（GitHub OAuth）
+# 一手来源：magpie-community/plugins packages/copilot/endpoints.mjs + index.mjs
+#   api: https://api.githubcopilot.com
+# 支持 GitHub.com 与 GitHub Enterprise；额度按 premium request / credits 计。
+id = "sub-copilot"
+name = "GitHub Copilot"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.githubcopilot.com"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://github.com/settings/copilot"
+
+notes = "GitHub Copilot 订阅（Individual / Business / Enterprise）。需要 Copilot 的 access token（GitHub OAuth 换取）；企业版把 base_url 改成自己的 GHES 域名。"

@@ -1,0 +1,22 @@
+# Zed —— Zed 托管的 Anthropic/OpenAI/Google/xAI 模型（OAuth）
+# 一手来源：magpie-community/plugins packages/zed/index.mjs
+#   cloud: https://cloud.zed.dev
+#   site:  https://zed.dev
+# 订阅档位：Pro / Pro Trial / Student / Business。
+# 登录：Zed 客户端 OAuth；凭据是 Zed 签发的 access token。
+id = "sub-zed"
+name = "Zed（Zed 托管模型）"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://cloud.zed.dev"
+format = "openai"
+
+models = []
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+login_url = "https://zed.dev"
+
+notes = "Zed 订阅附带的模型额度（Pro / Pro Trial / Student / Business）。需要 Zed 账号的 access token；模型由 Zed 侧托管（Anthropic / OpenAI / Google / xAI）。"
