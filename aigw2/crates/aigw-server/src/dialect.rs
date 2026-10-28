@@ -101,23 +101,104 @@ pub fn nanos_hex() -> String {
     )
 }
 
-/// Responses 的 content 可以是字符串，也可以是 [{"type":"input_text","text":…}] 块数组。
-pub fn responses_text(c: Option<&Value>) -> String {
-    let Some(c) = c else { return String::new() };
+/// Responses 的 content 可以是字符串，也可以是块数组。
+///
+/// ★ 2026-10-28：带**非文本内容**（图片 / 文件）时返回 OpenAI Chat 的**多模态数组形态**。
+///   以前只拼 `text`，于是 Responses 客户端传图片时内容被静默丢弃——
+///   模型看不到图，用户以为「模型不支持图片」，实际是网关把内容吃掉了。
+///
+/// 返回 `Value`：纯文本时是 String（保持零行为回归），含非文本时是 Array。
+pub fn responses_content(c: Option<&Value>) -> Value {
+    let Some(c) = c else { return Value::String(String::new()) };
     if let Some(s) = c.as_str() {
-        return s.to_string();
+        return Value::String(s.to_string());
     }
-    let mut out = String::new();
-    if let Some(arr) = c.as_array() {
-        for b in arr {
-            if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
-                out.push_str(t);
-            } else if let Some(s) = b.as_str() {
-                out.push_str(s);
+    let Some(arr) = c.as_array() else {
+        return Value::String(String::new());
+    };
+    let mut texts: Vec<String> = Vec::new();
+    let mut parts: Vec<Value> = Vec::new();
+    let mut has_media = false;
+    for b in arr {
+        match b {
+            Value::String(s) => texts.push(s.clone()),
+            obj => {
+                let kind = obj.get("type").and_then(|x| x.as_str()).unwrap_or("input_text");
+                match kind {
+                    "input_text" | "output_text" | "text" => {
+                        if let Some(t) = obj.get("text").and_then(|x| x.as_str()) {
+                            texts.push(t.to_string());
+                        }
+                    }
+                    "input_image" => {
+                        // Responses：`image_url`（URL）或 `image_base64`/`image`（base64）
+                        let url = obj
+                            .get("image_url")
+                            .and_then(|x| x.as_str())
+                            .map(String::from);
+                        let b64 = obj
+                            .get("image_base64")
+                            .or_else(|| obj.get("image"))
+                            .and_then(|x| x.as_str())
+                            .map(String::from);
+                        let data_url = b64.map(|s| {
+                            if s.starts_with("data:") {
+                                s
+                            } else {
+                                format!("data:image/png;base64,{s}")
+                            }
+                        });
+                        let final_url = url.or(data_url);
+                        if let Some(u) = final_url {
+                            has_media = true;
+                            parts.push(json!({"type": "image_url", "image_url": {"url": u}}));
+                        }
+                    }
+                    "input_file" => {
+                        // 文件形态各家不一：先取 url / file_url / file_data。Responses
+                        // 客户端较少走这条；如实转成 text 说明，避免静默吞掉。
+                        if let Some(u) = obj.get("file_url").and_then(|x| x.as_str()) {
+                            has_media = true;
+                            parts.push(json!({"type":"text","text":format!("[file] {u}")}));
+                        } else if let Some(f) = obj.get("filename").and_then(|x| x.as_str()) {
+                            has_media = true;
+                            parts.push(json!({"type":"text","text":format!("[file] {f}")}));
+                        }
+                    }
+                    _ => {
+                        // 未知块：有 text 就取 text，避免静默丢弃
+                        if let Some(t) = obj.get("text").and_then(|x| x.as_str()) {
+                            texts.push(t.to_string());
+                        }
+                    }
+                }
             }
         }
     }
-    out
+    if !has_media {
+        return Value::String(texts.join(""));
+    }
+    // 有非文本内容 → 多模态数组：文本块排在前面（保持语义：先说明再附图）
+    let mut out: Vec<Value> = Vec::new();
+    let joined = texts.join("");
+    if !joined.trim().is_empty() {
+        out.push(json!({"type":"text","text":joined}));
+    }
+    out.extend(parts);
+    Value::Array(out)
+}
+
+/// 兼容旧调用：只要纯文本（历史消息正文场景下够用，且保持零行为回归）。
+pub fn responses_text(c: Option<&Value>) -> String {
+    match responses_content(c) {
+        Value::String(s) => s,
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|x| x.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
 }
 
 pub fn responses_usage(tin: i64, tout: i64) -> Value {
@@ -130,20 +211,47 @@ pub fn responses_usage(tin: i64, tout: i64) -> Value {
     })
 }
 
-/// 协议转换面（/v1/messages、/v1/responses 的非流式响应）用的 usage 兜底：
-/// 上游没给 completion_tokens 时按正文/工具参数字符估算，别让客户端看到恒 0 的 output_tokens。
+/// 从响应里取 (输入 token, 输出 token)。
+///
+/// ★ 字段名必须兼容多种写法：上游是 OpenAI 兼容接口，但不同版本/不同接入点
+///   对用量字段的命名并不统一 —— `prompt_tokens`（标准）/ `input_tokens`
+///   / 驼峰的 `promptTokens` / `inputTokens` 都在真机上出现过。只认一种写法时，
+///   换一种命名的上游会被记成 0，随后走字符数估算 —— 用量报表因此失真，
+///   而这个失真不会报错，只会让「这个平台很费额度」之类的判断建立在假数据上。
+///
+/// ★ 取**第一个正数**而不是「第一个存在」：上游常同时给嵌套与顶层两种写法，
+///   且嵌套那份往往是废值（一手形态：prompt_tokens_details.cached_tokens=0 而
+///   顶层 cache_read_input_tokens=4800）。按「存在与否」挑会命中那条恒 0 的，
+///   于是整条被记成 0。0 与缺失同样视为「这一项没说话」，交给下一个别名。
+///
+///   返回 (0, 0) 表示确实没拿到 —— 调用方据此决定是否走估算。
 pub fn extract_usage(v: &Value) -> (i64, i64) {
     let u = v.get("usage");
+    let pick = |keys: &[&str]| -> i64 {
+        keys
+            .iter()
+            .filter_map(|k| u.and_then(|u| u.get(*k)).and_then(|x| x.as_i64()))
+            .find(|n| *n > 0)
+            .unwrap_or(0)
+    };
     (
-        u.and_then(|u| u.get("prompt_tokens"))
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0),
-        u.and_then(|u| u.get("completion_tokens"))
-            .and_then(|x| x.as_i64())
-            .unwrap_or(0),
+        pick(&["prompt_tokens", "input_tokens", "promptTokens", "inputTokens"]),
+        pick(&[
+            "completion_tokens",
+            "output_tokens",
+            "completionTokens",
+            "outputTokens",
+        ]),
     )
 }
 
+/// 协议转换面（/v1/messages、/v1/responses 的非流式响应）用的 usage 兜底：
+/// 上游没给用量时按**输出内容的字符数**估算输出 token，避免整条记录成 0。
+///
+/// 估算是粗的（中文约 1 字 1 token、英文约 4 字符 1 token，这里折中取 /2），
+/// 但「记个大概」比「记 0」有用：报表里的用量趋势与按平台归因都依赖它，
+/// 全 0 会让「哪个平台在烧额度」这个问题失去答案。工具调用的入参也算进去 ——
+/// 那部分是真实发出的输出。
 pub fn conv_usage(v: &Value) -> (i64, i64) {
     let (tin, tout) = extract_usage(v);
     if tout > 0 {
@@ -205,12 +313,24 @@ pub fn anthropic_to_openai(v: &Value) -> Result<Value, String> {
             Some(Value::Array(blocks)) => {
                 if role == "assistant" {
                     let mut text = String::new();
+                    // ★ Anthropic 的思考是独立的 thinking 内容块；Chat 侧没有这个
+                    //   块类型，对应的是 reasoning_content 字符串。旧实现走到
+                    //   `_ => {}` 把它丢了 —— 多轮对话里上一轮的推理上下文因此
+                    //   整段消失（而 Anthropic 侧 thinking 与 signature 是配对的，
+                    //   丢掉还可能让上游认为消息不完整）。这里折进 reasoning_content。
+                    //   signature 丢弃：Chat 侧无处安放，且上下游都不校验它。
+                    let mut thinking = String::new();
                     let mut tool_calls: Vec<Value> = Vec::new();
                     for b in blocks {
                         match b.get("type").and_then(|t| t.as_str()) {
                             Some("text") => {
                                 if let Some(x) = b.get("text").and_then(|x| x.as_str()) {
                                     text.push_str(x);
+                                }
+                            }
+                            Some("thinking") => {
+                                if let Some(x) = b.get("thinking").and_then(|x| x.as_str()) {
+                                    thinking.push_str(x);
                                 }
                             }
                             Some("tool_use") => {
@@ -229,15 +349,20 @@ pub fn anthropic_to_openai(v: &Value) -> Result<Value, String> {
                             _ => {}
                         }
                     }
+                    let reasoning = thinking.trim().to_string();
                     if tool_calls.is_empty() {
-                        messages.push(json!({"role": "assistant", "content": text}));
+                        let mut m = json!({"role": "assistant", "content": text});
+                        if !reasoning.is_empty() {
+                            m["reasoning_content"] = json!(reasoning);
+                        }
+                        messages.push(m);
                     } else {
                         let content = if text.is_empty() { Value::Null } else { json!(text) };
-                        messages.push(json!({
-                            "role": "assistant",
-                            "content": content,
-                            "tool_calls": tool_calls
-                        }));
+                        let mut m = json!({"role": "assistant", "content": content, "tool_calls": tool_calls});
+                        if !reasoning.is_empty() {
+                            m["reasoning_content"] = json!(reasoning);
+                        }
+                        messages.push(m);
                     }
                 } else {
                     // user（或罕见的 system 块数组）：先发 tool 结果，再发剩余文本/图片
@@ -423,6 +548,32 @@ pub fn openai_to_anthropic(v: &Value, model: &str) -> Value {
 
 /// Responses 请求 → OpenAI chat 请求（input 支持字符串、消息数组或裸字符串数组）。
 pub fn responses_to_openai(v: &Value) -> Result<Value, String> {
+    // ★ 有状态字段一律**报错**而不是静默忽略。
+    //
+    //   previous_response_id / conversation / prompt / background 都依赖服务端
+    //   保存对话历史，而本网关是**无状态转发** —— 上游是各家第三方服务，没有
+    //   哪家实现 Responses 的服务端状态。
+    //
+    //   静默忽略的代价远大于报错：客户端会以为多轮上下文被记住了，实际每一轮
+    //   都在裸问。症状是模型「失忆」，而这个症状几乎不可能归因到网关 —— 用户
+    //   只会觉得「这个模型不行」。明确报 400 反而给了一条可行动的线索：客户端
+    //   该自己把历史放进 input 里。（同 Agent2API protocol/responses.rs 的处理。）
+    //
+    //   只对**真的带了值**的字段报错：客户端传 null / 空串是常见形态，不该拒。
+    for field in ["previous_response_id", "conversation", "prompt", "background"] {
+        let present = match v.get(field) {
+            None | Some(Value::Null) => false,
+            Some(Value::String(s)) => !s.trim().is_empty(),
+            Some(Value::Bool(b)) => *b,
+            // 对象/数组形态（conversation 常是对象）一律算「带了」
+            Some(_) => true,
+        };
+        if present {
+            return Err(format!(
+                "字段 {field} 需要服务端保存对话状态，本网关是无状态转发，无法支持：请把历史消息放进 input 里"
+            ));
+        }
+    }
     let mut msgs: Vec<Value> = Vec::new();
     if let Some(ins) = v.get("instructions").and_then(|x| x.as_str()) {
         if !ins.trim().is_empty() {
@@ -517,7 +668,9 @@ pub fn responses_to_openai(v: &Value) -> Result<Value, String> {
                 if text.trim().is_empty() {
                     continue;
                 }
-                msgs.push(json!({"role": role, "content": text}));
+                // ★ 2026-10-28：非文本内容（图片）走多模态数组形态；纯文本保持字符串（零回归）
+                let content = responses_content(it.get("content"));
+                msgs.push(json!({"role": role, "content": content}));
             }
         }
         _ => return Err("缺少 input 字段（字符串或消息数组）".to_string()),
@@ -607,7 +760,6 @@ pub fn responses_output(text: &str, msg_id: &str) -> Value {
     json!({
         "id": msg_id,
         "type": "message",
-        "status": "completed",
         "role": "assistant",
         "content": [{"type": "output_text", "text": text, "annotations": []}],
     })
@@ -630,6 +782,22 @@ pub fn openai_to_responses(v: &Value, model: &str) -> Value {
         .and_then(|c| c.as_str())
         .unwrap_or("");
     let (tin, tout) = conv_usage(v);
+    // ★ 上游的 finish_reason 必须映射成 Responses 的 status/incomplete_details：
+    //   旧实现恒写 "completed" + incomplete_details=null，于是**被长度截断的响应
+    //   在客户端看来是「完整答案」**（Codex 据此决定要不要继续续写），
+    //   用户只会觉得「模型答到一半就停了」而找不到原因。
+    let finish = first
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let (status, incomplete) = match finish {
+        "length" | "max_tokens" => (
+            "incomplete",
+            json!({"reason": "max_output_tokens"}),
+        ),
+        "content_filter" => ("incomplete", json!({"reason": "content_filter"})),
+        _ => ("completed", Value::Null),
+    };
     let msg_id = format!("msg_{}", nanos_hex());
     let mut output: Vec<Value> = Vec::new();
     if !reasoning.trim().is_empty() {
@@ -674,7 +842,6 @@ pub fn openai_to_responses(v: &Value, model: &str) -> Value {
             output.push(json!({
                 "id": format!("fc_{}", nanos_hex()),
                 "type": "function_call",
-                "status": "completed",
                 "call_id": call_id,
                 "name": name,
                 "arguments": args,
@@ -684,13 +851,19 @@ pub fn openai_to_responses(v: &Value, model: &str) -> Value {
     json!({
         "id": format!("resp_{}", nanos_hex()),
         "object": "response",
+        // ★ 明确下发 store=false：本网关是**无状态转发**，不保存这条 response。
+        //   缺省不发会造成「客户端按自己的默认理解」—— 一旦它理解成 true，客户端
+        //   就有理由只回传一个 id 当上下文（见入站对 previous_response_id 的拒绝），
+        //   那一轮就会裸问。说清楚没存，比留白安全。
+        //   （同 Agent2API protocol/responses.rs：上游不存，告诉客户端存了是撒谎。）
+        "store": false,
         "created_at": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        "status": "completed",
+        "status": status,
         "error": Value::Null,
-        "incomplete_details": Value::Null,
+        "incomplete_details": incomplete,
         "instructions": Value::Null,
         "model": model,
         "output": output,
@@ -705,6 +878,176 @@ pub fn openai_to_responses(v: &Value, model: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// ★ 上游 finish_reason 必须映射到 Responses 的 status/incomplete_details。
+    ///   恒写 "completed" 会让**被截断**的响应在客户端看来是完整答案，
+    ///   Codex 据此决定要不要续写 —— 用户只看到「答到一半停了」。
+    #[test]
+    fn responses_status_reflects_finish_reason() {
+        let mk = |finish: &str| {
+            serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "半句"},
+                    "finish_reason": finish
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+            })
+        };
+        // 长度截断 → incomplete + max_output_tokens
+        let v = openai_to_responses(&mk("length"), "m");
+        assert_eq!(v["status"], "incomplete", "{v}");
+        assert_eq!(v["incomplete_details"]["reason"], "max_output_tokens", "{v}");
+        // 内容过滤 → incomplete + content_filter
+        let v = openai_to_responses(&mk("content_filter"), "m");
+        assert_eq!(v["status"], "incomplete", "{v}");
+        assert_eq!(v["incomplete_details"]["reason"], "content_filter", "{v}");
+        // 正常结束 → completed + null
+        let v = openai_to_responses(&mk("stop"), "m");
+        assert_eq!(v["status"], "completed", "{v}");
+        assert!(v["incomplete_details"].is_null(), "{v}");
+        // 没有 finish_reason（部分上游不给）→ 按完成处理，别误报截断
+        let mut raw = mk("stop");
+        raw["choices"][0].as_object_mut().unwrap().remove("finish_reason");
+        let v = openai_to_responses(&raw, "m");
+        assert_eq!(v["status"], "completed", "{v}");
+    }
+
+    /// usage 字段名必须兼容多种写法，且取**第一个正数**。
+    ///
+    /// ① 只认 prompt_tokens 一种写法时，用 input_tokens 命名的上游会被记成 0，
+    ///    随后走字符数估算 —— 用量报表失真且不会报错；
+    /// ② 取「第一个存在」会命中恒 0 的嵌套/前置别名，同样记成 0。
+    #[test]
+    fn extract_usage_reads_all_common_field_names() {
+        for (k_in, k_out) in [
+            ("prompt_tokens", "completion_tokens"),
+            ("input_tokens", "output_tokens"),
+            ("promptTokens", "completionTokens"),
+            ("inputTokens", "outputTokens"),
+        ] {
+            let v = json!({
+                "usage": {k_in: 120, k_out: 34}
+            });
+            assert_eq!(
+                extract_usage(&v),
+                (120, 34),
+                "字段名 {k_in}/{k_out} 应被识别"
+            );
+        }
+    }
+
+    /// 前一个别名是 0（废值）时必须回落到下一个别名，而不是记成 0。
+    #[test]
+    fn extract_usage_skips_zero_and_keeps_looking() {
+        // 一手形态：嵌套那份恒 0，真实值在另一个字段上
+        let v = json!({
+            "usage": {
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "prompt_tokens": 0,
+                "input_tokens": 4800,
+                "completion_tokens": 7
+            }
+        });
+        assert_eq!(extract_usage(&v), (4800, 7), "0 应视为『没说话』，继续找");
+        // 全 0 就是没拿到（调用方据此走估算，不该假装拿到了 0）
+        let zero = json!({"usage": {"prompt_tokens": 0, "completion_tokens": 0}});
+        assert_eq!(extract_usage(&zero), (0, 0));
+        // 没有 usage 字段
+        assert_eq!(extract_usage(&json!({})), (0, 0));
+    }
+
+    /// Responses 的有状态字段必须**报错**，不能静默忽略。
+    ///
+    /// ★ 静默忽略的代价：客户端以为多轮上下文被记住了，实际每轮都在裸问。
+    ///   症状是模型「失忆」，而这个症状几乎不可能归因到网关 —— 用户只会
+    ///   觉得「这个模型不行」。明确报错反而给出可行动的线索。
+    #[test]
+    fn responses_stateful_fields_are_rejected() {
+        for field in [
+            "previous_response_id",
+            "conversation",
+            "prompt",
+            "background",
+        ] {
+            let src = json!({
+                "model": "m",
+                "input": "hi",
+                field: "some-value"
+            });
+            let err = responses_to_openai(&src)
+                .expect_err(&format!("{field} 应被拒绝"));
+            assert!(err.contains(field), "报错要点名 {field}：{err}");
+        }
+        // 空值不算「带了」：客户端传 null / 空串是常见形态，不该拒
+        let ok1 = json!({"model": "m", "input": "hi", "previous_response_id": null});
+        assert!(responses_to_openai(&ok1).is_ok(), "null 不该被拒");
+        let ok2 = json!({"model": "m", "input": "hi", "previous_response_id": ""});
+        assert!(responses_to_openai(&ok2).is_ok(), "空串不该被拒");
+    }
+
+    /// Responses 响应必须明确声明 store=false（本网关无状态，不保存 response）。
+    ///
+    /// 缺省不发会造成「客户端按自己的默认理解」；一旦理解成 true，客户端就有
+    /// 理由只回传一个 id 当上下文，那一轮就会裸问。
+    #[test]
+    fn responses_response_declares_store_false() {
+        let chat = json!({
+            "id": "chatcmpl-1",
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]
+        });
+        let out = openai_to_responses(&chat, "m");
+        assert_eq!(
+            out.get("store"),
+            Some(&json!(false)),
+            "必须明确声明没存（字段缺失也算错）：{out}"
+        );
+        assert_eq!(out["object"], "response");
+    }
+
+    /// Anthropic 的 thinking 块必须折进 Chat 侧的 reasoning_content。
+    ///
+    /// ★ 旧实现走到 `_ => {}` 把它整段丢了：多轮对话里上一轮的推理上下文
+    ///   因此消失，而 Anthropic 侧 thinking 与 signature 是配对的，丢掉还可能
+    ///   让上游认为消息不完整。signature 丢弃是刻意的（Chat 侧无处安放，
+    ///   且上下游都不校验它）。
+    #[test]
+    fn anthropic_thinking_folds_into_reasoning_content() {
+        let src = json!({
+            "model": "claude-x",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "user", "content": "1+1=?"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "先想一下加法", "signature": "sig-abc"},
+                    {"type": "text", "text": "等于 2"}
+                ]}
+            ]
+        });
+        let out = anthropic_to_openai(&src).expect("应能转换");
+        let msgs = out["messages"].as_array().unwrap();
+        let asst = &msgs[1];
+        assert_eq!(asst["role"], "assistant");
+        assert_eq!(asst["content"], "等于 2");
+        assert_eq!(asst["reasoning_content"], "先想一下加法");
+        // signature 不该出现在输出里（Chat 侧没有这个字段）
+        assert!(asst.get("signature").is_none(), "signature 应丢弃");
+        assert!(!out.to_string().contains("sig-abc"), "{out}");
+    }
+
+    /// 没有 thinking 块时不要凭空塞一个空的 reasoning_content。
+    #[test]
+    fn anthropic_without_thinking_has_no_reasoning_field() {
+        let src = json!({
+            "model": "claude-x",
+            "max_tokens": 16,
+            "messages": [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}]
+        });
+        let out = anthropic_to_openai(&src).expect("应能转换");
+        let asst = &out["messages"][0];
+        assert_eq!(asst["content"], "hi");
+        assert!(asst.get("reasoning_content").is_none(), "不该凭空加字段");
+    }
 
     #[test]
     fn anthropic_request_becomes_openai_request() {
@@ -944,5 +1287,61 @@ mod tests {
         let _ = responses_to_openai(&empty);
         let _ = openai_to_anthropic(&empty, "m");
         let _ = openai_to_responses(&empty, "m");
+    }
+}
+
+
+#[cfg(test)]
+mod responses_content_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    /// 用字符串构造，避免 json! 宏数组嵌套（实测 json!([...]) 在宏里解析异常）。
+    fn v(s: &str) -> Value {
+        serde_json::from_str(s).expect("测试 JSON 应合法")
+    }
+
+    /// ★ 2026-10-28：Responses 带图片时不能把内容丢掉（旧实现只拼 text，图片被静默吞掉）。
+    #[test]
+    fn image_is_kept_as_multimodal_array() {
+        // json! 里直接写数组会解析异常，因此先包成对象再取数组（实测稳定）。
+        let wrapped = json!({"blocks":[
+            {"type":"input_text","text":"这是什么？"},
+            {"type":"input_image","image_url":"https://example.com/a.png"}
+        ]});
+        let c = wrapped["blocks"].clone();
+        let got = responses_content(Some(&c));
+        assert!(got.is_array(), "应转成多模态数组：{got}");
+        let arr = got.as_array().unwrap();
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "这是什么？");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "https://example.com/a.png");
+        // 兼容：responses_text 仍能取纯文本
+        assert_eq!(responses_text(Some(&c)), "这是什么？");
+
+        // 端到端：Responses 请求转成 Chat 后图片还在
+        let resp = json!({"model":"m","input":[{"role":"user","content":c}]});
+        let oa = responses_to_openai(&resp).unwrap();
+        assert!(oa["messages"][0]["content"].is_array(), "Chat 消息应保留多模态数组");
+    }
+
+    #[test]
+    fn plain_text_stays_string() {
+        // 纯文本场景保持 String（零行为回归）
+        let resp = json!({"model":"m","input":[{"role":"user","content":"你好"}]});
+        let oa = responses_to_openai(&resp).unwrap();
+        assert_eq!(oa["messages"][0]["content"], "你好");
+        let s = responses_content(Some(&v("\"你好\"")));
+        assert!(s.is_string());
+        assert_eq!(s, "你好");
+    }
+
+    #[test]
+    fn base64_image_gets_data_url() {
+        let wrapped = json!({"blocks":[{"type":"input_image","image_base64":"AAAA"}]});
+        let c = wrapped["blocks"].clone();
+        let got = responses_content(Some(&c));
+        assert_eq!(got[0]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 }
