@@ -644,6 +644,14 @@ async fn main() {
         }
         aigw_relay::history_trim::apply_cfg(&ht, ht.compress_tool_results);
     }
+    // ★ 2026-10-28（对齐 magpie model-map）：启动时加载模型重定向规则。
+    {
+        let (rules, keep) = aigw_relay::model_map::load(&data_dir());
+        if !rules.is_empty() {
+            tracing::info!("model_map：{} 条重定向规则已加载", rules.len());
+        }
+        aigw_relay::model_map::apply_cfg(&rules, keep);
+    }
     let client = Arc::new(aigw_relay::OutClient::new());
     // 账号池：双源装载（v2 data/accounts.json 权威；首次从 legacy 只读初始化）
     let legacy_accounts = legacy_dir()

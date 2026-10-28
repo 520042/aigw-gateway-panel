@@ -372,6 +372,8 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/sysprompt", get(sysprompt_get).post(sysprompt_set))
         // ★ 2026-10-28（对齐 magpie history-trim）：历史裁剪省 token。
         .route("/api/history_trim", get(htrim_get).post(htrim_set))
+        // ★ 2026-10-28（对齐 magpie model-map）：模型名重定向。
+        .route("/api/model_map", get(mmap_get).post(mmap_set))
         .route("/api/backup", get(backup_export).post(backup_restore))
         // 完整备份（含凭据）：前端「⬇ 备份数据」用它，否则导出的备份恢复不回来
         .route("/api/backup/export", post(backup_export_full))
@@ -4244,6 +4246,11 @@ async fn chat_completions(
             //   非流式以前**一行都没有** —— 用户报「有时候能答有时候不能」时，
             //   日志里什么都查不到，只能靠猜。这里补一条与流式对齐的完成日志。
             log_done(&req_model, started);
+            // ★ 2026-10-28（对齐 magpie model-map）：把响应里的模型名还原成客户端
+            //   原本请求的名字。Claude Code 会读回模型名来推算上下文窗口，
+            //   看到上游真名会算错窗口大小。
+            let mut v = v;
+            aigw_relay::model_map::restore_global(&mut v);
             let truncated = crate::truncated::outcome_from_chat(&v)
                 .map(|(o, text)| crate::truncated::looks_truncated(o, text))
                 .unwrap_or(false);
@@ -4644,7 +4651,12 @@ fn candidate_accounts(
     out
 }
 
-async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> {
+async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreErr> {
+    // ★ 2026-10-28：每次请求开始前清空「客户端原名」记录。
+    //   不清的话上一个请求的模型名会串到这一个（实测：设了 my-fast → fast-model 后，
+    //   下一个用 claude-* 规则的请求，响应 model 仍显示 my-fast）。
+    //   tokio 的 worker 线程是复用的，thread-local 必须每请求重置。
+    aigw_relay::model_map::clear_asked();
     let model = v
         .get("model")
         .and_then(|m| m.as_str())
@@ -4686,7 +4698,7 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
     // 只有后缀**确实是一个平台 id** 时才剥：上游模型名本身可能带 @
     // （`qwen3@2025-09` 这类版本号写法），无条件 rsplit 会把它截成另一个名字，
     // 于是路由命中 A 平台、上游却收到一个不存在的模型。
-    let (upstream_model, named_platform) = match model.rsplit_once("@") {
+    let (mut upstream_model, named_platform) = match model.rsplit_once("@") {
         // 平台名归一大写不敏感（与模型名的 same_model 口径一致）：用户手写
         // `@KILO` 时归一成真实的 `kilo`，否则会被当成模型名的一部分报 404。
         Some((m, p)) => match st.canonical_platform_id(p) {
@@ -4723,6 +4735,31 @@ async fn chat_core(st: &AppState, v: Value) -> Result<ChatCoreOut, ChatCoreErr> 
             }
         },
         _ => (model.clone(), None),
+    };
+    // ★ 2026-10-28（对齐 magpie packages/model-map）：模型名重定向。
+    //   放在 @平台 拆分**之后**：`my-fast@wb-gateway` 要先剥掉 @平台后缀，
+    //   只对裸模型名做映射（整串匹配不上任何规则，实测踩过这个坑）。
+    let model = {
+        let bare = upstream_model.clone();
+        match aigw_relay::model_map::map_name_global(&bare) {
+            Some(mapped) => {
+                tracing::debug!(asked = %bare, %mapped, "模型名已重定向");
+                aigw_relay::model_map::remember_asked(&bare);
+                // 同步回 v，下游全部认 v["model"]
+                let full = match &named_platform {
+                    Some(p) => format!("{mapped}@{p}"),
+                    None => mapped.clone(),
+                };
+                v["model"] = Value::String(full);
+                upstream_model = mapped;
+                // 重建完整 model 串（含 @平台），保持后续逻辑一致
+                match &named_platform {
+                    Some(p) => format!("{}@{}", upstream_model, p),
+                    None => upstream_model.clone(),
+                }
+            }
+            None => model,
+        }
     };
     let Some(spec) = st.resolve_spec(&model).await else {
         // 一个平台都没启用 = 本服务自己没配好，属于「暂时不可用」，503 让客户端可以稍后重试。
@@ -13536,5 +13573,43 @@ stream_dialect = "sse_delta"
         }
         let _ = st.resolve_spec("never-there").await;
         assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 2, "过期缓存必须补拉");
+    }
+}
+/// ★ 2026-10-28（对齐 magpie model-map）：读取模型重定向规则。
+async fn mmap_get() -> Json<Value> {
+    let (rules, keep) = aigw_relay::model_map::current();
+    let map: serde_json::Map<String, Value> = rules
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect();
+    Json(json!({
+        "ok": true,
+        "cfg": { "mapping": Value::Object(map), "keep_upstream_name": keep }
+    }))
+}
+
+/// ★ 2026-10-28：保存模型重定向规则并立即生效。
+async fn mmap_set(State(st): State<AppState>, body: Bytes) -> Response {
+    let v: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
+        }
+    };
+    let cfgv = v.get("cfg").cloned().unwrap_or(v);
+    let (rules, keep) = aigw_relay::model_map::parse_cfg(&cfgv);
+    let dir = st
+        .data_dir
+        .as_ref()
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    match aigw_relay::model_map::save_and_apply(&dir, &rules, keep) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "message": format!("已保存并立即生效：{} 条重定向规则{}",
+                rules.len(),
+                if keep { "（响应保留上游真名）" } else { "" }),
+        })).into_response(),
+        Err(e) => Json(json!({"ok": false, "message": format!("保存失败：{e}")})).into_response(),
     }
 }
