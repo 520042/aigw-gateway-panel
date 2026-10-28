@@ -27,6 +27,14 @@ pub mod auth_login;
 pub mod proxy;
 pub mod wb;
 pub mod wb_growth;
+pub mod lobster_checkin;
+pub mod commandcode;
+pub mod accio;
+pub mod autoclaw;
+pub mod monkeycode;
+pub mod officeace_sign;
+pub mod orcaterm;
+pub mod common;
 pub mod sanitize;
 
 /// 该 `upstream_kind` 是否有专门的 adapter 实现（false 表示走 OpenAI 兼容透传）。
@@ -38,6 +46,11 @@ pub fn has_adapter(kind: &str) -> bool {
     matches!(
         kind,
         "chatglm"
+            | "commandcode"
+            | "orcaterm"
+            | "monkeycode"
+            | "accio"
+            | "autoclaw"
             | "doubao"
             | "yuanbao"
             | "kuku"
@@ -202,6 +215,26 @@ pub struct OutClient {
     http: reqwest::Client,
 }
 
+/// 单次模型清单响应的字节上限（超出判失败，不解析）。
+///
+/// ★ 2026-10-26 从 4MiB 提到 16MiB。原来定 4MiB 是「主流清单几十 KB 到几百 KB，
+///   留一倍余量」，但实测 featherless 的 /v1/models 是 6.9MiB（它把全部社区模型都列出来，
+///   每条还带 is_gated/created/model_class）—— 4MiB 直接把它挡在门外，于是那个源永远
+///   拿不到清单、只能吃静态兜底，而静态表里的模型会随上游变化而过期。
+///
+///   16MiB 的依据：已知最大真实清单（6.9MiB）的 2.3 倍，仍远小于「异常膨胀」（被投毒
+///   或失控上游回几百 MB）的量级。配合上面「边读边判」的流式累积，内存峰值是这个数。
+const MODELS_BODY_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// OfficeAce 的 max_tokens 默认值与推理预算追加量。
+///
+/// 上游把 `max_tokens` 当「推理 + 正文」的总预算：给小了会 HTTP 200 但**正文空串**
+/// （finish_reason=length，推理 token 吃光了预算）。所以显式请求时**追加**一段，
+/// 而不是取 max —— 后者会改掉用户「只想要几个 token」的意图。
+/// `max_tokens < 16` 的请求原样透传（那种本来就要最小输出）。
+const OFFICEACE_DEFAULT_MAX_TOKENS: i64 = 1024;
+const OFFICEACE_REASONING_ALLOWANCE: i64 = 1024;
+
 impl OutClient {
     /// 暴露内部 HTTP 客户端（供 aigw-server 拉聚合源等使用）。
     pub fn http(&self) -> &reqwest::Client {
@@ -259,6 +292,21 @@ impl OutClient {
         }
         if !body.is_empty() {
             rb = rb.header("Content-Type", "application/json");
+        }
+        // OfficeAce（signer="officeace"）：上游要的是 **Basic base64(key:secret)**，
+        // 不是 Bearer。凭据约定为 `key:secret`（用户从网关后台拿到的那一对）。
+        // ★ 这里覆盖上面注入的 Bearer：那种形态上游只回 401，而错误文案不会告诉你
+        //   「认证方式用错了」，只会说「未授权」—— 排查成本很高。
+        if spec.signer == "officeace" && !secret.is_empty() {
+            use base64::Engine;
+            let raw = if secret.contains(':') {
+                secret.to_string()
+            } else {
+                // 只给了一个 key 时补空 secret（Basic 语义允许）
+                format!("{secret}:")
+            };
+            let enc = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
+            rb = rb.header("Authorization", format!("Basic {enc}"));
         }
         // Loomy 模型网关（signer="loomy"）：除 Bearer 外还要 token 双写 +
         // 每次随机的 traceparent（缺失会挂起到超时）+ loomy-version。
@@ -491,22 +539,44 @@ impl OutClient {
         if spec.signer == "wb" {
             return self.wb_nonstream(spec, secret, domain, body).await;
         }
+        // ★ OfficeAce：上游**恒流式**，非流式请求要自己转成流式再聚合。
+        //   另外它的 max_tokens 语义特殊（推理+正文的总预算），见 officeace_nonstream。
+        if spec.signer == "officeace" {
+            return self.officeace_nonstream(spec, secret, domain, body).await;
+        }
         // ★ 2026-10-26（P2）：非流式路径同样做指纹脱敏（与流式共用同一套规则）。
+        // ★ 降级期（sanitize::degrade_active）：前面的请求刚被上游按审核拒过，说明
+        //   脱敏表漏了某个客户端模板句。这期间直接换中性提示词出门，不再让每个请求
+        //   都先撞一次 400 再补救 —— 省一轮往返，也少给上游一次风控记录。
         let owned;
         let body = match serde_json::from_slice::<Value>(body) {
             Ok(mut v) => {
-                let sc = sanitize::sanitize_request_body(&mut v);
-                if sc.is_empty() {
-                    body
+                if sanitize::degrade_active() {
+                    if sanitize::neutralize_request_body(&mut v) {
+                        owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
+                        owned.as_slice()
+                    } else {
+                        body
+                    }
                 } else {
-                    tracing::debug!(changed = ?sc, "出站请求体已做指纹脱敏（非流式）");
-                    owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
-                    owned.as_slice()
+                    let sc = sanitize::sanitize_request_body(&mut v);
+                    if sc.is_empty() {
+                        body
+                    } else {
+                        tracing::debug!(changed = ?sc, "出站请求体已做指纹脱敏（非流式）");
+                        owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
+                        owned.as_slice()
+                    }
                 }
             }
             Err(_) => body,
         };
         match spec.upstream_kind.as_str() {
+            "commandcode" => commandcode::chat_nonstream(&self.http, spec, secret, body).await,
+            "orcaterm" => orcaterm::chat_nonstream(&self.http, spec, secret, body).await,
+            "monkeycode" => monkeycode::chat_nonstream(&self.http, spec, secret, body).await,
+            "accio" => accio::chat_nonstream(&self.http, spec, secret, body).await,
+            "autoclaw" => autoclaw::chat_nonstream(&self.http, spec, secret, body).await,
             "chatglm" => glm::chat_nonstream(&self.http, spec, secret, body).await,
             "doubao" => doubao::chat_nonstream(&self.http, spec, secret, body).await,
             "yuanbao" => yuanbao::chat_nonstream(&self.http, spec, secret, body).await,
@@ -522,9 +592,59 @@ impl OutClient {
             "trae" => trae::chat_nonstream(&self.http, spec, secret, body).await,
             "coze" => coze::chat_nonstream(&self.http, spec, secret, body).await,
         "devin" => devin::chat_nonstream(&self.http, spec, secret, body).await,
-            _ => self.post_openai_nonstream(spec, secret, domain, body).await,
+            _ => {
+                let r = self.post_openai_nonstream(spec, secret, domain, body).await;
+                // ★ 内容拦截补救（对齐 Agent2API 的「动作 0」）：客户端 system 模板里
+                //   的指纹句会让上游按逐字审核直接回 400。前置脱敏必然滞后于模板更新，
+                //   所以被拦下之后还要能认出来并补救一次 —— 换成中性提示词**立刻重发**，
+                //   不换账号、不罚账号（内容问题不是账号问题）。
+                self.retry_neutralized_nonstream(spec, secret, domain, body, r)
+                    .await
+            }
         }
     }
+
+    /// 非流式的内容拦截补救：确认真是被审核拦下的 400 才重发一次。
+    ///
+    /// ★ 三条纪律：
+    /// ① **只重发一次**（再失败原样透传，绝不空转）；
+    /// ② **不换账号、不罚账号** —— 这是内容问题，换号只会把故障扩散到健康账号；
+    /// ③ **认不出来就别试**：判定保守，宁可少救一次，也不要把「参数真写错了」
+    ///    当成审核去重试（那会把一个明确的 400 变成两次 400，还多花一轮往返）。
+    async fn retry_neutralized_nonstream(
+        &self,
+        spec: &ProviderSpec,
+        secret: &str,
+        domain: &str,
+        body: &[u8],
+        first: Result<Value, RelayError>,
+    ) -> Result<Value, RelayError> {
+        let Err(e) = first else {
+            return first;
+        };
+        if !sanitize::looks_like_content_block(e.status, &e.body) {
+            return Err(e);
+        }
+        let Ok(mut v) = serde_json::from_slice::<Value>(body) else {
+            return Err(e);
+        };
+        if !sanitize::neutralize_request_body(&mut v) {
+            // 没有 system 也没有可清理的工具描述：重发也不会变好
+            return Err(e);
+        }
+        let rewritten = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
+        // ★ 同时触发降级：后续请求直接带中性提示词出门，不再重复「撞 400 再补救」。
+        //   降级期到次日 00:00（UTC+8）自动结束，期间再次触发不续期。
+        let until = sanitize::degrade_trigger();
+        tracing::warn!(
+            platform = %spec.id,
+            until,
+            "上游以内容审核为由拒绝了请求（HTTP 400），已换成中性提示词重发一次并进入降级期"
+        );
+        self.post_openai_nonstream(spec, secret, domain, &rewritten)
+            .await
+    }
+
 
     /// WorkBuddy 族的非流式：上游不认 stream:false，强制改成流式再聚合成完整响应。
     ///
@@ -568,6 +688,60 @@ impl OutClient {
             }),
         }
     }
+    /// OfficeAce 的非流式转发：上游恒流式，这里改成流式发出去再聚合。
+    ///
+    /// ── 两个实测坑（都在这里处理，别在别处重推）────────────────
+    /// 1. **`max_tokens` 是「推理 + 正文」的总预算**：给小了会 HTTP 200 但正文**空串**
+    ///    （`finish_reason=length`，推理 token 全吃掉了）。所以这里给一个下限
+    ///    （默认 1024）。注意是**追加**而不是 `max()` —— `max()` 会把「只想要 1 个
+    ///    token」的意图改掉；`max_tokens < 16` 原样透传（那种请求本来就要最小输出）。
+    /// 2. **必须 `stream: true`**：上游恒流式，传 false 也不会给你非流式响应。
+    async fn officeace_nonstream(
+        &self,
+        spec: &ProviderSpec,
+        secret: &str,
+        domain: &str,
+        body: &[u8],
+    ) -> Result<Value, RelayError> {
+        let mut v: Value = serde_json::from_slice(body).map_err(|e| RelayError {
+            status: 400,
+            class: ErrorClass::Rejected,
+            body: format!("bad json: {e}"),
+        })?;
+        if let Some(o) = v.as_object_mut() {
+            o.insert("stream".to_string(), json!(true));
+            // stream_options.include_usage：拿得到 usage 才有计费依据
+            o.insert("stream_options".to_string(), json!({"include_usage": true}));
+            let mt = o.get("max_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            if mt == 0 || mt >= 16 {
+                let want = if mt == 0 { OFFICEACE_DEFAULT_MAX_TOKENS } else { mt };
+                o.insert(
+                    "max_tokens".to_string(),
+                    json!(want + OFFICEACE_REASONING_ALLOWANCE),
+                );
+            }
+        }
+        let rewritten = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
+        let (stream, rx) = self.post_openai_stream(spec, secret, domain, &rewritten).await?;
+        drop(rx);
+        let text = collect_sse_text(stream).await;
+        match aggregate_sse_nonstream(&text) {
+            Ok(Some(v)) => Ok(v),
+            Err(msg) => Err(RelayError {
+                status: 400,
+                class: ErrorClass::Rejected,
+                body: format!("上游流内错误：{msg}"),
+            }),
+            Ok(None) => Err(RelayError {
+                status: 502,
+                class: ErrorClass::Transient,
+                body: format!(
+                    "上游流式返回里没有可聚合的内容（OfficeAce 在 max_tokens 很小时会返回空正文）：{}",
+                    text.chars().take(300).collect::<String>()
+                ),
+            }),
+        }
+    }
     /// 账号验活：按 upstream_kind 分派到各平台 adapter（cookie 平台走真实轻量端点）。
     pub async fn verify_account(&self, spec: &ProviderSpec, secret: &str) -> bool {
         match spec.upstream_kind.as_str() {
@@ -585,6 +759,15 @@ impl OutClient {
             "trae" => trae::verify(&self.http, spec, secret).await,
             "coze" => coze::verify(&self.http, spec, secret).await,
         "devin" => devin::verify(&self.http, spec, secret).await,
+            // ★ 2026-10-26 补齐五个新 adapter 的验活分派。漏了会掉进 verify_openai
+            //   通用兜底（GET models_path）：orcaterm/autoclaw 没有 /models → 好凭据
+            //   也被报「验活失败」（假阴性）；commandcode 的目录是公开的 → 错 key 也
+            //   「验活通过」（假阳性）。两个方向都错，必须逐家分派。
+            "commandcode" => commandcode::verify(&self.http, spec, secret).await,
+            "orcaterm" => orcaterm::verify(&self.http, spec, secret).await,
+            "monkeycode" => monkeycode::verify(&self.http, spec, secret).await,
+            "accio" => accio::verify(&self.http, spec, secret).await,
+            "autoclaw" => autoclaw::verify(&self.http, spec, secret).await,
             _ => self.verify_openai(spec, secret).await,
         }
     }
@@ -647,10 +830,17 @@ impl OutClient {
                             dirty = true;
                         }
                     }
-                    let sc = sanitize::sanitize_request_body(&mut v);
-                    if !sc.is_empty() {
-                        tracing::debug!(changed = ?sc, "出站请求体已做指纹脱敏");
-                        dirty = true;
+                    // 降级期：直接换中性提示词出门，不再让每个请求先撞一次 400
+                    if sanitize::degrade_active() {
+                        if sanitize::neutralize_request_body(&mut v) {
+                            dirty = true;
+                        }
+                    } else {
+                        let sc = sanitize::sanitize_request_body(&mut v);
+                        if !sc.is_empty() {
+                            tracing::debug!(changed = ?sc, "出站请求体已做指纹脱敏");
+                            dirty = true;
+                        }
                     }
                     if dirty {
                         owned = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
@@ -663,6 +853,26 @@ impl OutClient {
             }
         };
         match spec.upstream_kind.as_str() {
+            "commandcode" => {
+                let (s, rx) = commandcode::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
+            "orcaterm" => {
+                let (s, rx) = orcaterm::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
+            "monkeycode" => {
+                let (s, rx) = monkeycode::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
+            "accio" => {
+                let (s, rx) = accio::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
+            "autoclaw" => {
+                let (s, rx) = autoclaw::chat_stream(&self.http, spec, secret, body).await?;
+                Ok((Box::pin(s), rx))
+            }
             "chatglm" => {
                 let (s, rx) = glm::chat_stream(&self.http, spec, secret, body).await?;
                 Ok((Box::pin(s), rx))
@@ -724,8 +934,34 @@ impl OutClient {
                 Ok((Box::pin(s), rx))
             }
             _ => {
-                let (s, rx) = self.post_openai_stream(spec, secret, domain, body).await?;
-                Ok((Box::pin(s), rx))
+                // ★ 内容拦截补救（同非流式）：被上游按审核回 400 时，换成中性提示词
+                //   重发一次。不换账号、不罚账号 —— 内容问题不是账号问题。
+                match self.post_openai_stream(spec, secret, domain, body).await {
+                    Ok((s, rx)) => Ok((Box::pin(s), rx)),
+                    Err(e) => {
+                        if !sanitize::looks_like_content_block(e.status, &e.body) {
+                            return Err(e);
+                        }
+                        let Ok(mut v) = serde_json::from_slice::<Value>(body) else {
+                            return Err(e);
+                        };
+                        if !sanitize::neutralize_request_body(&mut v) {
+                            return Err(e);
+                        }
+                        let rewritten =
+                            serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
+                        let until = sanitize::degrade_trigger();
+                        tracing::warn!(
+                            platform = %spec.id,
+                            until,
+                            "上游以内容审核为由拒绝了流式请求（HTTP 400），已换成中性提示词重发一次并进入降级期"
+                        );
+                        let (s, rx) = self
+                            .post_openai_stream(spec, secret, domain, &rewritten)
+                            .await?;
+                        Ok((Box::pin(s), rx))
+                    }
+                }
             }
         }
     }
@@ -867,6 +1103,17 @@ impl OutClient {
     }
 
     /// 带凭据的 live 模型清单（api_key/cookie 平台必须走这条）。
+    /// 可达性探测：GET 一下根地址，返回 `(状态码, None)` 或 `(0, Some(原因))`。
+    ///
+    /// ★ 给 `models_policy = "none"` 的源用：它们**没有清单端点**（清单靠静态表或
+    ///   `模型@平台` 后缀），拿 `/models` 去探必然 404 —— 那是探错了地方，不是端点失效。
+    ///   探根路径只要拿到任何 HTTP 状态就说明「域名与网关还在」。
+    pub async fn probe_reachable(http: &reqwest::Client, base_url: &str) -> (u16, Option<String>) {
+        match http.get(base_url).send().await {
+            Ok(r) => (r.status().as_u16(), None),
+            Err(e) => (0, Some(format!("network: {e}"))),
+        }
+    }
     pub async fn fetch_models_with_secret(
         &self,
         spec: &ProviderSpec,
@@ -881,7 +1128,51 @@ impl OutClient {
             class: ErrorClass::Transient,
         })?;
         let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
+        // ★ 清单响应必须**边读边判**大小上限。
+        //
+        // 不能用 resp.text() 读完再判 s.len()：那样 7MB 已经整块进了内存，
+        // 上限只起到「事后拒绝」的作用 —— 挡不住内存峰值（也不挡并发叠加）。
+        // 实测 featherless 一次回 7MB、api-gateway 的清单也是几 MB 级，
+        // 8 并发一起拉时进程会被顶到崩溃（0xC0000005）。
+        //
+        // 这里按块累积，越过上限立刻停止读取并判失败（响应体随之释放）。
+        // 明文：宁可「明确拉不到这份清单」，也不要一份截断的残缺清单——
+        // 后者会让面板列出一半模型，比拉不到更难排查。
+        let text = {
+            use futures_util::StreamExt;
+            let mut stream = resp.bytes_stream();
+            let mut buf: Vec<u8> = Vec::new();
+            let mut over = false;
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(c) => {
+                        buf.extend_from_slice(&c);
+                        if buf.len() > MODELS_BODY_MAX_BYTES {
+                            over = true;
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        return Err(RelayError {
+                            status,
+                            class: ErrorClass::Transient,
+                            body: format!("读取模型清单响应体失败（解压/断开）：{e}"),
+                        });
+                    }
+                }
+            }
+            if over {
+                return Err(RelayError {
+                    status,
+                    class: ErrorClass::Transient,
+                    body: format!(
+                        "模型清单过大（超过上限 {} 字节），已放弃解析",
+                        MODELS_BODY_MAX_BYTES
+                    ),
+                });
+            }
+            String::from_utf8_lossy(&buf).to_string()
+        };
         if !(200..300).contains(&status) {
             return Err(RelayError {
                 status,
@@ -894,9 +1185,48 @@ impl OutClient {
             class: ErrorClass::Transient,
             body: format!("bad json: {e}"),
         })?;
-        let mut ids: Vec<String> = v
-            .get("data")
-            .and_then(|d| d.as_array())
+        // ★ 先看业务码：有一类上游 HTTP 恒 200、成败写在 body 里
+        //   （实测 loomy：{"code":"100002","desc":"缺少 token","data":{}}）。
+        //   不判这一层就会把「认证失败」当成「清单是空的」，于是
+        //   体检报告显示「清单 0 条」—— 看着像这个源没有模型，实际是没凭据。
+        if let Some(code) = v.get("code").and_then(|c| {
+            c.as_str().map(|s| s.to_string()).or_else(|| c.as_i64().map(|n| n.to_string()))
+        }) {
+            if code != "0" && code != "200" {
+                let desc = v
+                    .get("desc")
+                    .or_else(|| v.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("上游返回业务错误");
+                // ★ 复用 core 里那套已沉淀的「假成功」判据（refine_biz），而不是在这里
+                //   自己写一套：它排除限流/额度语义的误判（"token limit" 是限流不是失效），
+                //   并按业务码指纹（100002/100003/40001）与文案指纹归类。
+                //   归不到 Auth 的（比如只是参数错）就别当成凭据问题，用默认的 Transient。
+                let class = ErrorClass::Transient
+                    .refine_biz(&code, &desc)
+                    .unwrap_or(ErrorClass::Transient);
+                let status = if class == ErrorClass::Auth { 401 } else { 502 };
+                return Err(RelayError {
+                    status,
+                    class,
+                    body: format!("业务码 {code}：{desc}"),
+                });
+            }
+        }
+        // ★ 两种清单形态都要认：
+        //   ① OpenAI 兼容：{"data":[{"id":"gpt-..."}]}（绝大多数源）
+        //   ② Google 原生：{"models":[{"name":"models/gemini-2.5-pro"}]}（Gemini 的
+        //      /v1beta/models —— 它的 OpenAI 兼容层 /v1beta/openai **没有** models 端点，
+        //      实测那里 404，而原生路径 403=需要 Key 即存在）
+        //   只认 ① 会让 Gemini 这类源明明有清单却永远拉不到，只能靠静态表兜底。
+        let (arr, id_key) = match v.get("data").and_then(|d| d.as_array()) {
+            Some(a) => (Some(a), "id"),
+            None => match v.get("models").and_then(|d| d.as_array()) {
+                Some(a) => (Some(a), "name"),
+                None => (None, "id"),
+            },
+        };
+        let mut ids: Vec<String> = arr
             .map(|a| {
                 a.iter()
                     .filter(|m| {
@@ -906,7 +1236,13 @@ impl OutClient {
                             true
                         }
                     })
-                    .filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(String::from))
+                    .filter_map(|m| {
+                        m.get(id_key).and_then(|x| x.as_str()).map(|s| {
+                            // Google 的 name 形如 "models/gemini-2.5-pro"：剥掉前缀，
+                            // 让用户看到的就是能直接调用的模型名。
+                            s.strip_prefix("models/").unwrap_or(s).to_string()
+                        })
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -1749,15 +2085,29 @@ impl SseParser {
         match serde_json::from_str::<Value>(data) {
             Ok(v) => {
                 if let Some(u) = v.get("usage") {
-                    if let Some(n) = u.get("prompt_tokens").and_then(|x| x.as_i64()) {
-                        if n > 0 {
-                            self.prompt_tokens = n;
-                        }
+                    // ★ 字段名要兼容多种写法，与 server 侧 `dialect::extract_usage` 同一口径。
+                    //   这里曾经只认 prompt_tokens / completion_tokens —— 上游换用
+                    //   input_tokens / output_tokens 命名时，**流式**请求的用量全部记成 0，
+                    //   而同一份代码的非流式路径已经支持别名了（第 33 轮修过）。
+                    //   只修一处等于「同样的问题在另一条路上继续发生」。
+                    const IN_KEYS: [&str; 4] =
+                        ["prompt_tokens", "input_tokens", "promptTokens", "inputTokens"];
+                    const OUT_KEYS: [&str; 4] = [
+                        "completion_tokens",
+                        "output_tokens",
+                        "completionTokens",
+                        "outputTokens",
+                    ];
+                    let pick = |keys: &[&str]| -> Option<i64> {
+                        keys.iter()
+                            .filter_map(|k| u.get(*k).and_then(|x| x.as_i64()))
+                            .find(|n| *n > 0)
+                    };
+                    if let Some(n) = pick(&IN_KEYS) {
+                        self.prompt_tokens = n;
                     }
-                    if let Some(n) = u.get("completion_tokens").and_then(|x| x.as_i64()) {
-                        if n > 0 {
-                            self.completion_tokens = n;
-                        }
+                    if let Some(n) = pick(&OUT_KEYS) {
+                        self.completion_tokens = n;
                     }
                 }
                 if let Some(fr) = v
@@ -1816,6 +2166,267 @@ pub fn classify_with_biz(status: u16, body: &str) -> ErrorClass {
 
 #[cfg(test)]
 mod tests {
+
+
+    /// 流式 usage 解析必须支持别名（与非流式 dialect::extract_usage 同一口径）。
+    ///
+    /// ★ 这是同一个缺陷的**第二处**：第 33 轮修了非流式的 extract_usage，但流式
+    ///   的 SseParser 仍然只认 prompt_tokens/completion_tokens。上游换用 input_tokens
+    ///   / output_tokens 命名时，**流式**请求的用量全部记成 0 —— 只修一处等于让
+    ///   「同样的问题在另一条路上继续发生」。
+    #[test]
+    fn sse_parser_reads_usage_aliases() {
+        for (kin, kout) in [
+            ("prompt_tokens", "completion_tokens"),
+            ("input_tokens", "output_tokens"),
+            ("promptTokens", "completionTokens"),
+            ("inputTokens", "outputTokens"),
+        ] {
+            let mut p = SseParser::new();
+            let line = format!(
+                "data: {{\"usage\":{{\"{kin}\":120,\"{kout}\":34}}}}"
+            );
+            p.feed(format!("{line}\n").as_bytes());
+            assert_eq!(
+                (p.prompt_tokens, p.completion_tokens),
+                (120, 34),
+                "字段名 {kin}/{kout} 应被识别"
+            );
+        }
+    }
+
+    /// 0 与缺失同样视为「这一项没说话」，继续找下一个别名。
+    #[test]
+    fn sse_parser_skips_zero_usage() {
+        let mut p = SseParser::new();
+        p.feed(br#"data: {"usage":{"prompt_tokens":0,"input_tokens":4800,"completion_tokens":0,"output_tokens":7}}
+"#);
+        assert_eq!(p.prompt_tokens, 4800, "0 应回落到下一个别名");
+        assert_eq!(p.completion_tokens, 7);
+    }
+    /// 降级期内，请求必须**首发就带中性提示词**，不再先撞一次 400。
+    ///
+    /// 这是降级状态机存在的全部理由：重发补救只能救「这一次」，而客户端
+    /// 通常是一连串请求（同一个 system 模板），每个都撞一次 400 再补救，
+    /// 等于每条消息多花一轮往返、还多给上游一次风控记录。
+    #[tokio::test]
+    async fn degraded_requests_skip_the_first_400() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        sanitize::degrade_clear();
+
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let h2 = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(move |_req: axum::extract::Request| {
+            let h2 = h2.clone();
+            async move {
+                h2.fetch_add(1, Ordering::Relaxed);
+                // 一律成功：本用例只关心「上游被打了几次」
+                axum::response::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"id":"1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}"#,
+                    ))
+                    .unwrap()
+            }
+        });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let spec = serde_json::from_value::<ProviderSpec>(json!({
+            "id": "deg-test",
+            "name": "deg",
+            "enabled": true,
+            "auth": "api_key",
+            "base_url": format!("http://{addr}"),
+            "format": "openai",
+            "models": [],
+            "models_policy": "static",
+            "stream_dialect": "sse_delta",
+            "region": "global",
+            "headers": {},
+        }))
+        .expect("spec");
+        let body = br#"{"model":"m","system":"You are Claude Code, Anthropic's official CLI for Claude.","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+
+        let client = OutClient::new();
+        // 未降级：打一次就成功
+        let _ = client.forward_nonstream(&spec, "", "", body).await.expect("ok");
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+        // 进入降级期后再发：仍然只该打一次（首发即中性提示词）
+        sanitize::degrade_trigger();
+        let _ = client.forward_nonstream(&spec, "", "", body).await.expect("ok");
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            2,
+            "降级期内不该额外往返"
+        );
+
+        sanitize::degrade_clear();
+    }
+
+    /// 上游按内容审核回 400 时，必须换成中性提示词重发一次并成功。
+    ///
+    /// ★ 为什么需要：客户端 system 模板里的指纹句会让上游逐字审核直接拒单，
+    ///   而脱敏表必然滞后于模板更新。被拦下之后若不做补救，用户只会看到一个
+    ///   无从下手的 400（且换号也救不了，因为问题在内容里）。
+    #[tokio::test]
+    async fn content_blocked_request_is_retried_with_neutral_prompt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let h2 = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(move |_req: axum::extract::Request| {
+            let h2 = h2.clone();
+            async move {
+                let n = h2.fetch_add(1, Ordering::Relaxed);
+                if n == 0 {
+                    // 第一次：按内容审核拒绝（与上游真实文案同形）
+                    return axum::response::Response::builder()
+                        .status(400)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            r#"{"error":{"message":"content policy violation"}}"#,
+                        ))
+                        .unwrap();
+                }
+                axum::response::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"id":"1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}"#,
+                    ))
+                    .unwrap()
+            }
+        });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let spec = serde_json::from_value::<ProviderSpec>(json!({
+            "id": "cb-test",
+            "name": "cb",
+            "enabled": true,
+            "auth": "api_key",
+            "base_url": format!("http://{addr}"),
+            "format": "openai",
+            "models": [],
+            "models_policy": "static",
+            "stream_dialect": "sse_delta",
+            "region": "global",
+            "headers": {},
+        }))
+        .expect("spec");
+        // 请求体带客户端特征 system（正是会被拦下的那种）
+        let body = br#"{"model":"m","system":"You are Claude Code, Anthropic's official CLI for Claude.","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+        let out = OutClient::new()
+            .forward_nonstream(&spec, "", "", body)
+            .await
+            .expect("被内容审核拦下的请求应通过中性提示词重发成功");
+        assert_eq!(out["choices"][0]["message"]["content"], "OK");
+        assert_eq!(hits.load(Ordering::Relaxed), 2, "应恰好重发一次");
+    }
+
+    /// 普通的 400（参数写错）不该触发重发：那会把一个明确的错误变成两次往返。
+    #[tokio::test]
+    async fn ordinary_400_is_not_retried() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let h2 = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(move |_req: axum::extract::Request| {
+            let h2 = h2.clone();
+            async move {
+                h2.fetch_add(1, Ordering::Relaxed);
+                axum::response::Response::builder()
+                    .status(400)
+                    .body(axum::body::Body::from("model not found"))
+                    .unwrap()
+            }
+        });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let spec = serde_json::from_value::<ProviderSpec>(json!({
+            "id": "cb-test2",
+            "name": "cb",
+            "enabled": true,
+            "auth": "api_key",
+            "base_url": format!("http://{addr}"),
+            "format": "openai",
+            "models": [],
+            "models_policy": "static",
+            "stream_dialect": "sse_delta",
+            "region": "global",
+            "headers": {},
+        }))
+        .expect("spec");
+        let body = br#"{"model":"m","system":"whatever","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+        let err = OutClient::new()
+            .forward_nonstream(&spec, "", "", body)
+            .await
+            .expect_err("普通 400 应原样失败");
+        assert_eq!(err.status, 400);
+        assert_eq!(hits.load(Ordering::Relaxed), 1, "不该重发");
+    }
+
+    /// 上游用 Brotli 压缩响应时必须能自动解压。
+    ///
+    /// ★ 真实事故（2026-10-26）：reqwest 只开了 stream/json，没开 brotli，
+    ///   于是凡是回 Content-Encoding: br 的上游，拿到的仍是压缩字节 ——
+    ///   表现为「HTTP 200 但 error decoding response body」，模型清单一直拉不到。
+    ///   实测受影响的有 ai-gateway.vercel.sh、api.kilo.ai、api.featherless.ai。
+    ///   而用 br 的上游越来越多（Vercel / Cloudflare 系普遍启用），
+    ///   这条测试把「悄悄精简掉 Cargo 特性」变成红灯。
+    #[tokio::test]
+    async fn brotli_encoded_models_list_is_decoded() {
+        // 预压缩的 {"data":[{"id":"br-model-1"},{"id":"br-model-2"}]}
+        const BROTLI_B64: &str =
+            "GzEA+C0O7Gaf7VG+piaTuwghapGWrb0VI1NiadnXxZI6ZHKNgCTqDCQxGIEKz7Mb3BmKDg==";
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(BROTLI_B64)
+            .expect("测试用的 base64 应合法");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(move |_req: axum::extract::Request| {
+            let raw = raw.clone();
+            async move {
+                axum::response::Response::builder()
+                    .header("content-type", "application/json")
+                    .header("content-encoding", "br")
+                    .body(axum::body::Body::from(raw))
+                    .unwrap()
+            }
+        });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let spec = serde_json::from_value::<ProviderSpec>(json!({
+            "id": "br-test",
+            "name": "br",
+            "enabled": true,
+            "auth": "api_key",
+            "base_url": format!("http://{addr}"),
+            "format": "openai",
+            "models": [],
+            "models_policy": "live",
+            "models_path": "/models",
+            "stream_dialect": "sse_delta",
+            "region": "global",
+            "headers": {},
+        }))
+        .expect("spec");
+        let client = OutClient::new();
+        let ids = client
+            .fetch_models_with_secret(&spec, "")
+            .await
+            .expect("Brotli 清单必须能被解压解析");
+        assert_eq!(ids, vec!["br-model-1", "br-model-2"]);
+    }
     use super::*;
     use serde_json::json;
 

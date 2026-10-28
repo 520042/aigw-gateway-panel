@@ -276,8 +276,8 @@ impl AppState {
     pub fn with_key_rate(mut self, key_rpm: u32) -> AppState {
         let per_ip = self.limits.per_ip();
         let global = self.limits.global();
-        let mut lim = RateLimiter::new(per_ip, global);
-        lim.key_rate = key_rpm;
+        let lim = RateLimiter::new(per_ip, global);
+        lim.set_rates(per_ip, global, key_rpm);
         self.limits = Arc::new(lim);
         self
     }
@@ -422,10 +422,31 @@ impl AppState {
     /// 用于区分「路由后缀」和「上游模型名里本来就有的 @」（如 `qwen3@2025-09`）。
     /// 只认已加载的 spec id（含 custom-*/公益站），不做模糊匹配。
     pub fn is_platform_id(&self, candidate: &str) -> bool {
-        if candidate.is_empty() {
-            return false;
+        self.canonical_platform_id(candidate).is_some()
+    }
+
+    /// 把「后缀里写的平台名」归一成真实的 spec id（大小写不敏感）。
+    ///
+    /// ★ 为什么要有它：模型名那边（`canonical_model_for` → `same_model`）本来就
+    ///   大小写不敏感，平台名却曾是**精确匹配** —— 用户在客户端里手写
+    ///   `kilo-auto/free@KILO` 会失败，而且报的是「未知模型 kilo-auto/free@KILO」，
+    ///   把整串当成模型名，**完全没提「平台名写错了」**，用户会去查模型名而不是平台。
+    ///   两边口径必须一致。
+    ///
+    /// 先精确命中（最常见、也最快），再退到大小写不敏感；仍找不到才算「不是平台」。
+    pub fn canonical_platform_id(&self, candidate: &str) -> Option<String> {
+        let c = candidate.trim();
+        if c.is_empty() {
+            return None;
         }
-        self.all_specs().iter().any(|s| s.id == candidate)
+        let specs = self.all_specs();
+        if specs.iter().any(|s| s.id == c) {
+            return Some(c.to_string());
+        }
+        specs
+            .iter()
+            .find(|s| s.id.eq_ignore_ascii_case(c))
+            .map(|s| s.id.clone())
     }
 
     /// 路由候选：已启用 + 有凭据。
@@ -634,6 +655,23 @@ impl AppState {
             let g = self.models_cache_per.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((_, ids, _)) = g.get(&spec.id) {
                 if let Some(m) = ids.iter().find(|m| same_model(m, requested)) {
+                    return m.clone();
+                }
+            }
+        }
+        // ★ 2026-10-26（审计优化）：路由别名（auto / free）在指定平台（模型@平台）
+        // 的清单里匹配不到时，回落到该平台**第一个未停用的模型**——而不是把
+        // "auto" 裸名发给上游（实测 OpenCode 回 400 Model is unavailable，用户只看到
+        // 一句看不懂的上游报错）。免凭据车道（anon-zen / kilo）清一色免费，取第一个
+        // 就是合理默认；普通平台同样受益（"auto@平台" 成了"随便给一个能用"）。
+        if requested == "auto" || requested == "free" {
+            let disabled = |m: &str| self.flags.is_model_disabled(m);
+            if let Some(m) = spec.models.iter().find(|m| !disabled(m)) {
+                return m.clone();
+            }
+            let g = self.models_cache_per.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((_, ids, _)) = g.get(&spec.id) {
+                if let Some(m) = ids.iter().find(|m| !disabled(m)) {
                     return m.clone();
                 }
             }

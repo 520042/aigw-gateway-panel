@@ -5,7 +5,7 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261026c';
+const BUILD = 'v20261028a';
 
 // 公益站聚合源状态（/api/free 的 sources + last_refresh）：只在需要时拉一次，
 // 手动刷新后置空，下次渲染重取。
@@ -141,6 +141,7 @@ const VIEWS = {
   sources:  { t: '接入源', s: '官方 API · 订阅反代 · 客户端 · 公益站 · 自定义', f: viewSources },
   accounts: { t: '账号', s: '凭据掩码展示，secret 仅后台使用', f: viewAccounts },
   usage:    { t: '用量', s: 'SQLite(WAL) 用量台账', f: viewUsage },
+  logs:     { t: '日志', s: '落盘日志尾部：失败根因的最后一层', f: viewLogs },
   // ★ 2026-10-26（P3）：运行时配置热更新（并发/超时/重试/限流），改完立即生效。
   runtime:  { t: '运行配置', s: '并发 · 超时 · 重试 · 限流（热更新，无需重启）', f: viewRuntime },
   about:    { t: '关于', s: '版本 · 在线更新 · 备份恢复 · 使用说明 · 免责声明', f: viewAbout },
@@ -271,7 +272,7 @@ async function showGatewayInfo() {
   }
   // 后台任务台账：/api/health 的 tasks 里带着「成功几次 / 最近一次什么时候 / 最近错误」，
   // 让「公益站该刷新却没刷新」「预热 panic 过」这类静默故障在界面上能直接看出来。
-  const TASK_LABEL = { warm_models: '启动预热模型清单', free_refresh: '公益站每日刷新' };
+  const TASK_LABEL = { warm_models: '启动预热模型清单', free_refresh: '公益站每日刷新', credits_refresh: '积分快照刷新（6 小时）' };
   const tasks = (h && h.tasks) || {};
   let taskHtml = '';
   const tkeys = Object.keys(tasks);
@@ -304,6 +305,22 @@ async function showGatewayInfo() {
     }
     limHtml = '<label>限流</label><div class="faint" style="font-size:12px">' + esc(line) + '</div>';
   }
+  // 积分资产一行（后端 health.credits，口径与选号逻辑一致）：
+  // 「还剩多少、几个号快作废」是用户最关心的两个数，放任务与限流之间。
+  const cr = (h && h.credits) || null;
+  let creditHtml = '';
+  if (cr && cr.accounts > 0) {
+    let cline = cr.accounts + ' 个账号共 ' + Math.round(cr.total) + ' 分';
+    if (cr.expiring_soon > 0) {
+      cline += ' · <b style="color:#e5a23c">' + cr.expiring_soon + ' 个号 48 小时内到期</b>';
+    }
+    if (typeof cr.earliest_expire_s === 'number' && cr.earliest_expire_s > 0) {
+      const d = new Date(cr.earliest_expire_s * 1000);
+      cline += ' · 最早 ' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    }
+    cline += ' · 明细在「账号」页';
+    creditHtml = '<label>积分资产</label><div class="faint" style="font-size:12px">' + cline + '</div>';
+  }
   const mk = modalShell('服务网关信息', `
       <label>代理地址（base_url）</label>
       <input class="q mono" readonly value="${esc(base)}/v1" onclick="this.select();copyText(this.value)">
@@ -314,6 +331,7 @@ async function showGatewayInfo() {
       <div class="faint" style="font-size:12px">${modelsN} 个模型可用（共 ${platN} 个平台规格）· 模型名写 <code>模型id@平台</code> 或任意清单内模型</div>
       ${taskHtml}
       ${limHtml}
+      ${creditHtml}
       <div class="modal-foot">
         <button class="btn pri" onclick="navigator.clipboard.writeText('${att(base)}/v1');this.textContent='已复制地址';setTimeout(()=>this.textContent='复制地址',1200)">复制地址</button>
         <button class="btn" onclick="navigator.clipboard.writeText('${att(gwKey)}');this.textContent='已复制KEY';setTimeout(()=>this.textContent='复制KEY',1200)">复制 KEY</button>
@@ -662,8 +680,11 @@ function srcModelsBlock(p) {
     // 后端下发的 disabled_models 是裸名；模型名自带 @ 时按同规则取裸名比对
     const bare = m.includes('@') ? m.slice(0, m.lastIndexOf('@')) : m;
     const on = !(window.__DISABLED_MODELS || []).includes(bare);
+    // 倍率来自后端的离线表（仅 wb 族有）：查不到就不显示，不编数。
+    const rate = (p.rates && p.rates[m]) ? p.rates[m] : '';
     return `<div class="mrow">
       <span class="mono" style="font-size:12px">${esc(m)}</span>
+      ${rate ? `<span class="pill mut" title="积分倍率：这一条请求按 ×${esc(rate)} 扣积分池额度">×${esc(rate)}</span>` : ''}
       <button class="btn sm" onclick="toggleModel('${att(m)}', ${on ? 'false' : 'true'})">${on ? '停用' : '启用'}</button>
     </div>`;
   }).join('');
@@ -673,7 +694,11 @@ function srcModelsBlock(p) {
     ? `<div class="note">清单已固定：/v1/models 只发布这 ${ms.length} 个模型，不随上游变化。
         <button class="btn sm" style="margin-left:6px" onclick="unpinCustomModels('${att(p.id)}')">恢复跟随上游</button></div>`
     : '';
-  return `${pinnedNote}<div class="note">模型 ${onN}/${ms.length} 启用（停用后不出现在 /v1/models，路由也会拒绝）</div>
+  const rateN = Object.keys(p.rates || {}).length;
+  const rateLegend = rateN
+    ? ` · <span class="pill mut">×N</span> 是积分倍率（该模型每条请求扣积分池的系数，数值越高越费额度；来源：${esc(p.rates_source || '离线')}）`
+    : '';
+  return `${pinnedNote}<div class="note">模型 ${onN}/${ms.length} 启用（停用后不出现在 /v1/models，路由也会拒绝）${rateLegend}</div>
     <div class="mlist">${rows}</div>`;
 }
 
@@ -1070,12 +1095,16 @@ function srcDrawer(p) {
       'apk-yuanbao': '登录 <b>yuanbao.tencent.com</b> 后，F12 → Application → Cookies，复制整段 Cookie，<b>必须包含 hy_user 和 hy_token</b> 两条，否则验活失败。',
       'apk-kuku': '登录 <b>kuku.baidu.com</b> 后，F12 → Application → Cookies，复制整段 Cookie，<b>必须包含 BDUSS 和 STOKEN</b>（httpOnly，在 Cookies 列表里可见）。',
       'apk-raccoon': '登录小浣熊网页版后，F12 → Application → Cookies 复制整段 Cookie。',
+      'web-monkeycode': '登录 <b>monkeycode-ai.com</b> 后，F12 → Application → Cookies 复制 <b>monkeycode_ai_session</b> 的值；也可以直接粘整段 Cookie，面板会自动提取目标键。',
+      'web-monkeycode-intl': '登录 <b>monkeycode-ai.net</b>（国际站，账号与国内站不通用）后，F12 → Application → Cookies 复制 <b>monkeycode_ai_session</b> 的值；也可以直接粘整段 Cookie。',
     };
     const COOKIE_PH = {
       'apk-yuanbao': '粘贴整段 Cookie（含 hy_user=…; hy_token=…）…',
       'apk-kuku': '粘贴整段 Cookie（含 BDUSS=…; STOKEN=…）…',
       'apk-doubao': '粘贴整段 Cookie（含 sessionid=…）…',
       'apk-raccoon': '粘贴整段 Cookie…',
+      'web-monkeycode': '粘贴 monkeycode_ai_session 的值或整段 Cookie…',
+      'web-monkeycode-intl': '粘贴 monkeycode_ai_session 的值或整段 Cookie…',
     };
     if (p.id === 'apk-metaso') {
       body = `<div class="note oknote">秘塔<b>免登录即可用</b>（匿名约 13 次 / IP / 窗口，搜索带引用来源）：无需粘贴任何凭据，直接在对话里选 metaso 模型即可。</div>
@@ -2099,13 +2128,14 @@ async function viewAccounts(el) {
   el.innerHTML = `<section class="card glass">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
       <b>账号凭据</b>
-      ${wbN > 0 ? `<button class="btn sm" onclick="wbCheckin()">wb 每日签到（${wbN} 账号）</button>` : ''}
+      ${wbN > 0 ? `<button class="btn sm" onclick="wbCheckin()">每日签到（${wbN} 账号）</button>` : ''}
       ${wbN > 0 ? `<button class="btn sm ${ac.daily_checkin ? 'pri' : 'gh'}" onclick="wbAutoToggle(${ac.daily_checkin ? 'false' : 'true'}, this)" title="开启后后台每 12 小时自动领取一次；默认关，开关存 flags.json，重启保持。当天已领过时上游回「今日已领取」，无副作用">自动签到：${ac.daily_checkin ? '开 ✔' : '关'}</button>` : ''}
       ${wbN > 0 ? `<button class="btn sm" onclick="wbGrowth()" title="一键完成成长任务（17 项）：事件链上报 + 领奖，全新账号约 +1950 积分">⚡ 成长任务</button>` : ''}
       ${wbN > 0 ? `<button class="btn sm ${ac.daily_growth ? 'pri' : 'gh'}" onclick="wbGrowthToggle(${ac.daily_growth ? 'false' : 'true'}, this)" title="开启后后台每 12 小时自动跑一轮成长任务；默认关">自动成长：${ac.daily_growth ? '开 ✔' : '关'}</button>` : ''}
       <span class="faint" style="margin-left:auto">健康列来自最近一次真实请求 / 「检查」验活的结果（重启后清空）· Buddy 加油站每日 100 积分仅 wb 族账号可签到</span>
     </div>
     ${checkinTaskLine(ac.checkin_task)}
+    ${creditSummary(ac.rows)}
     ${ac.rows.some((a) => a.platform_known === false) ? `<div class="note">有 ${ac.rows.filter((a) => a.platform_known === false).length} 个账号所属的平台已经不在 providers/ 里了（标记「平台已移除」）：这些号转不出去，留着只会混淆，可以直接删除。</div>` : ''}
     ${ac.rows.length ? `<table><thead><tr><th>账号名</th><th>平台</th><th>凭据类型</th><th>凭据</th><th>状态</th><th>健康</th><th style="width:250px">操作</th></tr></thead>
     <tbody>${ac.rows.map((a) => `<tr>
@@ -2113,7 +2143,7 @@ async function viewAccounts(el) {
       <td>${a.platform_known === false ? `<span class="faint mono">${esc(a.platform)}</span><br>${pill('warn', '平台已移除')}` : `${esc(platShort(a.platform_name || a.platform))}<br><span class="faint mono" style="font-size:11px">${esc(a.platform)}</span>`}</td><td>${pill('mut', esc(a.kind || '—'))}</td>
       <td class="faint">${a.anon ? '无需凭据' : a.needs_relogin ? '本机解不开（换过 Windows 用户/机器）' : a.secret_len ? `${a.secret_len} 字符（掩码）` : '空'}</td>
       <td>${a.enabled ? pill('ok', '启用') : pill('mut', '停用')}</td>
-      <td>${a.anon ? pill('mut', '免密车道') + healthPill(a.health) + blockPills(a) : healthPill(a.health) + blockPills(a)}</td>
+      <td>${a.anon ? pill('mut', '免密车道') + healthPill(a.health) + blockPills(a) : healthPill(a.health) + blockPills(a) + creditPill(a) + tokenPill(a)}</td>
       <td>
         ${a.anon
           ? `<span class="faint" style="font-size:11.5px">免密车道不需要账号，此行是历史占位数据；「状态」列显示的是这条车道当前的封锁/冷却</span>
@@ -2123,6 +2153,7 @@ async function viewAccounts(el) {
              <button class="btn sm" onclick="acDelete('${att(a.id)}')">删除</button>`
           : `<button class="btn sm" onclick="acVerify('${att(a.id)}', this)" title="立刻用该凭据发一次验活请求">检查</button>
              <button class="btn sm" onclick="acBalance('${att(a.id)}', this)" title="查询积分余额（仅 WorkBuddy / CodeBuddy 族支持）">积分</button>
+              <button class="btn sm" onclick="acLimit('${att(a.id)}')" title="Token 周期限额：防用量过猛被上游盯上">限额</button>
              <button class="btn sm" onclick="acRename('${att(a.id)}', this)" title="给这个号起个认得出的名字（同平台不能重名）">改名</button>
              <button class="btn sm" onclick="acToggle('${att(a.id)}', ${a.enabled ? 'false' : 'true'})">${a.enabled ? '停用' : '启用'}</button>
              <button class="btn sm" onclick="acDelete('${att(a.id)}')">删除</button>`}
@@ -2146,6 +2177,65 @@ function blockPills(a) {
   return '';
 }
 
+// 积分余额徽标：只在后端下发了快照时显示（签到/手动查询后刷新）。
+// 余额低的号会被号池的「低余额优先」加权先消耗掉——把这件事写在界面上，
+// 用户才不会以为「为什么总是同一个号在掉额度」。
+function creditPill(a) {
+  if (!a || typeof a.credit !== 'number') return '';
+  var age = typeof a.credit_age_s === 'number' ? a.credit_age_s : 0;
+  var ageTxt = age < 90 ? '刚刚' : (age < 3600 ? Math.round(age / 60) + ' 分钟前' : Math.round(age / 3600) + ' 小时前');
+  var parts = ['积分 ' + Math.round(a.credit), ' · ' + ageTxt];
+  // 到期提示与后端 pick 的「48h 窗口」同一口径：warn 色 = 这个号会被优先消耗掉
+  if (typeof a.credit_expire_s === 'number' && a.credit_expire_s > 0) {
+    var leftH = (a.credit_expire_s * 1000 - Date.now()) / 3600000;
+    if (leftH <= 0) parts.push(' · 已到期');
+    else if (leftH <= 48) parts.push(' · 剩 ' + Math.max(1, Math.round(leftH)) + ' 小时到期（优先消耗）');
+    else parts.push(' · 约 ' + Math.round(leftH / 24) + ' 天后到期');
+  }
+// Token 限制器徽标：配了规则的号显示「限 已用/上限 · 翻页剩N分」；
+// 触顶（used>=limit）用 err 色——用户得能一眼看出「这个号本周期已被排除」。
+// 数值全部来自后端 json 数字，无注入面。
+function tokenPill(a) {
+  if (!a || !a.token_rule || typeof a.token_rule.limit !== 'number') return '';
+  const used = typeof a.token_used === 'number' ? a.token_used : 0;
+  const lim = a.token_rule.limit;
+  const fmt = (n) => n >= 1e6 ? (Math.round(n / 1e5) / 10) + 'M' : (n >= 1e3 ? (Math.round(n / 100) / 10) + 'k' : n);
+  const hit = used >= lim;
+  const pct = lim ? Math.min(100, Math.round(used * 100 / lim)) : 0;
+  return ' ' + pill(hit ? 'err' : (pct >= 80 ? 'warn' : 'mut'), '限 ' + fmt(used) + '/' + fmt(lim));
+}
+  var soon = typeof a.credit_expire_s === 'number' && a.credit_expire_s > 0
+    && (a.credit_expire_s * 1000 - Date.now()) <= 48 * 3600000;
+  var low = a.credit <= 100;
+  return ' ' + pill(soon || low ? 'warn' : 'mut', parts.join(''));
+}
+// 积分总览条：账号页顶部一行看清「共多少分、几个号快到期」。
+// 「48 小时内到期」阈值与后端 pick 的 CREDIT_EXPIRING_WINDOW_SECS 同一口径。
+// 数值全部是数字运算，没有上游字符串，不存在注入面。
+function creditSummary(rows) {
+  var withC = (rows || []).filter(function (a) { return typeof a.credit === 'number' && !a.anon; });
+  if (!withC.length) return '';
+  var total = 0, soon = 0, earliest = null, nowMs = Date.now();
+  withC.forEach(function (a) {
+    total += a.credit;
+    var e = a.credit_expire_s;
+    if (typeof e === 'number' && e > 0) {
+      if ((e * 1000 - nowMs) <= 48 * 3600000) soon++;
+      if (earliest === null || e < earliest) earliest = e;
+    }
+  });
+  var txt = '积分总览：' + withC.length + ' 个号共 ' + Math.round(total) + ' 分';
+  if (soon) txt += ' · <b>' + soon + ' 个号 48 小时内到期（选号已优先）</b>';
+  if (earliest !== null) {
+    var d = new Date(earliest * 1000);
+    var mm = String(d.getMonth() + 1).padStart(2, '0');
+    var dd = String(d.getDate()).padStart(2, '0');
+    var hh = String(d.getHours()).padStart(2, '0');
+    var mi = String(d.getMinutes()).padStart(2, '0');
+    txt += ' · 最早到期 ' + mm + '-' + dd + ' ' + hh + ':' + mi;
+  }
+  return '<div class="note">' + txt + '</div>';
+}
 // 账号健康（号池按最近一次真实请求结论 + 「检查」验活结果写入内存）
 // ok=正常 · auth=鉴权失败(过期) · quota=额度不足 · rate=被上游限流
 function healthPill(h) {
@@ -2223,6 +2313,56 @@ async function acBalance(id, btn) {
   if (typeof r.growth_score === 'number' && r.growth_score > 0) parts.push('成长值 ' + r.growth_score);
   alert(parts.length ? ('当前余额：' + parts.join(' · ')) : '上游未返回余额字段（账号可能刚登录，资源尚未同步）');
 }
+
+// Token 限额编辑弹窗：设/改/清一个账号的周期限制（action=set_limit）。
+// 周期四档都是整点对齐的自然窗口——触顶跳过，翻页自动恢复，无需人工。
+async function acLimit(id) {
+  const ac = await api("/api/accounts");
+  const a = (ac.rows || []).find((x) => x.id === id);
+  if (!a) { alert("账号不存在"); return; }
+  const cur = a.token_rule || null;
+  const used = typeof a.token_used === "number" ? a.token_used : 0;
+  const nowLine = cur
+    ? ("当前：每 " + Math.round(cur.period_s / 60) + " 分钟 " + cur.limit + " token · 本窗口已用 " + used)
+    : "当前：未设置（该账号用量不受限制器控制）";
+  const qs = [];
+  qs.push("<div class="note">" + esc(nowLine) + "</div>");
+  qs.push("<label>每周期允许的 Token 总量（in+out 合计）</label>");
+  qs.push("<input class="q mono" id="limN" type="number" min="1" placeholder="例如 500000（0.5M token）" value="" + (cur ? cur.limit : "") + "">");
+  qs.push("<label>周期（窗口按整点对齐翻页；触顶自动跳过，翻页自动恢复）</label>");
+  qs.push("<select class="q" id="limP">");
+  qs.push("<option value="1800">30 分钟</option>");
+  qs.push("<option value="3600">1 小时</option>");
+  qs.push("<option value="43200">12 小时</option>");
+  qs.push("<option value="86400">24 小时</option>");
+  qs.push("</select>");
+  qs.push("<div class="faint small" style="margin-top:6px">用途：免费额度账号用量太猛容易被上游风控——限制器到量就在选号时跳过该号，窗口翻页自动回来。它防的是<b>用量</b>，与低余额优先 / 快到期加权互不冲突。</div>");
+  qs.push("<div class="modal-foot">");
+  qs.push("<button class="btn pri" onclick="acLimitSave(&quot;" + esc(id) + "&quot;)">保存</button>");
+  if (cur) qs.push("<button class="btn" onclick="acLimitClear(&quot;" + esc(id) + "&quot;)">清除限制</button>");
+  qs.push("<button class="btn" onclick="this.closest(&quot;.modal-mask&quot;).remove()">取消</button>");
+  qs.push("</div>");
+  const mk = modalShell("Token 周期限额 · " + esc(a.name || a.id), qs.join("
+"));
+  document.body.insertAdjacentHTML("beforeend", mk);
+  if (cur) document.getElementById("limP").value = String(cur.period_s);
+}
+
+async function acLimitSave(id) {
+  const n = parseInt((document.getElementById("limN").value || "").trim(), 10);
+  const per = parseInt(document.getElementById("limP").value, 10) || 3600;
+  if (!(n > 0)) { alert("填一个大于 0 的数字；要清除限制请点「清除限制」按钮"); return; }
+  const r = await post("/api/accounts", { action: "set_limit", id, limit: n, period_s: per }).catch((e) => ({ ok: false, message: String(e) }));
+  if (!r || !r.ok) { alert((r && r.message) || "保存失败"); return; }
+  const m = document.querySelector(".modal-mask"); if (m) m.remove(); render();
+}
+
+async function acLimitClear(id) {
+  const r = await post("/api/accounts", { action: "set_limit", id, limit: null }).catch((e) => ({ ok: false, message: String(e) }));
+  if (!r || !r.ok) { alert((r && r.message) || "清除失败"); return; }
+  const m = document.querySelector(".modal-mask"); if (m) m.remove(); render();
+}
+
 // 账号停用/启用（后端会同时清号池治理状态与粘性绑定）
 async function acToggle(id, enabled) {
   const r = await post('/api/accounts', { action: 'toggle', id, enabled }).catch((e) => ({ ok: false, message: e.message }));
@@ -2299,9 +2439,9 @@ function fmtCheckinAuto(r) {
 
 // wb 每日签到：GET=/api/checkin 查状态，POST=/api/checkin 领取。
 async function wbCheckin() {
-  const mk = modalShell('wb 每日签到（Buddy 加油站 100 积分）',
+  const mk = modalShell('每日签到（wb 加油站 + Lobster）',
     `
-      <div class="faint">先查各 wb 账号签到状态，再一键领取。仅 wb-gateway / codebuddy（CN）账号可签到。</div>
+      <div class="faint">查各账号签到状态并一键领取：wb 族走 Buddy 加油站（+100/天），Lobster 走 client-activities（+100/天，幂等已签跳过）。</div>
       <div class="modal-foot" style="margin-top:14px">
         <button class="btn" onclick="wbCheckinRun('status', this)">仅查状态</button>
         <button class="btn pri" onclick="wbCheckinRun('claim', this)">全部领取</button>
@@ -2507,6 +2647,55 @@ async function runtimeSave() {
   box.innerHTML = `<div class="note oknote">${esc(r.message || '已保存')}</div>`;
   setTimeout(() => route(), 900);
 }
+// ── 运行日志页 ──────────────────────────────────────────────
+// ★ 已有「用量」台账还要这页的原因：台账是结构化行、错误消息被截断，
+//   而失败根因（上游失败的完整 why=、后台任务台账、写盘失败现场）只活在
+//   tracing 原始行里。这页就是落盘日志的尾部视图，排障的最后一层。
+async function viewLogs(el) {
+  const cur = Object.assign({ n: 300, lv: '', g: '' }, window.__LOGQ || {});
+  el.innerHTML = `
+  <section class="card glass">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <b>运行日志</b>
+      <select class="q" id="lgN" onchange="logSet('n', this.value)">
+        ${[100, 300, 800, 2000].map((n) => '<option value="' + n + '"' + (cur.n === n ? ' selected' : '') + '>' + n + ' 行</option>').join('')}
+      </select>
+      <select class="q" id="lgLv" onchange="logSet('lv', this.value)">
+        <option value="">全部级别</option>
+        <option value="WARN"${cur.lv === 'WARN' ? ' selected' : ''}>只看 WARN+</option>
+        <option value="ERROR"${cur.lv === 'ERROR' ? ' selected' : ''}>只看 ERROR</option>
+      </select>
+      <input class="q" style="max-width:260px" id="lgG" placeholder="关键词过滤（模型名 / 失败原因）" value="${esc(cur.g)}" onkeydown="if(event.key==='Enter')logSet('g',this.value)">
+      <button class="btn sm" onclick="render()">刷新</button>
+      <span class="faint" style="margin-left:auto;font-size:12px">每请求一行 aigw::req（完成/失败）；明细在「用量」页</span>
+    </div>
+    <div id="lgBody" class="mono" style="font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;max-height:68vh;overflow:auto">加载中…</div>
+  </section>`;
+  const qs = '/api/logs?lines=' + encodeURIComponent(cur.n || 300)
+    + (cur.lv ? '&level=' + encodeURIComponent(cur.lv) : '')
+    + (cur.g ? '&grep=' + encodeURIComponent(cur.g) : '');
+  let r;
+  try { r = await api(qs); } catch (e) { r = { ok: false, message: String(e && e.message || e) }; }
+  const box = document.getElementById('lgBody');
+  if (!box) return;
+  if (!r || !r.ok) { box.innerHTML = '<div class="note errnote">' + esc((r && r.message) || '读取失败') + '</div>'; return; }
+  const ls = r.lines || [];
+  if (!ls.length) { box.innerHTML = '<div class="faint">没有匹配的日志行（换个关键词或级别）</div>'; return; }
+  box.innerHTML = ls.map((l) => {
+    const cls = l.includes(' ERROR ') ? ' style="color:#f06a6a"' : (l.includes(' WARN ') ? ' style="color:#e5a23c"' : '');
+    return '<div' + cls + '>' + esc(l) + '</div>';
+  }).join('')
+    + '<div class="faint" style="margin-top:6px">── 共 ' + ls.length + ' 行 · 日志文件约 '
+    + Math.round((r.file_size || 0) / 1024) + ' KiB（尾部 256 KiB 窗口内查找）──</div>';
+  box.scrollTop = box.scrollHeight;
+}
+function logSet(k, v) {
+  const cur = Object.assign({ n: 300, lv: '', g: '' }, window.__LOGQ || {});
+  cur[k] = k === 'n' ? (+v || 300) : v;
+  window.__LOGQ = cur;
+  render();
+}
+
 async function viewUsage(el) {
   const q = usageQuery();
   const [us, hist] = await Promise.all([api('/api/usage' + q), api('/api/requests' + q)]);

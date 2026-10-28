@@ -2171,6 +2171,22 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
             }));
         }
     }
+    // ★ 2026-10-26（审计优化）：Lobster 每日签到（+100 积分/号/天）。
+    // 协议移植自 lobsterai2api DailyCheckin（slot → context → check_in → 复核）。
+    // 幂等：已签到/活动未投放回 ok=true，不会重复领取；claim=false 时
+    // 直接复用 claim 调用做状态查询（上游幂等，无副作用），简化模型。
+    if claim {
+        for (acc_id, secret) in st.accounts.secrets_for("lobster") {
+            let r = aigw_relay::lobster_checkin::daily_checkin(&http, &secret).await;
+            results.push(json!({
+                "platform": "lobster",
+                "account": acc_id,
+                "action": "claim",
+                "ok": r.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+                "data": r,
+            }));
+        }
+    }
     json!({"ok": true, "claim": claim, "results": results, "count": results.len()})
 }
 
