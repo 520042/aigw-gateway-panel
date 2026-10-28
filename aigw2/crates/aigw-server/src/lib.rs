@@ -437,6 +437,15 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    // ★ 账号行只取一次：循环里每个平台都 rows_snapshot() 的话，150+ 平台会把
+    //   整张账号表的 JSON 反复构建 150 次（纯浪费 CPU）。
+    let account_rows: Vec<Value> = st
+        .accounts
+        .rows_snapshot()
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
     let rows: Vec<Value> = specs
         .iter()
         .map(|s| {
@@ -499,6 +508,23 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
                 "models_policy": s.models_policy,
                 "placeholder": s.base_url.starts_with('@'),
                 "accounts_n": acct_n,
+                // ★ 登录用户信息（wb 族登完授权会自动拉到）：卡片上显示「登上的到底是谁」，
+                //   而不是只有一个「1 账号」。信息缺失时是空数组，前端据此不渲染那一行。
+                "profiles": account_rows
+                    .iter()
+                    .filter(|a| a.get("platform").and_then(|x| x.as_str()) == Some(s.id.as_str()))
+                    .filter_map(|a| {
+                        let p = a.get("profile")?;
+                        if p.is_null() {
+                            return None;
+                        }
+                        Some(json!({
+                            "name": p.get("name").cloned().unwrap_or(Value::Null),
+                            "email": p.get("email").cloned().unwrap_or(Value::Null),
+                            "plan": p.get("plan").cloned().unwrap_or(Value::Null),
+                        }))
+                    })
+                    .collect::<Vec<_>>(),
                 "anon": is_anon,
                 "login_url": s.login_url,
                 "notes": s.notes,
@@ -1563,6 +1589,49 @@ async fn proxy_set(body: Bytes) -> Response {
         Ok(v) => v,
         Err(r) => return r,
     };
+    // ★ action=test：只探测不保存——「代理进程悄悄退出」是真实高频事故（本周就
+    //   发生过：Clash 死了而 gateway 仍在 global 模式，全源连不上）。面板必须
+    //   能一键回答「这个代理现在通不通」，而不是等用户拿全量请求去试错。
+    if v.get("action").and_then(|x| x.as_str()) == Some("test") {
+        let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("direct");
+        let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        if mode == "direct" {
+            return Json(json!({"ok": true, "reachable": true, "message": "直连模式不需要代理"})).into_response();
+        }
+        let Some((host, port)) = aigw_relay::proxy::parse_host_port(&url) else {
+            return Json(json!({"ok": false, "reachable": false, "message": format!("代理地址无法解析：{url}")})).into_response();
+        };
+        // 3s 超时 + spawn_blocking：DNS 与 TCP 都是阻塞调用，别占 async worker。
+        let host_for_msg = host.clone();
+        let res = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            use std::net::ToSocketAddrs;
+            let host = host_for_msg;
+            let addrs: Vec<_> = match (host.as_str(), port).to_socket_addrs() {
+                Ok(it) => it.collect(),
+                Err(e) => return Err(format!("域名解析失败：{e}")),
+            };
+            if addrs.is_empty() {
+                return Err("域名解析无结果".to_string());
+            }
+            let mut last: Option<std::io::Error> = None;
+            for a in addrs {
+                match std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_secs(3)) {
+                    Ok(_) => return Ok(format!("{host}:{port} TCP 可达")),
+                    Err(e) => last = Some(e),
+                }
+            }
+            Err(last.map(|e| e.to_string()).unwrap_or_else(|| "连接失败".to_string()))
+        })
+        .await;
+        return match res {
+            Ok(Ok(msg)) => Json(json!({"ok": true, "reachable": true, "message": msg})).into_response(),
+            Ok(Err(e)) => Json(json!({
+                "ok": true, "reachable": false,
+                "message": format!("代理 {host}:{port} 连不上（{e}）——多半是代理软件没在运行。启动它，或把模式切回「全部直连」，否则所有上游请求都会被引向这个死端口。")
+            })).into_response(),
+            Err(_) => Json(json!({"ok": false, "reachable": false, "message": "探测任务被终止，请重试"})).into_response(),
+        };
+    }
     let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("");
     if !["direct", "global", "bypass_cn"].contains(&mode) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "mode 必须是 direct | global | bypass_cn"}))).into_response();
@@ -1629,6 +1698,11 @@ async fn proxy_set(body: Bytes) -> Response {
 
 async fn accounts(State(st): State<AppState>) -> Json<Value> {
     let mut snap = st.accounts.rows_snapshot();
+    // ★ 2026-10-28（用户要求）：按平台聚合账号明细，供接入源卡片就地展示
+    //   「登录的具体账号」（掩码名 / 状态 / 积分 / 到期）。只给展示所需字段，
+    //   凭证（secret）绝不下发。
+    let mut acct_detail: std::collections::HashMap<String, Vec<Value>> =
+        std::collections::HashMap::new();
     // 免密车道的平台 id 集合：这些平台转发时用 `{id}:anon` 现造账号、凭据恒为空，
     // 账号池里任何一条都属于历史遗留的占位行（name="匿名公共池"、secret="public"）。
     // 标成 anon 让前端显示「占位行·可删」，而不是当成一份真凭据去「检查/停用」。
@@ -1682,6 +1756,28 @@ async fn accounts(State(st): State<AppState>) -> Json<Value> {
                 row["credit_age_s"] = json!(age);
                 row["credit_expire_s"] = json!(expire_at);
             }
+            // ★ 这个平台有没有「积分余额」端点（面板据此决定显不显示「积分」按钮）。
+            //   单一来源是 wb::wb_checkin_base —— 让前端别自己再抄一份平台列表
+            //   （抄一份就必然有一天不同步，然后按钮点了只弹「该平台不支持」）。
+            row["balance_supported"] = json!(
+                aigw_relay::wb::wb_checkin_base(&plat).is_some()
+            );
+            // ★ 2026-10-28（用户要求）：接入源卡片要显示「具体账号信息」而不是只报个数。
+            //   把每个平台的账号明细同时挂到平台行上（acct_detail），接入源页就地展开，
+            //   不必跳账号页。凭证绝不下发：只有 name（掩码）/ id / 健康 / 积分快照。
+            acct_detail
+                .entry(plat.clone())
+                .or_insert_with(Vec::new)
+                .push(json!({
+                    "id": id,
+                    "name": row.get("name").cloned().unwrap_or(json!("")),
+                    "enabled": row.get("enabled").cloned().unwrap_or(json!(true)),
+                    "needs_relogin": row.get("needs_relogin").cloned().unwrap_or(json!(false)),
+                    "health": row.get("health").cloned().unwrap_or(Value::Null),
+                    "credit": row.get("credit").cloned().unwrap_or(Value::Null),
+                    "credit_expire_s": row.get("credit_expire_s").cloned().unwrap_or(Value::Null),
+                    "balance_supported": row.get("balance_supported").cloned().unwrap_or(json!(false)),
+                }));
         }
     }
     // 顶层附「每日自动签到」开关与后台任务台账：账号页要能就地开关，
@@ -1709,6 +1805,8 @@ async fn accounts(State(st): State<AppState>) -> Json<Value> {
     }
     snap["daily_checkin"] = json!(st.flags.daily_checkin());
     snap["daily_growth"] = json!(st.flags.daily_growth());
+    // ★ 2026-10-28：平台 → 账号明细（接入源卡片就地展示「登录的具体账号」）
+    snap["acct_detail"] = json!(acct_detail);
     snap["growth_task"] = st
         .tasks
         .snapshot()
@@ -1778,7 +1876,9 @@ async fn accounts_action(State(st): State<AppState>, body: Bytes) -> Response {
                 })).into_response();
             };
             let http = aigw_relay::auth_login::auth_http();
-            match aigw_relay::wb::query_balance(&http, base, &secret).await {
+            // 账号的 domain 是登录时上游给的（比 spec 更准），拿它发 X-Domain
+            let dom = st.accounts.domain_of(&platform, &secret);
+            match aigw_relay::wb::query_balance(&http, base, &secret, &dom).await {
                 Ok(mut d) => {
                     // ★ 2026-10-26（P1）：顺手更新号池积分快照（「快过期优先」选号依据）。
                     //   到期时刻一起记 —— pick 的「48h 内到期优先」靠 expire_at。
@@ -1884,27 +1984,52 @@ async fn accounts_action(State(st): State<AppState>, body: Bytes) -> Response {
             let Some(spec) = st.all_specs().into_iter().find(|s| s.id == platform) else {
                 return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "message": format!("平台 {platform} 已不存在（providers 里删掉了？）")}))).into_response();
             };
-            let ok = st.client.verify_account(&spec, &secret).await;
-            st.pool.mark_health(&id, ok, "");
+            let outcome = st.client.verify_account(&spec, &secret).await;
+            // ★ 三态：只有「明确活/明确死」才写号池健康；Unknown（无 /models 端点、
+            //   上游抽风）**不动**历史结论——把它写成 false 就是拿「探不了」当「坏了」，
+            //   用户会被诱导去重登一个本来好好的账号（本轮修的就是这类假阴性）。
+            let ok = outcome.is_alive();
+            match &outcome {
+                aigw_relay::VerifyOutcome::Alive => st.pool.mark_health(&id, true, ""),
+                aigw_relay::VerifyOutcome::Dead(w) => st.pool.mark_health(&id, false, w),
+                aigw_relay::VerifyOutcome::Unknown(_) => {}
+            }
+            // ★ 验活顺便补拉用户信息：老账号（本功能上线前登的）记录里没有 profile，
+            //   而「检查」正是用户主动点的那一下——顺手把「登上的到底是谁」补上，不必重登。
+            let mut prof = serde_json::Value::Null;
+            if ok {
+                prof = attach_wb_profile(&st, &spec, &id, &secret).await;
+            }
             // ★ 验活是「发现凭据过期」最常用的主动路径：结论必须同时落到平台卡片上。
             //   旧实现只回一句提示，卡片（/api/platforms 的 last_error）什么都不变 ——
             //   用户点完「验活」看不到任何痕迹，切到接入源页还以为这平台一切正常。
-            if ok {
-                st.last_err.clear(&platform);
-            } else {
-                st.last_err.note(&platform, 0, VERIFY_FAIL_MSG);
-            }
-            let msg = if ok {
-                "验活通过 ✓ 凭据可用"
-            } else {
-                VERIFY_FAIL_MSG
+            // ★ 三态（见 verify_after_save 同款说明）：Unknown 不写 last_err、
+            //   不说「未通过」——它只是没探成。
+            let msg: String = match &outcome {
+                aigw_relay::VerifyOutcome::Alive => {
+                    st.last_err.clear(&platform);
+                    "验活通过 ✓ 凭据可用".to_string()
+                }
+                aigw_relay::VerifyOutcome::Dead(w) => {
+                    let hint = verify_failure_hint(&spec);
+                    st.last_err.note(&platform, 0, &format!("验活未通过：{w}"));
+                    format!("验活未通过：{w}。{hint}")
+                }
+                aigw_relay::VerifyOutcome::Unknown(w) => format!(
+                    "无法自动验活（{w}）——这不代表凭据失效，用一次真实对话即可确认"
+                ),
             };
             Json(json!({
                 "ok": true,
-                "verified": ok,
+                "verified": match &outcome {
+                    aigw_relay::VerifyOutcome::Alive => serde_json::Value::Bool(true),
+                    aigw_relay::VerifyOutcome::Dead(_) => serde_json::Value::Bool(false),
+                    aigw_relay::VerifyOutcome::Unknown(_) => serde_json::Value::Null,
+                },
                 "message": msg,
                 "platform": platform,
                 "last_error": st.last_err.json(&platform),
+                "profile": prof,
             }))
             .into_response()
         }
@@ -2139,12 +2264,20 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
     }
 }
 
+/// 签到 / 积分刷新覆盖的 wb 族平台（**单一来源**）。
+///
+/// ★ 为什么不在这两处各写一个字面量数组：实测漏过一次 —— 倍率刷新那处写了三站，
+///   签到与积分刷新两处只写了国内两站，**国际版账号因此永远不会自动刷积分**，
+///   而且不会报错（循环里直接 continue），完全静默。抽成常量后由测试盯住它与
+///   `wb_checkin_base` 的一致性。
+pub(crate) const WB_CREDIT_PLATFORMS: &[&str] = &["wb-gateway", "codebuddy", "wb-gateway-intl"];
 pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
     let http = aigw_relay::auth_login::auth_http();
     let mut results: Vec<Value> = Vec::new();
-    for platform in ["wb-gateway", "codebuddy"] {
+    for &platform in WB_CREDIT_PLATFORMS {
         let Some(base) = aigw_relay::wb::wb_checkin_base(platform) else { continue };
         for (acc_id, secret) in st.accounts.secrets_for(platform) {
+            let dom = st.accounts.domain_of(platform, &secret);
             let r = if claim {
                 aigw_relay::wb::claim_daily_checkin(&http, base, &secret).await
             } else {
@@ -2153,7 +2286,7 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
             // ★ 2026-10-26（P1）：签到回包里的 credit 是「本次领到多少」，
             //   顺手查一次余额写进号池的积分快照，「快过期优先」选号才有依据。
             if claim && r.is_ok() {
-                if let Ok(b) = aigw_relay::wb::query_balance(&http, base, &secret).await {
+                if let Ok(b) = aigw_relay::wb::query_balance(&http, base, &secret, &dom).await {
                     let credit = b
                         .get("credit")
                         .and_then(|x| x.as_f64())
@@ -2201,7 +2334,7 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
 ///   于是「快到期优先」的选号加权失去数据源、账号页的积分总览条也会消失。
 ///   6 小时一轮保证**界面上看到的快照最多 6 小时旧**，远在 TTL 之内。
 ///
-/// 平台范围只取 `wb_checkin_base` 认得的站（intl 的计费端点未实测过，
+/// 平台范围只取 `wb_checkin_base` 认得的站（2026-10-28 起含 intl：X-Domain 已带上、端点已探明；旧注释：intl 的计费端点未实测过，
 /// 不猜端点——猜错只是白跑请求，但不猜错更诚实）。
 /// 余额查询的错误是否足以判定**凭据失效**（清快照的门槛要硬）。
 ///
@@ -2216,12 +2349,13 @@ pub async fn refresh_credits_all(st: &AppState) -> String {
     let mut fail_n = 0usize;
     let mut earliest: Option<i64> = None;
     let mut auth_dead = 0usize;
-    for platform in ["wb-gateway", "codebuddy"] {
+    for &platform in WB_CREDIT_PLATFORMS {
         let Some(base) = aigw_relay::wb::wb_checkin_base(platform) else {
             continue;
         };
         for (acc_id, secret) in st.accounts.secrets_for(platform) {
-            match aigw_relay::wb::query_balance(&http, base, &secret).await {
+            let dom = st.accounts.domain_of(platform, &secret);
+            match aigw_relay::wb::query_balance(&http, base, &secret, &dom).await {
                 Ok(d) => {
                     let credit = d
                         .get("credit")
@@ -2251,23 +2385,37 @@ pub async fn refresh_credits_all(st: &AppState) -> String {
     //   标签如实显示「离线」），成功则覆盖并落盘。上游对未登录回 401/302，
     //   所以没配真账号时这条永远走失败路径，无副作用。
     let mut rate_note = String::new();
-    'rates: for platform in ["wb-gateway", "codebuddy", "wb-gateway-intl"] {
+    'rates: for &platform in WB_CREDIT_PLATFORMS {
         let Some(secret) = st.accounts.secrets_for(platform).into_iter().next().map(|(_, s)| s) else {
             continue;
         };
         match aigw_relay::wb::fetch_model_rates(&http, platform, &secret).await {
             Ok(map) => {
                 let n = map.len();
+                // 静态表里没有的（APK 之后新上线的模型）只有在线刷新才拿得到 ——
+                // 告诉用户「补了多少条新模型」，否则他无法判断 hy4-preview 这类
+                // 新模型的倍率到底有没有拿到。
+                let fresh = map
+                    .keys()
+                    .filter(|k| model_rates::offline_rate_for(k).is_none())
+                    .count();
                 model_rates::set_online(map);
                 if let Some(dir) = st.data_dir.as_ref().as_ref() {
                     model_rates::save_cache(dir);
                 }
-                rate_note = format!("；倍率已在线刷新（{n} 条）");
+                rate_note = if fresh > 0 {
+                    format!("；倍率已在线刷新（{n} 条，含 {fresh} 条静态表没有的新模型）")
+                } else {
+                    format!("；倍率已在线刷新（{n} 条）")
+                };
                 break 'rates;
             }
             Err(e) => {
+                // ★ 不要因为**第一个**账号失败就放弃：多平台部署时，第一个号的凭据
+                //   可能刚好过期（401），而第二个平台上的号是好的。旧实现直接 break，
+                //   于是「明明有可用账号却一直显示回退离线表」，且原因写成一条笼统的失败。
                 rate_note = format!("；倍率在线刷新失败（回退离线表）：{e}");
-                break 'rates;
+                continue 'rates;
             }
         }
     }
@@ -2513,6 +2661,30 @@ fn verify_failure_hint(spec: &ProviderSpec) -> &'static str {
     }
 }
 
+/// wb 族登录后拉一次用户信息（用户名/邮箱/套餐），best-effort。
+///
+/// ★ 为什么同步拉：用户刚走完授权，最想看到的是「登上的到底是谁」。异步拉
+///   要等下一次面板刷新才出现，第一眼还是只有一串 id。代价是保存慢最多 8s
+///   （fetch_profile 自带的超时），失败静默——信息展示绝不能挡住登录流程。
+async fn attach_wb_profile(
+    st: &AppState,
+    spec: &aigw_registry::ProviderSpec,
+    acc_id: &str,
+    secret: &str,
+) -> serde_json::Value {
+    if spec.signer != "wb" || acc_id.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let base = spec.base_url.trim_end_matches('/').to_string();
+    let p = aigw_relay::wb::fetch_profile(&aigw_relay::auth_login::auth_http(), &base, secret).await;
+    let empty = p.as_object().map(|o| o.is_empty()).unwrap_or(true);
+    if empty {
+        return serde_json::Value::Null;
+    }
+    st.accounts.set_profile(acc_id, p.clone());
+    p
+}
+
 async fn verify_after_save(
     st: &AppState,
     spec: &ProviderSpec,
@@ -2520,23 +2692,43 @@ async fn verify_after_save(
     secret: &str,
     mut saved: Value,
 ) -> Value {
-    let ok = st.client.verify_account(spec, secret).await;
+    let outcome = st.client.verify_account(spec, secret).await;
     // 记进号池健康快照：面板账号表立刻能看出这个号是否可用。
+    // Unknown 不写（见 accounts verify 处的三态说明）。
     if let Some(acc_id) = st.accounts.id_of(platform, secret) {
-        st.pool.mark_health(&acc_id, ok, "");
+        match &outcome {
+            aigw_relay::VerifyOutcome::Alive => st.pool.mark_health(&acc_id, true, ""),
+            aigw_relay::VerifyOutcome::Dead(w) => st.pool.mark_health(&acc_id, false, w),
+            aigw_relay::VerifyOutcome::Unknown(_) => {}
+        }
     }
-    // 失败原因按平台类型分开说：抓错方向的提示比「失败了」更难用。
-    let why = verify_failure_hint(spec);
-    // ★ 与 /api/accounts 的 verify 保持一致：验活结论要落到平台卡片上。
-    //   保存凭据这个动作本身就是用户的「修好它」尝试，成功必须清掉旧原因，
-    //   失败要把原因写上去 —— 否则用户回到接入源页看到的还是上一次的旧原因。
-    saved["verified"] = json!(ok);
-    if ok {
-        st.last_err.clear(platform);
-        saved["message"] = json!("凭据已保存，验活通过 ✓");
-    } else {
-        st.last_err.note(platform, 0, &format!("验活未通过：{why}"));
-        saved["message"] = json!(format!("凭据已保存，但验活未通过：{why}"));
+    // ★ 三态文案（本轮语义修正）：
+    //   · Alive / Dead 用**上游的真实原因**（outcome 里带着），不再用平台通用 hint ——
+    //     hint 是「按平台猜的」，真相在响应里；
+    //   · Unknown 明确说「无法自动验活」并给出行动（用一次真实对话确认），
+    //     **绝不写成「验活未通过」**（那会诱导用户重登一个本来好好的账号）。
+    saved["verified"] = match &outcome {
+        aigw_relay::VerifyOutcome::Alive => json!(true),
+        aigw_relay::VerifyOutcome::Dead(_) => json!(false),
+        aigw_relay::VerifyOutcome::Unknown(_) => serde_json::Value::Null,
+    };
+    match &outcome {
+        aigw_relay::VerifyOutcome::Alive => {
+            st.last_err.clear(platform);
+            saved["message"] = json!("凭据已保存，验活通过 ✓ 凭据可用");
+        }
+        aigw_relay::VerifyOutcome::Dead(w) => {
+            // 真实原因（上游说的）+ 行动指引（按平台类型给的下一步）——两者都要：
+            // 只给原因用户不知道该干什么，只给指引又可能与真实原因南辕北辙。
+            let hint = verify_failure_hint(spec);
+            st.last_err.note(platform, 0, &format!("验活未通过：{w}"));
+            saved["message"] = json!(format!("凭据已保存，但验活未通过：{w}。{hint}"));
+        }
+        aigw_relay::VerifyOutcome::Unknown(w) => {
+            // 不写 last_err：这不是「凭据坏了」，写上去会在接入源卡片上挂一条假故障。
+            // w 里已经带行动建议（如「用一次真实对话确认」），别再拼一遍。
+            saved["message"] = json!(format!("凭据已保存；无法自动验活 —— {w}"));
+        }
     }
     saved["last_error"] = st.last_err.json(platform);
     saved
@@ -2572,12 +2764,30 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
                 Ok(s) => s,
                 Err(r) => return r,
             };
-            let out = st.login.poll(&st.client, id, &st.accounts).await;
+            let mut out = st.login.poll(&st.client, id, &st.accounts).await;
             // 又登录了一次（覆盖了同 platform+name 的旧行）→ 清掉旧凭据留下的
             // 号池治理状态与会话粘性，否则新凭据照样被上一次的 401 拉黑挡着。
             if out.get("credential_replaced").and_then(|x| x.as_bool()).unwrap_or(false) {
                 if let Some(acc) = out.get("account_id").and_then(|x| x.as_str()) {
                     on_credential_replaced(&st, acc);
+                }
+            }
+            // 设备授权刚成功（拿到凭据入库）→ 立刻拉「登上的到底是谁」，与粘贴路径同口径。
+            // 只在这一刻拉：poll 可能被前端每 2 秒调一次，未完成时不动上游。
+            if out.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+                if let (Some(acc_id), Some(plat)) = (
+                    out.get("account_id").and_then(|x| x.as_str()),
+                    out.get("platform").and_then(|x| x.as_str()),
+                ) {
+                    let specs = st.all_specs();
+                    if let Some(spec) = specs.iter().find(|s| s.id == plat) {
+                        if let Some(sec) = st.accounts.secret_of(acc_id) {
+                            let prof = attach_wb_profile(&st, spec, acc_id, &sec.1).await;
+                            if !prof.is_null() {
+                                out["profile"] = prof;
+                            }
+                        }
+                    }
                 }
             }
             Json(out).into_response()
@@ -2614,7 +2824,17 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
                 invalidate_models_cache(&st);
                 let specs = st.all_specs();
                 if let Some(spec) = specs.iter().find(|s| s.id == platform) {
-                    let obj = verify_after_save(&st, spec, platform, secret, saved).await;
+                    // wb 族：先把「登上的到底是谁」拉回来（失败静默，不挡登录）
+                    let acc_id = saved
+                        .get("account_id")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let profile = attach_wb_profile(&st, spec, &acc_id, secret).await;
+                    let mut obj = verify_after_save(&st, spec, platform, secret, saved).await;
+                    if !profile.is_null() {
+                        obj["profile"] = profile;
+                    }
                     return Json(obj).into_response();
                 }
             }
@@ -2669,9 +2889,14 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
             let mut obj = saved;
             let specs = st.all_specs();
             if let Some(spec) = specs.iter().find(|s| s.id == platform) {
-                let ok = st.client.verify_account(spec, &session).await;
+                let outcome = st.client.verify_account(spec, &session).await;
+                let ok = outcome.is_alive();
                 if let Some(acc_id) = st.accounts.id_of(platform, &session) {
-                    st.pool.mark_health(&acc_id, ok, "");
+                    match &outcome {
+                        aigw_relay::VerifyOutcome::Alive => st.pool.mark_health(&acc_id, true, ""),
+                        aigw_relay::VerifyOutcome::Dead(w) => st.pool.mark_health(&acc_id, false, w),
+                        aigw_relay::VerifyOutcome::Unknown(_) => {}
+                    }
                 }
                 obj["verified"] = json!(ok);
                 if ok {
@@ -2711,9 +2936,14 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
             let mut obj = saved;
             let specs = st.all_specs();
             if let Some(spec) = specs.iter().find(|s| s.id == platform) {
-                let ok = st.client.verify_account(spec, &session).await;
+                let outcome = st.client.verify_account(spec, &session).await;
+                let ok = outcome.is_alive();
                 if let Some(acc_id) = st.accounts.id_of(platform, &session) {
-                    st.pool.mark_health(&acc_id, ok, "");
+                    match &outcome {
+                        aigw_relay::VerifyOutcome::Alive => st.pool.mark_health(&acc_id, true, ""),
+                        aigw_relay::VerifyOutcome::Dead(w) => st.pool.mark_health(&acc_id, false, w),
+                        aigw_relay::VerifyOutcome::Unknown(_) => {}
+                    }
                 }
                 obj["verified"] = json!(ok);
                 if ok {
@@ -5010,16 +5240,41 @@ async fn search_messages(
     };
     let accounts = st.accounts.secrets_for(platform);
     if accounts.is_empty() {
+        // ★ 不能回 503 overloaded_error：那个类型在官方 SDK 里是**可重试**的，
+        //   客户端会自动重试 —— 而「网关里没有这个平台的账号」重试一万次也不会变好，
+        //   只是把用户的请求变成一串噪音重试。这属于**配置缺失**（客户端该做的
+        //   是别用这个功能或去网关登录），用 400 + invalid_request_error 表达，
+        //   并在文案里说清「重试无效」。
         return anthropic_error(
-            503,
-            &format!("{platform} 还没有账号，先到「接入源」登录后再用搜索"),
+            400,
+            &format!(
+                "{platform} 还没有账号：请在面板「接入源」登录后使用搜索（这是网关侧配置缺失，重试不会变好）"
+            ),
         );
     }
     // 选号：走号池（快过期积分优先 + 冷却/在途治理都在里面）
     let ids: Vec<String> = accounts.iter().map(|(id, _)| id.clone()).collect();
-    let pick = st.pool.pick(platform, &ids, "search").or_else(|| ids.first().cloned());
+    // ★ 兜底也必须过 available()：pick 返回 None 可能只是**在飞打满**（瞬时），
+    //   此时直接用第一个号还能救——但旧写法连「WAF 拉黑 / 冷却 / 限额触顶」的号
+    //   也照用，等于搜索路径把治理全绕过了（尤其限制器：触顶号每请求照烧）。
+    let pick = st
+        .pool
+        .pick(platform, &ids, "search")
+        .or_else(|| ids.iter().find(|a| st.pool.available(a, "search")).cloned());
     let Some(acc) = pick else {
-        return anthropic_error(503, "所有账号当前都在冷却/在飞打满，稍后重试");
+        // 全挡：文案与转发路径同款——触顶该说「等窗口翻页」，别误导去重新登录。
+        let msg = match st.pool.token_hit_info(&ids) {
+            Some((n, reset_s)) => {
+                let left = if reset_s >= 3600 {
+                    format!("约 {} 小时", (reset_s + 1800) / 3600)
+                } else {
+                    format!("约 {} 分钟", (reset_s / 60).max(1))
+                };
+                format!("搜索账号全部不可用：{n} 个号 Token 限额触顶（{left}后自动恢复，无需重新登录），其余在冷却/隔离")
+            }
+            None => "所有账号当前都在冷却/在飞打满，稍后重试".to_string(),
+        };
+        return anthropic_error(503, &msg);
     };
     let secret = accounts
         .iter()
@@ -5440,6 +5695,23 @@ async fn web_file(uri: Uri) -> Response {
 
 #[cfg(test)]
 mod tests {
+
+    /// ★ 契约：`WB_CREDIT_PLATFORMS` 里的每个平台都必须被 `wb_checkin_base` 认得。
+    ///   漏一个的后果是「那个站永远不会自动刷积分/签到」，而且完全静默（循环里 continue）。
+    #[test]
+    fn wb_credit_platforms_are_all_recognized() {
+        for p in WB_CREDIT_PLATFORMS {
+            assert!(
+                aigw_relay::wb::wb_checkin_base(p).is_some(),
+                "{p} 在 WB_CREDIT_PLATFORMS 里但 wb_checkin_base 不认 —— 会被静默跳过"
+            );
+        }
+        // 反向：wb_checkin_base 认得的站都应该在这里（否则那个站没人刷）
+        for p in ["wb-gateway", "codebuddy", "wb-gateway-intl"] {
+            assert!(WB_CREDIT_PLATFORMS.contains(&p), "{p} 认得但不在清单里，没人给它刷积分");
+        }
+    }
+
     use std::sync::Arc;
     use super::*;
     /// 清快照的判据要硬：只有 401/403 算凭据失效；
@@ -8721,6 +8993,7 @@ biz_err = ["登录", "失效"]
             domain: String::new(),
             token_limit: None,
             token_period_s: None,
+            profile: serde_json::Value::Null,
         }]);
         let app = build_app(state_with_accounts(vec![glm_spec_for(&format!("http://{addr}"))], accounts));
         let res = app
@@ -9136,6 +9409,43 @@ stream_dialect = "sse_delta"
     ///
     /// 不能用 `two_platforms()`——那两条是 `auth = "anon"` 的免密车道，
     /// 转发时用 `{平台}:anon` 现造账号，账号行查池要按车道键走另一条路径。
+    /// 同 cred_platform，但 base 指向一个可控的 mock（验活探测打到这里）。
+    fn cred_platform_at(id: &str, base: &str) -> Vec<ProviderSpec> {
+        vec![spec_toml(&format!(
+            r#"
+id = "{id}"
+name = "{id}"
+enabled = true
+auth = "cookie"
+base_url = "{base}"
+format = "openai"
+models = ["m1"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#
+        ))]
+    }
+
+    /// 两个平台都指向同一个 mock（验活探测打到这里）。
+    fn two_platforms_at(base: &str) -> Vec<ProviderSpec> {
+        let mk = |id: &str, m: &str| {
+            spec_toml(&format!(
+                r#"
+id = "{id}"
+name = "{id}"
+enabled = true
+auth = "anon"
+base_url = "{base}"
+format = "openai"
+models = ["{m}"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#
+            ))
+        };
+        vec![mk("plat-a", "model-a"), mk("plat-b", "model-b")]
+    }
+
     fn cred_platform(id: &str) -> Vec<ProviderSpec> {
         vec![spec_toml(&format!(
             r#"
@@ -9448,7 +9758,7 @@ models_policy = "live"
 stream_dialect = "sse_delta"
 "#,
         );
-        let st = state(vec![spec]);
+        let st = state(vec![spec, spec_static("http://127.0.0.1:9/v1", "stat", &["other"])]);
         {
             let mut g = st.models_cache_per.lock().unwrap();
             g.insert(
@@ -9588,6 +9898,7 @@ stream_dialect = "sse_delta"
             enabled: true,
             token_limit: None,
             token_period_s: None,
+            profile: serde_json::Value::Null,
             status: String::new(),
             unreadable: false,
             domain: String::new(),
@@ -10787,6 +11098,7 @@ stream_dialect = "sse_delta"
             enabled: true,
             token_limit: None,
             token_period_s: None,
+            profile: serde_json::Value::Null,
             status: String::new(),
             unreadable: false,
             domain: String::new(),
@@ -10825,6 +11137,7 @@ stream_dialect = "sse_delta"
             enabled: true,
             token_limit: None,
             token_period_s: None,
+            profile: serde_json::Value::Null,
             status: String::new(),
             unreadable: false,
             domain: String::new(),
@@ -11778,11 +12091,12 @@ stream_dialect = "sse_delta"
 
     #[tokio::test]
     async fn accounts_verify_marks_health_and_reports_unreachable() {
-        // two_platforms() 的 base_url 是 127.0.0.1:9（必连不上），验活应回 ok:true/verified:false
-        // 并把账号标成鉴权失败——绝不能因为验活失败就 500。
+        // ★ 语义修正后：**上游明确拒绝（401）**才判「鉴权失败」并落卡片；
+        //   「连不上」属于「无法判定」（见 accounts_verify_unreachable_is_unknown_not_dead）。
+        let base = spawn_status_models_mock(StatusCode::UNAUTHORIZED).await;
         let accs = AccountStore::empty();
         let (acc, _) = accs.add_account("plat-a", "nm", "cookie", "sec");
-        let st = state_with_accounts(two_platforms(), accs);
+        let st = state_with_accounts(two_platforms_at(&base), accs);
         let app = build_app(st);
         let body = json!({"action": "verify", "id": acc.id}).to_string();
         let res = app
@@ -11806,7 +12120,8 @@ stream_dialect = "sse_delta"
         // 切回接入源页还以为这平台一切正常，继续拿着过期凭据打请求。
         let accs = AccountStore::empty();
         let (acc, _) = accs.add_account("plat-c", "nm", "cookie", "sec");
-        let st = state_with_accounts(cred_platform("plat-c"), accs);
+        let base = spawn_status_models_mock(StatusCode::UNAUTHORIZED).await;
+        let st = state_with_accounts(cred_platform_at("plat-c", &base), accs);
         // 先塞一条旧原因：新的验活结论必须覆盖它，而不是被旧原因盖住。
         st.last_err.note("plat-c", 500, "上一次的老原因");
         let app = build_app(st.clone());
@@ -11898,7 +12213,8 @@ stream_dialect = "sse_delta"
     async fn auth_save_verify_failure_is_recorded_on_the_platform() {
         // 「保存凭据后再验活」是另一条主路径（粘贴 Cookie 的那个抽屉）。
         // 它失败时同样要写进平台卡片，否则用户会以为「保存成功 = 能用了」。
-        let st = state(cred_platform("plat-s"));
+        let base = spawn_status_models_mock(StatusCode::UNAUTHORIZED).await;
+        let st = state(cred_platform_at("plat-s", &base));
         let app = build_app(st.clone());
         let body = json!({"action": "save", "platform": "plat-s", "secret": "cookie=abc"}).to_string();
         let res = app
@@ -11925,6 +12241,41 @@ stream_dialect = "sse_delta"
                 .contains("验活未通过"),
             "保存凭据时的验活失败也要落到卡片上：{b}"
         );
+    }
+
+
+    /// ★ 本轮语义核心：**「探不了」不等于「凭据坏了」**。
+    /// 连不上（127.0.0.1:9）→ verified:null + 「无法自动验活」，且不写平台卡片。
+    #[tokio::test]
+    async fn accounts_verify_unreachable_reports_unknown() {
+        let accs = AccountStore::empty();
+        let (acc, _) = accs.add_account("plat-u", "nm", "cookie", "sec");
+        let st = state_with_accounts(cred_platform("plat-u"), accs);
+        let app = build_app(st.clone());
+        let body = json!({"action": "verify", "id": acc.id}).to_string();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::post("/api/accounts").header("host", "127.0.0.1:8800")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let out = body_string(res).await;
+        assert!(out.contains("\"verified\":null"), "连不上不应判死：{out}");
+        assert!(out.contains("无法自动验活"), "要说「无法验活」而不是「未通过」：{out}");
+        let b = body_string(app.clone().oneshot(get_with("/api/platforms", &[])).await.unwrap()).await;
+        let v: Value = serde_json::from_str(&b).unwrap();
+        let row = v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "plat-u")
+            .expect("plat-u 行");
+        assert!(row["last_error"].is_null(), "「无法验活」不该写进平台卡片：{b}");
     }
 
     #[tokio::test]
@@ -12898,5 +13249,50 @@ stream_dialect = "sse_delta"
         let st = state_with_accounts(specs, accs);
         let got = st.spec_for_model("dup-model").expect("应能路由");
         assert_eq!(got.id, "zzz-real", "应跳过占位地址平台");
+    }
+
+    /// ★ 路由补拉判据（第 96 轮「模型获取」缺口）：缓存**过期**时 chat 直连也要补拉，
+    /// 与 GET /v1/models 同一 TTL 口径。旧实现只看 contains_key——缓存一旦建立，
+    /// 上游新上的模型在 chat 路径永远 404（除非有人先 GET 过 models 或重启）。
+    #[tokio::test]
+    async fn resolve_spec_refetches_expired_cache_but_not_fresh() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let body = "{\"object\":\"list\",\"data\":[{\"id\":\"known-a\",\"object\":\"model\"}]}".to_string();
+        let app_mock = axum::Router::new().route(
+            "/models",
+            axum::routing::get(move || {
+                let hits = hits2.clone();
+                async move {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    ([(axum::http::header::CONTENT_TYPE, "application/json")], body.clone())
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app_mock).await });
+        let raw = "id = \"demo\"\nname = \"Demo\"\nenabled = true\nauth = \"anon\"\nbase_url = \"__BASE__\"\nformat = \"openai\"\nmodels_policy = \"live\"\nstream_dialect = \"sse_delta\"\n".replace("__BASE__", &format!("http://{addr}"));
+        let spec = spec_toml(&raw);
+        let st = state(vec![spec, spec_static("http://127.0.0.1:9/v1", "stat", &["other"])]);
+        // 第二个静态平台：让 spec_for_model 尾部的「单平台兜底」失效（它是故意的
+        // 窄口子），本测试测的是**多平台下的补拉判据**。
+        // ① 缓存缺失：resolve 触发补拉（hits=1）。此 mock 清单只有 known-a，
+        //    裸名会不会落到 live 平台属路由策略；本测试只锁**是否补拉**，不断言路由结果。
+        let _ = st.resolve_spec("never-there").await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // ② 缓存新鲜：重复 resolve **不**再补拉（不 hammer 上游）
+        let _ = st.resolve_spec("never-there").await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 1, "新鲜缓存不应补拉");
+        // ③ 缓存过期：同样的 resolve 现在**必须**补拉（上游新模型的接入窗口）
+        {
+            let mut g = st.models_cache_per.lock().unwrap_or_else(|e| e.into_inner());
+            let old_at = Instant::now()
+                .checked_sub(MODELS_TTL_OK + std::time::Duration::from_secs(5))
+                .unwrap();
+            g.get_mut("demo").unwrap().0 = old_at;
+        }
+        let _ = st.resolve_spec("never-there").await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 2, "过期缓存必须补拉");
     }
 }

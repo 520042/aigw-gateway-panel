@@ -5,7 +5,7 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261028a';
+const BUILD = 'v20261028j';
 
 // 公益站聚合源状态（/api/free 的 sources + last_refresh）：只在需要时拉一次，
 // 手动刷新后置空，下次渲染重取。
@@ -138,9 +138,11 @@ const nfmt = (n) => Number(n || 0).toLocaleString('en-US');
 // ══════════════════════════════════════════════════════════════
 const VIEWS = {
   overview: { t: '总览', s: '免费 AI 额度 → 本地 OpenAI 兼容端点', f: viewOverview },
-  sources:  { t: '接入源', s: '官方 API · 订阅反代 · 客户端 · 公益站 · 自定义', f: viewSources },
-  accounts: { t: '账号', s: '凭据掩码展示，secret 仅后台使用', f: viewAccounts },
-  usage:    { t: '用量', s: 'SQLite(WAL) 用量台账', f: viewUsage },
+  sources:  { t: '接入源', s: '官方 API · 订阅反代 · 客户端接入 · 公益站 · 自定义', f: viewSources },
+  // ★ 2026-10-28（用户要求）：账号栏 → 模型与用量。一页同时给出账号运维
+  //   （凭据/健康/积分/限额/签到/成长任务）与该平台发布的模型清单与用量概览。
+  accounts: { t: '模型与用量', s: '账号运维 · 积分与限额 · 模型清单 · 用量概览（secret 仅后台使用）', f: viewAccounts },
+  usage:    { t: '用量明细', s: 'SQLite(WAL) 台账 · 延迟分位 · 平台/模型归因', f: viewUsage },
   logs:     { t: '日志', s: '落盘日志尾部：失败根因的最后一层', f: viewLogs },
   // ★ 2026-10-26（P3）：运行时配置热更新（并发/超时/重试/限流），改完立即生效。
   runtime:  { t: '运行配置', s: '并发 · 超时 · 重试 · 限流（热更新，无需重启）', f: viewRuntime },
@@ -184,6 +186,7 @@ async function showProxySettings() {
       <input type="hidden" id="px-mode" value="${cur.mode}">
       <label>代理地址</label>
       <input class="q mono" id="px-url" placeholder="http://127.0.0.1:7890" value="${esc(cur.url || '')}" ${cur.mode === 'direct' ? 'disabled' : ''}>
+      <div style="margin:6px 0 2px"><button class="btn sm" onclick="testProxy()">⚡ 测试连通</button> <span id="pxTest" class="faint"></span></div>
       <div class="faint" style="font-size:12px">保存后立即生效（登录、上游转发、模型同步全部从代理走），无需重启</div>
       <div class="faint" style="font-size:12px">本机与局域网地址（127.0.0.1 / 192.168.x / localhost / *.local 等）在任何模式下都直连：代理进程连不到你的内网，硬走代理只会得到"连不上"的假故障</div>
       <div class="modal-foot">
@@ -191,6 +194,28 @@ async function showProxySettings() {
       </div>`);
   document.body.insertAdjacentHTML('beforeend', mk);
 }
+// 只测不存：把当前输入框里的模式/地址送去后端探测。
+// 高频真实事故——代理进程退了而配置还是 global，全源瞬间变"连不上"；
+// 这一键直接回答「现在这个代理通不通」，不用拿全量请求试错。
+async function testProxy() {
+  const mode = document.getElementById("px-mode").value || "direct";
+  const url = document.getElementById("px-url").value.trim();
+  const out = document.getElementById("pxTest");
+  out.textContent = "探测中（3 秒超时）…";
+  let r;
+  try {
+    r = await post("/api/proxy", { action: "test", mode, url });
+  } catch (e) {
+    out.textContent = "探测请求失败：" + String(e && e.message || e);
+    return;
+  }
+  if (r && r.reachable) {
+    out.innerHTML = "<span style=\"color:#4cc38a\">✓ " + esc(r.message || "可达") + "</span>";
+  } else {
+    out.innerHTML = "<span style=\"color:#f06a6a\">✗ " + esc((r && r.message) || "不可达") + "</span>";
+  }
+}
+
 async function saveProxy() {
   const mode = $('#px-mode').value || 'direct';
   const url = $('#px-url').value.trim();
@@ -379,6 +404,9 @@ async function copyText(t) { try { await navigator.clipboard.writeText(t); } cat
 // ─────────────────────────────────────────────
 let SRC_Q = '';
 let SRC_HELP = false;
+/// ★ 2026-10-28：接入源页用的账号快照（/api/accounts 原样，含 acct_detail）。
+/// 只在 viewSources 里赋值；未加载时为 null，卡片退回只显示账号数。
+let ACCT_SNAPSHOT = null;
 let SRC_OPEN = {};   // 分组收起状态：group → bool（默认收起 false）
 let SRC_BADONLY = false; // 只看「近 24h 有失败」的接入源
 // 只看「支持扫码登录」的接入源（按平台声明的 login_methods 含 qr 判定）
@@ -404,13 +432,17 @@ const GROUP_META = {
   custom:   { t: '自定义 API', desc: '自填 名称/协议/URL/Key，自动同步模型（CherryStudio 式）', open: true },
   official: { t: '开放平台 API', desc: '官方平台 API Key 直连', open: false },
   sub:      { t: '订阅反代', desc: '订阅账号 OAuth 授权 → 网关反代', open: false },
-  client:   { t: '客户端反代', desc: '网页版 / 客户端凭据（Cookie / Token）', open: false },
+  client:   { t: '客户端接入', desc: '网页版 / 客户端凭据（Cookie / Token）', open: false },
   free:     { t: '公益站 · 免费车道', desc: '公益中转聚合 + 免 Key 免费车道（Kilo / Pollinations / OpenCode Zen）', open: false },
 };
 
 async function viewSources(el) {
   const pl = await api('/api/platforms');
   const fm = await freeMeta();
+  // ★ 2026-10-28（用户要求）：接入源卡片要显示「登录的具体账号」（名称/状态/积分/到期）。
+  //   账号明细来自 /api/accounts 的 acct_detail；失败不阻断本页（卡片退回只显示账号数）。
+  //   注意：本工程没有 React 式的全局 S 对象，状态放模块级变量（与 __DISABLED_MODELS 同风格）。
+  await api('/api/accounts').then((a) => { ACCT_SNAPSHOT = a; }).catch(() => {});
   window.__DISABLED_MODELS = pl.disabled_models || [];
   // 「近 24h 有问题」= 台账里这段窗口内有失败记录。样本数为 0 的平台不进来
   //（没跑过 ≠ 坏了，把它算进来只会让人以为一堆平台挂了）。
@@ -453,6 +485,20 @@ async function viewSources(el) {
     <button class="btn sm ${SRC_QRSONLY ? 'pri' : 'gh'}" onclick="SRC_QRSONLY=!SRC_QRSONLY;srcRerender()"
       title="只看支持扫码登录的接入源（豆包 / 库库 / 小浣熊 / Loomy）">${SRC_QRSONLY ? '✔ ' : ''}仅看扫码${qrN ? '（' + qrN + '）' : ''}</button>
     <span class="faint" style="font-size:11.5px">显示 ${rows.length} 个</span>
+    <!-- ★ 2026-10-28（用户要求，参考图「⋯ 管理操作」）：接入源栏右侧一键管理入口。
+         把「账号运维」类批量动作收敛到一处：健康检查 / 签到 / 成长任务 / 猫猫旅行。
+         菜单项都是既有能力的复用（同一套 /api/checkin 与 /api/accounts 动作），
+         不新增后端路径 —— 用户不必先跳到账号页才知道有这些操作。 -->
+    <div class="menu-wrap" style="margin-left:auto">
+      <button class="btn sm" onclick="event.stopPropagation();srcMgrToggle()" title="批量管理：健康检查 / 签到 / 成长任务 / 猫猫旅行">⋯ 管理操作</button>
+      <div id="srcMgrMenu" class="menu-pop" style="display:none">
+        <div class="menu-sec">额度与批量管理</div>
+        <button class="menu-item" onclick="srcMgr('health')">♡ 一键健康检查（积分 / 模型 / 对话）</button>
+        <button class="menu-item" onclick="srcMgr('checkin')">◷ 每日签到（wb 加油站 + Lobster）</button>
+        <button class="menu-item" onclick="srcMgr('growth')">☑ 成长任务与领奖</button>
+        <button class="menu-item" onclick="srcMgr('travel')">✈ 猫猫旅行与领奖</button>
+      </div>
+    </div>
   </div>`;
 
   for (const g of groups) {
@@ -554,6 +600,71 @@ async function copyAffLink(btn) {
   setTimeout(() => { btn.textContent = t; }, 1200);
 }
 
+// 账号标签：有登录用户信息时直接显示「谁」，而不是干巴巴的「1 账号」。
+// 多账号时显示「N 账号」，用户在抽屉里能看到明细。
+function accountLabel(p) {
+  const ps = p.profiles || [];
+  if (ps.length === 1 && (ps[0].name || ps[0].email)) {
+    return ps[0].name || ps[0].email;
+  }
+  return p.accounts_n + " 账号";
+}
+
+// ★ 2026-10-28（用户要求）：接入源卡片就地显示「登录的具体账号」——
+// 参考图那样的 名称 / 状态 / 总积分 / 剩余 / 积分到期，不必跳到账号页。
+// 数据源是 /api/accounts 的 acct_detail（按平台聚合，凭证不下发）。
+function srcAcctBlock(p) {
+  const det = (ACCT_SNAPSHOT && ACCT_SNAPSHOT.acct_detail) || {};
+  const list = det[p.id] || [];
+  if (!list.length) return '';
+  // 账号名做掩码：保留前 6 位 + …，避免截图外泄完整手机号/UID
+  const maskName = (n) => {
+    const s = String(n || '');
+    if (s.length <= 8) return s;
+    return s.slice(0, 6) + '…' + s.slice(-4);
+  };
+  const fmtCredit = (c) => (typeof c === 'number' ? Math.round(c).toLocaleString() : '—');
+  const expireTxt = (sec) => {
+    if (typeof sec !== 'number' || sec <= 0) return '';
+    const left = (sec * 1000 - Date.now()) / 3600000;
+    if (left <= 0) return '<span class="pill err">已到期</span>';
+    if (left <= 48) return '<span class="pill warn">剩 ' + Math.max(1, Math.round(left)) + ' 小时</span>';
+    return '<span class="faint">' + Math.round(left / 24) + ' 天后</span>';
+  };
+  const rows = list.slice(0, 4).map((a) => {
+    const h = a.health || {};
+    const st = a.needs_relogin
+      ? '<span class="pill err">凭据失效</span>'
+      : !a.enabled
+        ? '<span class="pill mut">停用</span>'
+        : h.status === 'ok'
+          ? '<span class="pill ok">正常</span>'
+          : h.status
+            ? '<span class="pill warn">' + esc(String(h.label || h.status).slice(0, 8)) + '</span>'
+            : '<span class="faint">—</span>';
+    const credit = a.balance_supported ? fmtCredit(a.credit) : '<span class="faint">—</span>';
+    return '<div class="row n" style="gap:8px;font-size:11.5px;padding:3px 0;border-top:1px dashed var(--line2)">'
+      + '<span class="mono" style="min-width:96px" title="' + esc(a.name) + '">' + esc(maskName(a.name)) + '</span>'
+      + '<span style="min-width:52px">' + st + '</span>'
+      + '<span style="min-width:70px" title="剩余积分">积分 <b>' + credit + '</b></span>'
+      + '<span>' + expireTxt(a.credit_expire_s) + '</span>'
+      + '</div>';
+  }).join('');
+  const more = list.length > 4 ? '<div class="faint" style="font-size:11px;padding-top:2px">…另有 ' + (list.length - 4) + ' 个账号</div>' : '';
+  return '<div style="margin-top:6px">' + rows + more + '</div>';
+}
+
+// 登录用户明细行：用户名 / 邮箱 / 套餐。信息缺失时整行不渲染（不占位）。
+function profileLine(p) {
+  const ps = (p.profiles || []).filter(function (x) { return x && (x.name || x.email); });
+  if (!ps.length) return "";
+  var txt = ps.map(function (x) {
+    return esc(x.name || "") + (x.email ? (x.name ? " · " : "") + esc(x.email) : "");
+  }).join("　");
+  var plan = ps[0].plan ? " " + pill("mut", String(ps[0].plan)) : "";
+  return '<div class="faint" style="font-size:11.5px;margin:-2px 0 6px">登录用户：' + txt + plan + "</div>";
+}
+
 function srcCard(p) {
   // 徽章按「实际登录方式」显示（参考项目一手核对），不按 toml auth 字段一刀切
   const AUTH_LABEL = {
@@ -593,12 +704,14 @@ function srcCard(p) {
       ${p.custom ? pill('ok', '自定义') : p.id.startsWith('sub-') ? pill('mut', '订阅') : p.id.startsWith('free-') ? pill('mut', '公益') : pill('mut', authTxt)}
       ${p.region === 'cn' ? pill('mut', '国内') : p.region === 'intl' ? pill('mut', '国际') : ''}
       ${qrPill(p)}
-      ${disabled ? pill('mut', '已停用') : configured ? pill('ok', p.custom ? '已配置' : p.anon ? '免凭据' : `${p.accounts_n} 账号`) : pill('mut', '未接入')}
+      ${disabled ? pill('mut', '已停用') : configured ? pill('ok', p.custom ? '已配置' : p.anon ? '免凭据' : accountLabel(p)) : pill('mut', '未接入')}
       ${unusablePill(p, disabled, usable, configured)}
       ${p.chat_supported === false && usable ? pill('mut', '仅验活·不可对话') : ''}
       ${recentHealthPill(p)}
       ${modelCountPill(p)}
     </div>
+    ${profileLine(p)}
+    ${srcAcctBlock(p)}
     ${lastErrNote(p)}
     <div class="row" style="gap:6px">
       <button class="btn sm ${configured ? '' : 'pri'}" onclick="event.stopPropagation();SRC_EXPAND='${att(p.id)}';render()">
@@ -668,6 +781,60 @@ function modelCountPill(p) {
     + '）" onclick="event.stopPropagation()">' + esc((p.custom ? '已固定 ' : '') + n + ' 模型') + '</a>';
 }
 // 抽屉里的模型清单：逐模型启用开关（停用按裸模型名记账，模型@平台 一并生效）
+// 模型列表分页阈值：超过它只渲染首页 + 搜索框（大清单全量渲染会卡抽屉）。
+const MODEL_PAGE = 40;
+// 每个平台的列表状态（筛选词 / 是否展开全部）。放内存即可，刷新页面重置无害。
+window.__ML = window.__ML || {};
+function __modelState(id) {
+  window.__ML[id] = window.__ML[id] || { filter: "", all: false };
+  return window.__ML[id];
+}
+
+// 按筛选词渲染模型行（含倍率徽标与停用/启用按钮）。
+function modelRowsHtml(p, all, filter, showAll) {
+  var q = (filter || "").trim().toLowerCase();
+  var list = q ? all.filter(function (m) { return m.toLowerCase().indexOf(q) >= 0; }) : all;
+  var cap = showAll || list.length <= MODEL_PAGE ? list.length : MODEL_PAGE;
+  var out = list.slice(0, cap).map(function (m) {
+    var bare = m.indexOf("@") >= 0 ? m.slice(0, m.lastIndexOf("@")) : m;
+    var on = (window.__DISABLED_MODELS || []).indexOf(bare) < 0;
+    var rate = p.rates && p.rates[m] ? p.rates[m] : "";
+    return '<div class="mrow">' +
+      '<span class="mono" style="font-size:12px">' + esc(m) + '</span>' +
+      (rate ? '<span class="pill mut" title="积分倍率：这一条请求按 ×' + esc(rate) + ' 扣积分池额度">×' + esc(rate) + '</span>' : '') +
+      '<button class="btn sm" onclick="toggleModel(\'' + att(m) + '\', ' + (on ? "false" : "true") + ')">' + (on ? "停用" : "启用") + '</button>' +
+      '</div>';
+  }).join('');
+  if (list.length > cap) {
+    out += '<div class="faint" style="font-size:12px;padding:6px 0">还有 ' + (list.length - cap) + ' 个未显示' +
+      (q ? '（当前筛选）' : '') + 
+      ' — <a href="#" onclick="showAllModels(\'' + att(p.id) + '\', event)">显示全部 ' + list.length + ' 个</a></div>';
+  }
+  if (!list.length) out = '<div class="faint" style="font-size:12px">没有匹配「' + esc(q) + '」的模型</div>';
+  return out;
+}
+
+// 搜索框输入：只重渲染这个平台的列表（不整页重绘，输入不丢焦点）。
+function setModelFilter(id, v) {
+  __modelState(id).filter = v;
+  var p = (window.__PLATMAP || {})[id];
+  var box = document.getElementById("ml-" + id);
+  if (!p || !box) return;
+  var st = __modelState(id);
+  box.innerHTML = modelRowsHtml(p, p.models || [], st.filter, st.all);
+}
+
+function showAllModels(id, ev) {
+  if (ev) ev.preventDefault();
+  __modelState(id).all = true;
+  var p = (window.__PLATMAP || {})[id];
+  var box = document.getElementById("ml-" + id);
+  if (p && box) {
+    var st = __modelState(id);
+    box.innerHTML = modelRowsHtml(p, p.models || [], st.filter, st.all);
+  }
+}
+
 function srcModelsBlock(p) {
   const ms = p.models || [];
   if (!ms.length) {
@@ -676,30 +843,30 @@ function srcModelsBlock(p) {
       : '';
   }
   const onN = p.models_on == null ? ms.length : p.models_on;
-  const rows = ms.map((m) => {
-    // 后端下发的 disabled_models 是裸名；模型名自带 @ 时按同规则取裸名比对
-    const bare = m.includes('@') ? m.slice(0, m.lastIndexOf('@')) : m;
-    const on = !(window.__DISABLED_MODELS || []).includes(bare);
-    // 倍率来自后端的离线表（仅 wb 族有）：查不到就不显示，不编数。
-    const rate = (p.rates && p.rates[m]) ? p.rates[m] : '';
-    return `<div class="mrow">
-      <span class="mono" style="font-size:12px">${esc(m)}</span>
-      ${rate ? `<span class="pill mut" title="积分倍率：这一条请求按 ×${esc(rate)} 扣积分池额度">×${esc(rate)}</span>` : ''}
-      <button class="btn sm" onclick="toggleModel('${att(m)}', ${on ? 'false' : 'true'})">${on ? '停用' : '启用'}</button>
-    </div>`;
-  }).join('');
-  // 自定义 API 且清单已固定（models_policy 不再是 live）：说清楚「这份清单说了算」，
+  // ★ 大清单不再全量渲染：aihubmix 有 671 个模型、api-gateway 482 个，
+  //   一次插几百个 DOM 节点会让抽屉明显卡顿，且用户翻不到想找的那个。
+  //   超过 MODEL_PAGE 时只渲染首页 + 搜索框 + 「显示全部」。
+  window.__PLATMAP = window.__PLATMAP || {};
+  window.__PLATMAP[p.id] = p;
+  const rateN = Object.keys(p.rates || {}).length;
+  const rateLegend = rateN
+    ? ` · <span class="pill mut">×N</span> 是积分倍率（该模型每条请求扣积分池的系数，数值越高越费额度；来源：${esc(p.rates_source || '离线')}）`
+    : '';
+  // 自定义 API 且清单已固定（models_policy 不再是 live）：说清「这份清单说了算」，
   // 并给一键恢复跟随上游（服务端 sync_models 不带清单 = 重拉上游并解除固定）。
   const pinnedNote = (p.custom && p.models_policy !== 'live')
     ? `<div class="note">清单已固定：/v1/models 只发布这 ${ms.length} 个模型，不随上游变化。
         <button class="btn sm" style="margin-left:6px" onclick="unpinCustomModels('${att(p.id)}')">恢复跟随上游</button></div>`
     : '';
-  const rateN = Object.keys(p.rates || {}).length;
-  const rateLegend = rateN
-    ? ` · <span class="pill mut">×N</span> 是积分倍率（该模型每条请求扣积分池的系数，数值越高越费额度；来源：${esc(p.rates_source || '离线')}）`
+  const note = `<div class="note">模型 ${onN}/${ms.length} 启用（停用后不出现在 /v1/models，路由也会拒绝）${rateLegend}</div>`;
+  const big = ms.length > MODEL_PAGE;
+  const st = big ? __modelState(p.id) : { filter: '', all: false };
+  const list = modelRowsHtml(p, ms, st.filter, big ? st.all : true);
+  const search = big
+    ? `<input class="q mono" placeholder="筛选模型（共 ${ms.length} 个，输入关键字即时过滤）" value="${esc(st.filter)}"
+        oninput="setModelFilter('${att(p.id)}', this.value)" style="margin:4px 0 6px">`
     : '';
-  return `${pinnedNote}<div class="note">模型 ${onN}/${ms.length} 启用（停用后不出现在 /v1/models，路由也会拒绝）${rateLegend}</div>
-    <div class="mlist">${rows}</div>`;
+  return `${pinnedNote}${note}${search}<div class="mlist" id="ml-${esc(p.id)}">${list}</div>`;
 }
 
 // 恢复跟随上游：重新拉上游全量清单并解除固定。
@@ -1097,6 +1264,12 @@ function srcDrawer(p) {
       'apk-raccoon': '登录小浣熊网页版后，F12 → Application → Cookies 复制整段 Cookie。',
       'web-monkeycode': '登录 <b>monkeycode-ai.com</b> 后，F12 → Application → Cookies 复制 <b>monkeycode_ai_session</b> 的值；也可以直接粘整段 Cookie，面板会自动提取目标键。',
       'web-monkeycode-intl': '登录 <b>monkeycode-ai.net</b>（国际站，账号与国内站不通用）后，F12 → Application → Cookies 复制 <b>monkeycode_ai_session</b> 的值；也可以直接粘整段 Cookie。',
+      // ★ 2026-10-28 补齐三个「有凭据要求但没有专属提示」的平台：此前它们落到
+      //   通用文案「复制整段 Cookie」，用户不知道该找哪一项，贴错就验活失败。
+      //   内容来自各自 adapter/spec 的真实凭据形态（不是猜的）。
+      'web-glm': '这个平台要的不是整段 Cookie，而是 <b>refresh_token</b> 的值：登录 <b>chatglm.cn</b> 后 F12 → Application → Cookies，找 <b>chatglm_refresh_token</b>（或名为 refresh_token 的项）复制它的值。面板用它换 access_token（30 分钟一换，自动续）。',
+      'apk-wps': '登录 <b>www.wps.cn</b> 后，F12 → Application → Cookies 复制整段 Cookie，<b>关键是 wps_sid</b>（灵犀接口用它鉴权）。注意：该平台暂不支持对话反代，仅用于验活。',
+      'apk-nano': '登录 <b>www.n.cn</b> 后，F12 → Application → Cookies 复制整段 Cookie。注意：该平台暂不支持对话反代，仅用于验活。',
     };
     const COOKIE_PH = {
       'apk-yuanbao': '粘贴整段 Cookie（含 hy_user=…; hy_token=…）…',
@@ -1105,6 +1278,9 @@ function srcDrawer(p) {
       'apk-raccoon': '粘贴整段 Cookie…',
       'web-monkeycode': '粘贴 monkeycode_ai_session 的值或整段 Cookie…',
       'web-monkeycode-intl': '粘贴 monkeycode_ai_session 的值或整段 Cookie…',
+      'web-glm': '粘贴 chatglm_refresh_token 的值（不是整段 Cookie）…',
+      'apk-wps': '粘贴整段 Cookie（含 wps_sid=…）…',
+      'apk-nano': '粘贴整段 Cookie…',
     };
     if (p.id === 'apk-metaso') {
       body = `<div class="note oknote">秘塔<b>免登录即可用</b>（匿名约 13 次 / IP / 窗口，搜索带引用来源）：无需粘贴任何凭据，直接在对话里选 metaso 模型即可。</div>
@@ -1966,6 +2142,79 @@ function srcRerender() {
   if (el) viewSources(el);
 }
 
+// ★ 2026-10-28（用户要求）：接入源页「⋯ 管理操作」菜单。
+// 点击外部自动收起；菜单项复用的是既有的账号运维能力（不新增后端路径）。
+function srcMgrToggle() {
+  const m = document.getElementById('srcMgrMenu');
+  if (!m) return;
+  const open = m.style.display !== 'none';
+  m.style.display = open ? 'none' : 'block';
+  if (!open) {
+    // 一次性挂外部点击收起（用 once 避免重复绑定堆积）
+    setTimeout(() => {
+      document.addEventListener('click', function h() {
+        const mm = document.getElementById('srcMgrMenu');
+        if (mm) mm.style.display = 'none';
+        document.removeEventListener('click', h);
+      }, { once: true });
+    }, 0);
+  }
+}
+
+/// 管理操作分发：四个动作都复用既有实现。
+/// health  → 逐账号验活（/api/accounts action=verify 走号池健康台账，不消耗对话额度）
+/// checkin → /api/checkin claim（wb 加油站 + Lobster，幂等）
+/// growth  → /api/checkin action=growth（成长任务 17 项闭环）
+/// travel  → /api/checkin action=growth 的 travel 步（猫猫旅行出发+领取）
+async function srcMgr(kind) {
+  const m = document.getElementById('srcMgrMenu');
+  if (m) m.style.display = 'none';
+  if (kind === 'checkin') { wbCheckin(); return; }
+  if (kind === 'growth') { wbGrowth(); return; }
+
+  // health / travel：用统一的结果弹层，逐条显示
+  const title = kind === 'health' ? '一键健康检查' : '猫猫旅行与领奖';
+  const mk = modalShell(title + ' · 执行中…', '<div class="faint" id="mgrBox">正在执行，请稍候…</div>');
+  document.body.insertAdjacentHTML('beforeend', mk);
+  const box = document.getElementById('mgrBox');
+  let lines = [];
+  try {
+    if (kind === 'health') {
+      const ac = await api('/api/accounts');
+      const rows = (ac.rows || []).filter((r) => !r.anon && r.enabled !== false && !r.needs_relogin);
+      for (const a of rows) {
+        const r = await post('/api/accounts', { action: 'verify', id: a.id }).catch((e) => ({ ok: false, message: String(e) }));
+        lines.push((r.ok && r.verified ? '✓ ' : '✗ ') + esc(a.name || a.id) + ' — ' + esc((r && (r.message || r.error)) || ''));
+      }
+      if (!rows.length) lines.push('没有可检查的账号（免密车道与已失效凭据已跳过）');
+    } else {
+      // travel：猫猫旅行是 wb 族的 growth 动作（服务端 growth_run 已含 travel_depart/claim）
+      const r = await post('/api/checkin', { action: 'growth', platform: 'wb-gateway' }).catch((e) => ({ ok: false, message: String(e) }));
+      if (!r.ok) {
+        lines.push('✗ ' + esc(r.message || '执行失败'));
+      } else {
+        (r.accounts || []).forEach((a) => {
+          const steps = (a.result && a.result.steps) || [];
+          const travel = steps.filter((s) => String(s.action).indexOf('travel') >= 0);
+          lines.push(esc(a.account) + ' — ' + (travel.length
+            ? travel.map((s) => esc(s.action) + (s.ok ? ' ✓' : ' ✗')).join(' · ')
+            : '本次无旅行步骤返回'));
+        });
+        if (!(r.accounts || []).length) lines.push('没有 wb 族账号');
+      }
+    }
+  } catch (e) {
+    lines.push('✗ ' + esc(String(e)));
+  }
+  if (box) {
+    box.innerHTML = '<div class="note">' + (lines.join('<br>') || '无结果') + '</div>';
+    const hd = box.closest('.modal').querySelector('.modal-hd');
+    if (hd) hd.innerHTML = title + '<b class="x" onclick="this.closest(\'.modal-mask\').remove()">✕</b>';
+  }
+  // 回来后刷新接入源卡片上的账号状态
+  setTimeout(() => srcRerender(), 800);
+}
+
 // ─────────────────────────────────────────────
 // 原四视图（总览 / 账号 / 用量）
 // ─────────────────────────────────────────────
@@ -2121,7 +2370,12 @@ async function viewAccounts(el) {
     api('/api/pool').catch(() => null),
   ]);
   AC_CACHE = ac.rows || [];
-  const wbN = ac.rows.filter((a) => a.platform === 'wb-gateway' || a.platform === 'codebuddy').length;
+  // ★ wb 族账号数（决定签到 / 成长任务 / 自动签到开关显不显示）。
+  //   旧实现又抄了一份平台列表（'wb-gateway' || 'codebuddy'）——**漏了国际版**，
+  //   于是只有 wb-gateway-intl 账号的用户，整个 wb 功能入口都不显示，功能等于不存在。
+  //   现在用后端下发的 balance_supported（单一来源 wb::wb_checkin_base）判断，
+  //   顺带排除免密车道占位行（anon 行没有真凭据，不该算进「可签到账号」）。
+  const wbN = ac.rows.filter((a) => a.balance_supported && !a.anon).length;
   // 免密车道（anon）不需要账号：池里出现的行都是历史遗留占位（name=匿名公共池 / secret=public），
   // 单列出来提示可删，别让用户以为那是一份要维护的凭据。
   const anonRows = ac.rows.filter((a) => a.anon);
@@ -2139,11 +2393,11 @@ async function viewAccounts(el) {
     ${ac.rows.some((a) => a.platform_known === false) ? `<div class="note">有 ${ac.rows.filter((a) => a.platform_known === false).length} 个账号所属的平台已经不在 providers/ 里了（标记「平台已移除」）：这些号转不出去，留着只会混淆，可以直接删除。</div>` : ''}
     ${ac.rows.length ? `<table><thead><tr><th>账号名</th><th>平台</th><th>凭据类型</th><th>凭据</th><th>状态</th><th>健康</th><th style="width:250px">操作</th></tr></thead>
     <tbody>${ac.rows.map((a) => `<tr>
-      <td><b>${esc(a.name || a.id)}</b><br><span class="faint mono">${esc(a.id)}</span></td>
+      <td><b>${esc(a.name || a.id)}</b>${a.profile && (a.profile.name || a.profile.email) ? `<br><span class="faint" style="font-size:12px">${a.profile.name ? esc(a.profile.name) : ''}${a.profile.email ? (a.profile.name ? ' · ' : '') + esc(a.profile.email) : ''}</span>` : ''}<br><span class="faint mono">${esc(a.id)}</span></td>
       <td>${a.platform_known === false ? `<span class="faint mono">${esc(a.platform)}</span><br>${pill('warn', '平台已移除')}` : `${esc(platShort(a.platform_name || a.platform))}<br><span class="faint mono" style="font-size:11px">${esc(a.platform)}</span>`}</td><td>${pill('mut', esc(a.kind || '—'))}</td>
       <td class="faint">${a.anon ? '无需凭据' : a.needs_relogin ? '本机解不开（换过 Windows 用户/机器）' : a.secret_len ? `${a.secret_len} 字符（掩码）` : '空'}</td>
       <td>${a.enabled ? pill('ok', '启用') : pill('mut', '停用')}</td>
-      <td>${a.anon ? pill('mut', '免密车道') + healthPill(a.health) + blockPills(a) : healthPill(a.health) + blockPills(a) + creditPill(a) + tokenPill(a)}</td>
+      <td>${a.anon ? pill('mut', '免密车道') + healthPill(a.health) + blockPills(a) : healthPill(a.health) + blockPills(a) + creditPill(a) + tokenPill(a) + (a.profile && a.profile.plan ? ' ' + pill('mut', a.profile.plan) : '')}</td>
       <td>
         ${a.anon
           ? `<span class="faint" style="font-size:11.5px">免密车道不需要账号，此行是历史占位数据；「状态」列显示的是这条车道当前的封锁/冷却</span>
@@ -2152,7 +2406,7 @@ async function viewAccounts(el) {
           ? `<span class="faint" style="font-size:11.5px">重新登录一次（或「手动粘贴」）即可恢复</span>
              <button class="btn sm" onclick="acDelete('${att(a.id)}')">删除</button>`
           : `<button class="btn sm" onclick="acVerify('${att(a.id)}', this)" title="立刻用该凭据发一次验活请求">检查</button>
-             <button class="btn sm" onclick="acBalance('${att(a.id)}', this)" title="查询积分余额（仅 WorkBuddy / CodeBuddy 族支持）">积分</button>
+             ${a.balance_supported ? `<button class="btn sm" onclick="acBalance('${att(a.id)}', this)" title="查询积分余额（该平台有计费端点）">积分</button>` : ''}
               <button class="btn sm" onclick="acLimit('${att(a.id)}')" title="Token 周期限额：防用量过猛被上游盯上">限额</button>
              <button class="btn sm" onclick="acRename('${att(a.id)}', this)" title="给这个号起个认得出的名字（同平台不能重名）">改名</button>
              <button class="btn sm" onclick="acToggle('${att(a.id)}', ${a.enabled ? 'false' : 'true'})">${a.enabled ? '停用' : '启用'}</button>
@@ -2299,23 +2553,60 @@ async function acVerify(id, btn) {
   const r = await post('/api/accounts', { action: 'verify', id }).catch((e) => ({ ok: false, message: e.message }));
   if (btn) { btn.disabled = false; btn.textContent = '检查'; }
   if (!r.ok) { alert('检查失败：' + (r.message || '未知错误')); return; }
-  if (!r.verified) alert('验活未通过：' + (r.message || '凭据可能已过期'));
+  // ★ 三态（2026-10-28）：true=通过 / false=明确失效 / null=**无法验活**。
+  //   把 null 当 false 处理就是拿「探不了」当「凭据坏了」——用户会被诱导去重登
+  //   一个本来好好的账号（本轮修的就是这类假阴性）。
+  if (r.verified === true) {
+    const p = r.profile;
+    alert('验活通过 ✓ 凭据可用' + (p && (p.name || p.email) ? '\n登录用户：' + [p.name, p.email].filter(Boolean).join(' · ') : ''));
+  } else if (r.verified === false) {
+    alert('验活未通过：' + (r.message || '凭据可能已过期'));
+  } else {
+    alert('无法自动验活（不代表凭据失效）\n\n' + (r.message || '该平台没有可探测的验活端点，用一次真实对话即可确认凭据是否可用'));
+  }
   render();
 }
 // ★ 2026-10-26（用户排队消息④）：账号积分余额查询（WorkBuddy / CodeBuddy 族）。
 // 结果用 toast 式浮层显示在按钮旁，不整页重绘 —— 用户点完立刻能看到数字。
+// ★ 2026-10-28 升级（对齐参考项目「积分明细」）：从 alert 一行字换成逐份额弹窗——
+// 每份额度单列（面额 / 已用 / 剩余 / 到期），已用完与读不到数的收在末尾折叠区，
+// 不占第一眼；能量 / 成长值并入同一张窗口。
 async function acBalance(id, btn) {
-  if (btn) { btn.disabled = true; btn.textContent = '查询中…'; }
+  if (btn) { btn.disabled = true; btn.textContent = "查询中…"; }
   let r;
-  try { r = await post('/api/accounts', { action: 'balance', id }); }
-  catch (e) { r = { ok: false, message: e.message }; }
-  if (btn) { btn.disabled = false; btn.textContent = '积分'; }
-  if (!r.ok) { alert(r.supported === false ? '该平台没有积分余额端点（仅 WorkBuddy / CodeBuddy 族支持）' : '查询失败：' + (r.message || '未知错误')); return; }
-  const parts = [];
-  if (typeof r.credit === 'number') parts.push('积分 ' + r.credit);
-  if (typeof r.energy === 'number' && r.energy > 0) parts.push('能量 ' + r.energy);
-  if (typeof r.growth_score === 'number' && r.growth_score > 0) parts.push('成长值 ' + r.growth_score);
-  alert(parts.length ? ('当前余额：' + parts.join(' · ')) : '上游未返回余额字段（账号可能刚登录，资源尚未同步）');
+  try { r = await post("/api/accounts", { action: "balance", id }); }
+  catch (e) { r = { ok: false, message: String(e) }; }
+  if (btn) { btn.disabled = false; btn.textContent = "积分"; }
+  if (!r || !r.ok) {
+    alert(r && r.supported === false ? "该平台没有积分余额端点（仅 WorkBuddy / CodeBuddy 族支持）" : "查询失败：" + ((r && r.message) || "未知错误"));
+    return;
+  }
+  const fmtN = (n) => typeof n === "number" ? (n >= 10000 ? (Math.round(n / 100) / 10) + "k" : Math.round(n)) : "—";
+  const fmtT = (s) => {
+    if (typeof s !== "number" || s <= 0) return "";
+    const d = new Date(s * 1000);
+    return String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  };
+  const packs = r.packs || [];
+  const alive = packs.filter((x) => (x.left || 0) > 0);
+  const dead = packs.filter((x) => (x.left || 0) <= 0);
+  const row = (x) => {
+    const used = Math.max(0, (x.total || 0) - (x.left || 0));
+    const exp = x.expire_at ? " · 到期 " + fmtT(x.expire_at) : "";
+    const near = x.expire_at && (x.expire_at * 1000 - Date.now()) <= 48 * 3600000;
+    return "<div class=\"mrow\"><span class=\"mono\" style=\"font-size:12px\">" + esc(x.name || "未名份额")
+      + "</span><span class=\"faint\">已用 " + fmtN(used) + " / " + fmtN(x.total) + " · 剩 " + fmtN(x.left)
+      + (near ? "<b style=\"color:#e5a23c\">" + exp + "</b>" : exp) + "</span></div>";
+  };
+  let body = "<div class=\"note\">总剩余 <b>" + fmtN(r.credit) + " 分</b>"
+    + (typeof r.energy === "number" && r.energy > 0 ? " · 能量 " + fmtN(r.energy) : "")
+    + (typeof r.growth_score === "number" && r.growth_score > 0 ? " · 成长值 " + fmtN(r.growth_score) : "")
+    + (r.expire_at ? " · 最早到期 " + fmtT(r.expire_at) : "") + "</div>";
+  if (alive.length) body += "<label>份额明细（" + alive.length + " 份可用）</label><div class=\"mlist\">" + alive.map(row).join("") + "</div>";
+  if (dead.length) body += "<details style=\"margin-top:8px\"><summary class=\"faint\" style=\"cursor:pointer;font-size:12px\">已用完 / 无余额的份额（" + dead.length + "）</summary><div class=\"mlist\">" + dead.map(row).join("") + "</div></details>";
+  if (!packs.length) body += "<div class=\"faint small\" style=\"margin-top:6px\">上游未返回份额明细（该账号可能只有汇总余额字段）</div>";
+  const mk = modalShell("积分明细", body + "<div class=\"modal-foot\"><button class=\"btn\" onclick=\"this.closest('.modal-mask').remove()\">关闭</button></div>");
+  document.body.insertAdjacentHTML("beforeend", mk);
 }
 
 // Token 限额编辑弹窗：设/改/清一个账号的周期限制（action=set_limit）。
