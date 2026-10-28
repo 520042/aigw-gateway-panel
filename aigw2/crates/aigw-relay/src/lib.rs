@@ -34,6 +34,7 @@ pub mod sysprompt;
 pub mod history_trim;
 pub mod joycode;
 pub mod model_map;
+pub mod param_override;
 /// 重导出 reqwest::Client，供上层 crate（aigw-server）在签名里引用而不必自加依赖。
 pub use reqwest::Client as HttpClient;
 pub mod commandcode;
@@ -593,6 +594,13 @@ impl OutClient {
                         tracing::debug!("已注入自定义系统提示词");
                         dirty = true;
                     }
+                    // ★ 2026-10-28（对齐 magpie param-override）：参数覆盖放最后 ——
+                    //   它能删/改前面注入的内容（例如某上游不认 tools 就删掉），
+                    //   必须是管线的最后一环。
+                    if param_override::apply_global(&mut v) {
+                        tracing::debug!("已应用参数覆盖");
+                        dirty = true;
+                    }
                     if dirty {
                         sp_body = serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec());
                         sp_body.as_slice()
@@ -641,6 +649,10 @@ impl OutClient {
                     dirty = true;
                 }
                 if sysprompt::apply_global(&mut v, sysprompt::Proto::Chat) {
+                    dirty = true;
+                }
+                // ★ 2026-10-28（对齐 magpie param-override）：参数覆盖是最后一环。
+                if param_override::apply_global(&mut v) {
                     dirty = true;
                 }
                 if dirty {
@@ -1118,6 +1130,10 @@ pub fn classify_verify_probe(status: u16, body: &str) -> VerifyOutcome {
                         dirty = true;
                     }
                     if sysprompt::apply_global(&mut v, sysprompt::Proto::Chat) {
+                        dirty = true;
+                    }
+                    // ★ 2026-10-28（对齐 magpie param-override）：参数覆盖是最后一环。
+                    if param_override::apply_global(&mut v) {
                         dirty = true;
                     }
                     if dirty {

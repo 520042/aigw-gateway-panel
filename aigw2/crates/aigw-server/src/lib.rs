@@ -374,6 +374,8 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/history_trim", get(htrim_get).post(htrim_set))
         // ★ 2026-10-28（对齐 magpie model-map）：模型名重定向。
         .route("/api/model_map", get(mmap_get).post(mmap_set))
+        // ★ 2026-10-28（对齐 magpie param-override）：参数覆盖。
+        .route("/api/param_override", get(pov_get).post(pov_set))
         .route("/api/backup", get(backup_export).post(backup_restore))
         // 完整备份（含凭据）：前端「⬇ 备份数据」用它，否则导出的备份恢复不回来
         .route("/api/backup/export", post(backup_export_full))
@@ -13609,6 +13611,52 @@ async fn mmap_set(State(st): State<AppState>, body: Bytes) -> Response {
             "message": format!("已保存并立即生效：{} 条重定向规则{}",
                 rules.len(),
                 if keep { "（响应保留上游真名）" } else { "" }),
+        })).into_response(),
+        Err(e) => Json(json!({"ok": false, "message": format!("保存失败：{e}")})).into_response(),
+    }
+}
+
+/// ★ 2026-10-28（对齐 magpie param-override）：读取参数覆盖配置。
+async fn pov_get() -> Json<Value> {
+    let c = aigw_relay::param_override::current();
+    let mut out = serde_json::Map::new();
+    for (k, v) in &c.direct {
+        out.insert(k.clone(), v.clone());
+    }
+    Json(json!({
+        "ok": true,
+        "cfg": {
+            "direct": Value::Object(out),
+            "ops": c.ops.len(),
+            "enabled": !c.is_empty(),
+        }
+    }))
+}
+
+/// ★ 2026-10-28：保存参数覆盖并立即生效。
+async fn pov_set(State(st): State<AppState>, body: Bytes) -> Response {
+    let v: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": format!("JSON 解析失败：{e}")}))).into_response()
+        }
+    };
+    let cfgv = v.get("cfg").cloned().unwrap_or(v);
+    let enabled = cfgv.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    let cfg = aigw_relay::param_override::ParamOverride::from_json(&cfgv);
+    let dir = st
+        .data_dir
+        .as_ref()
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    match aigw_relay::param_override::save_and_apply(&dir, &cfg, enabled) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "message": if enabled {
+                format!("已保存并立即生效：{} 项直设 + {} 条操作", cfg.direct.len(), cfg.ops.len())
+            } else {
+                "已关闭参数覆盖".to_string()
+            },
         })).into_response(),
         Err(e) => Json(json!({"ok": false, "message": format!("保存失败：{e}")})).into_response(),
     }

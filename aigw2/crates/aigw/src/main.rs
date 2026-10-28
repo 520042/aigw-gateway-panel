@@ -652,6 +652,14 @@ async fn main() {
         }
         aigw_relay::model_map::apply_cfg(&rules, keep);
     }
+    // ★ 2026-10-28（对齐 magpie param-override）：启动时加载参数覆盖。
+    {
+        let po = aigw_relay::param_override::load(&data_dir());
+        if !po.is_empty() {
+            tracing::info!("param_override：{} 项直设 + {} 条操作已加载", po.direct.len(), po.ops.len());
+        }
+        aigw_relay::param_override::apply_cfg(&po, !po.is_empty());
+    }
     let client = Arc::new(aigw_relay::OutClient::new());
     // 账号池：双源装载（v2 data/accounts.json 权威；首次从 legacy 只读初始化）
     let legacy_accounts = legacy_dir()
