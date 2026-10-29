@@ -51,6 +51,9 @@ pub(crate) fn custom_to_spec(c: &aigw_store::CustomApi) -> ProviderSpec {
             String::new()
         },
         chat_supported: true,
+        group: String::new(),
+        verify_chat: false,
+            domain: String::new(),
         region: "global".into(),
     }
 }
@@ -92,6 +95,9 @@ pub(crate) fn free_to_spec(s: &aigw_store::FreeSite) -> ProviderSpec {
         login_url: if scheme_ok(&s.url) { s.url.clone() } else { String::new() },
         notes: s.desc.clone(),
         chat_supported: true,
+        group: String::new(),
+        verify_chat: false,
+            domain: String::new(),
         region: "global".into(),
     }
 }

@@ -124,6 +124,17 @@ pub struct ProviderSpec {
     pub login_url: String,
     #[serde(default)]
     pub notes: String,
+    /// 接入源页的分组（custom / official / sub / client / free）。
+    ///
+    /// ★ 为什么要有这个字段：分组原来只靠前端按 id 前缀猜（`api-*` → 开放平台、
+    ///   `sub-*` → 订阅反代…），于是「文件名 api- 开头、id 却不带前缀」的平台
+    ///   （our-free-model）就落进了客户端接入 —— 它明明是一个填 Key 直连的本机
+    ///   网关。反过来也不能靠 `auth` 判定：`api_key` 同时被 apk-accio、
+    ///   web-deepseek 这类真·客户端凭据源使用。
+    ///   声明式 spec 自己说明白属于哪组，前端就不必维护一张 id 覆盖表。
+    ///   空 = 仍按 id 前缀推导（向后兼容，存量 toml 不必改）。
+    #[serde(default)]
+    pub group: String,
     /// 是否支持对话反代（默认 true）。经全网调研确无纯 HTTP 对话端点的平台设 false：
     /// 目前仅 WPS 灵犀、360 纳米（仅登录/验活，官方逆向需浏览器或只有付费 API）。
     #[serde(default = "default_true")]
@@ -425,6 +436,20 @@ stream_dialect = "sse_delta"
         assert_eq!(s.auth, AuthKind::ApiKey);
         assert_eq!(s.models.len(), 2);
         assert!(s.enabled);
+    }
+
+    /// group 字段：没写时为空（前端按 id 前缀推导），写了就原样带出来。
+    ///
+    /// 为什么锁这条：our-free-model 的文件名是 api-*.toml、id 却不带前缀，
+    /// 前端按 id 猜分组把它放进了「客户端接入」。不能靠 auth 判（api_key 同时
+    /// 被 apk-accio / web-deepseek 这类客户端凭据源使用），只能由 spec 自报。
+    #[test]
+    fn group_field_defaults_empty_and_round_trips() {
+        let s = parse_spec(VALID).unwrap();
+        assert_eq!(s.group, "", "没写 group 必须为空，前端才走前缀推导");
+        let raw = VALID.replace("stream_dialect", "group = \"official\"\nstream_dialect");
+        let s2 = parse_spec(&raw).unwrap();
+        assert_eq!(s2.group, "official");
     }
 
     #[test]

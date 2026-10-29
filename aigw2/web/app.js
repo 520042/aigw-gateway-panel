@@ -414,6 +414,8 @@ let SRC_QRSONLY = false;
 let SRC_EXPAND = null; // 展开的平台卡片 id
 
 // 分组规则（用户拍板 + 参考项目登录方式核对）：
+//   ① spec 自报 group 优先（providers/*.toml 的 group 字段，后端随平台行下发）；
+//   ② 没声明再按 id 前缀推导：
 //   custom-*        → 自定义 API（最前，默认展开）
 //   api-* / apk-coze / kimi-code / codex → 开放平台 API（填官方 Key，默认收起）
 //     （扣子 Coze、Kimi 开放平台、Codex 官方 Key 均为官方 API Key 直连）
@@ -421,7 +423,15 @@ let SRC_EXPAND = null; // 展开的平台卡片 id
 //   free-*          → 公益站（填 Key 即用，默认收起）
 //   其余（apk-*/web-*/wb-*/anon-*/kilo/pollinations + minimax + codearts）→ 客户端反代
 //     （minimax=MiniMax Code 设备码、codearts=华为云账号跳转登录+AK/SK，均非单纯 Key）
+//
+// ★ 为什么加了 ①：前缀只是**文件名习惯**，不是契约。our-free-model 的文件叫
+//   api-our-free-model.toml，但 id 是 our-free-model，于是它掉进了客户端接入 ——
+//   它明明是填 Key 直连本机网关。也不能改用 auth 字段判：api_key 同时被
+//   apk-accio / web-deepseek 这类真·客户端凭据源使用。谁最清楚自己属于哪组，
+//   就由谁在 spec 里说；前缀推导保留给存量 toml（零改动向后兼容）。
+const SRC_GROUPS = ['custom', 'official', 'sub', 'client', 'free'];
 function srcGroupOf(p) {
+  if (p.group && SRC_GROUPS.includes(p.group)) return p.group;
   if (p.id.startsWith('custom-')) return 'custom';
   if (p.id.startsWith('api-') || GROUP_OVERRIDE.official.includes(p.id)) return 'official';
   if (p.id.startsWith('sub-')) return 'sub';
@@ -458,7 +468,7 @@ async function viewSources(el) {
     const q = SRC_Q.toLowerCase();
     return (p.name || '').toLowerCase().includes(q) || (p.id || '').toLowerCase().includes(q) || (p.notes || '').toLowerCase().includes(q);
   });
-  const groups = ['custom', 'official', 'sub', 'client', 'free'];
+  const groups = SRC_GROUPS;
   const byGroup = {};
   for (const g of groups) byGroup[g] = rows.filter((p) => srcGroupOf(p) === g);
   // 「已接入」= 有凭据，或免密车道（anon：kilo / pollinations / anon-zen 无需任何账号）。
@@ -1262,6 +1272,24 @@ function srcDrawer(p) {
           <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
         </div>
       </details>`;
+  } else if (p.id === 'apk-orcaterm') {
+    // ★ 2026-10-29（用户问「OrcaTerm 需要什么样的 token」）：它 auth=api_key，
+    //   会落进下面的通用 isKey 分支，那句「填官方 API Key / 去官网申请」是误导 ——
+    //   OrcaTerm 没有可申请的 API Key，上游只认**桌面客户端的 OAuth JWT**
+    //   （Authorization: Bearer <JWT>）。其余头（X-Product / x-seqid / Origin /
+    //   Referer / UA）由面板自己补，用户只需给 JWT 这一样。
+    //   所以这条分支必须排在 isKey 前面，否则永远到不了。
+    body = `<div class="note">OrcaTerm 要的是<b>桌面客户端的 OAuth Access Token（JWT）</b>，不是 API Key、也不是 Cookie：
+        <br>① 装并登录 <a href="https://orcaterm.cloud.tencent.com" target="_blank" rel="noopener">腾讯遨驰终端</a>（微信扫码）
+        <br>② 用记事本打开 <span class="mono">%APPDATA%/com.orcaterm-desktop.app/data.bin</span>（Tauri store，<b>明文，不用解密</b>）
+        <br>③ 找到 <span class="mono">oauth_access_token</span>，复制它那串值（<span class="mono">eyJ…</span> 开头的 JWT）粘到下面。</div>
+      <div class="note">账号 uin 会从 JWT 的 payload 自动解析，不用另外填。模型走 <span class="mono">TokenHub/</span> 前缀，裸名请求会自动归一。</div>
+      <div class="note" style="border-color:#5a4a2a">⚠ 这枚 token 约 <b>2 小时</b>过期。过期后上游回 <span class="mono">Invalid or expired AccessToken</span>，回 data.bin 重取一次即可 —— 不是账号被封。</div>
+      <div class="row">
+        <input class="q mono" id="keyInput" placeholder="粘贴 oauth_access_token 的 JWT（eyJ… 开头）…">
+        <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+      </div>
+      <div id="authBox"></div>`;
   } else if (isKey) {
     body = `<div class="note">${p.id.startsWith('sub-') ? '订阅平台：' : '填官方 API Key：'}把 Key 粘贴到下面，保存即入库（自动作为 Bearer 头转发）。${loginUrl ? `<br>还没有 Key？<a href="${esc(loginUrl)}" target="_blank" rel="noopener">去官网申请/登录 →</a>` : ''}</div>
       <div class="row">

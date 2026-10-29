@@ -547,6 +547,12 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
                 "models_policy": s.models_policy,
                 "placeholder": s.base_url.starts_with('@'),
                 "accounts_n": acct_n,
+                // ★ 接入源页的分组：spec 自己声明的优先（providers/*.toml 的 group 字段），
+                //   为空则前端按 id 前缀推导。之前分组只靠前端猜前缀，于是
+                //   「文件名 api- 开头、id 却不带前缀」的 our-free-model 掉进了客户端接入
+                //   —— 它其实是填 Key 直连的本机网关。也不能按 auth 判：api_key 同时被
+                //   apk-accio / web-deepseek 这类真·客户端凭据源使用。
+                "group": s.group,
                 // ★ 需求 1/2/4：卡片显示账号数、抽屉里逐个展开、并显示积分（见上面 plat_accounts 的计算）
                 "accounts": plat_accounts,
                 // 卡片上直接显示积分合计；一个都没查过时为 null，前端显示「未查」

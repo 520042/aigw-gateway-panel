@@ -6,6 +6,10 @@ id = "our-free-model"
 name = "Our Free Model（本机转发网关 · EAC 协付 / Kilo / 免费车道）"
 enabled = true
 region = "intl"
+# ★ 显式声明分组：文件名是 api- 开头，id 却不带前缀，前端按 id 猜分组时会把它
+#   归进「客户端接入」——它其实是填 Key 直连一个本机 OpenAI 兼容网关（api_key 直连），
+#   属于「开放平台 API」。
+group = "official"
 
 auth = "api_key"
 base_url = "http://127.0.0.1:18899/v1"
