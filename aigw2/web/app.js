@@ -1283,7 +1283,8 @@ function srcDrawer(p) {
         <br>② 用记事本打开 <span class="mono">%APPDATA%/com.orcaterm-desktop.app/data.bin</span>（Tauri store，<b>明文，不用解密</b>）
         <br>③ 找到 <span class="mono">oauth_access_token</span>，复制它那串值（<span class="mono">eyJ…</span> 开头的 JWT）粘到下面。</div>
       <div class="note">账号 uin 会从 JWT 的 payload 自动解析，不用另外填。模型走 <span class="mono">TokenHub/</span> 前缀，裸名请求会自动归一。</div>
-      <div class="note" style="border-color:#5a4a2a">⚠ 这枚 token 约 <b>2 小时</b>过期。过期后上游回 <span class="mono">Invalid or expired AccessToken</span>，回 data.bin 重取一次即可 —— 不是账号被封。</div>
+      <div class="note oknote">✔ 粘一次就够了，<b>不用定时重取</b>：这枚 JWT 本身约 2 小时时效，但上游有续期接口，面板会在临期 10 分钟内自动换新，401 时还会再强制续期一次并重试 —— 结果写回账号池，重启也保留。</div>
+      <div class="note" style="border-color:#5a4a2a">只有续期本身被上游拒（<span class="mono">INVALID_REQUEST：无法获取会话标识</span>，通常是桌面端改了登录态或号被封）时，才需要回 data.bin 重新复制一次。</div>
       <div class="row">
         <input class="q mono" id="keyInput" placeholder="粘贴 oauth_access_token 的 JWT（eyJ… 开头）…">
         <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>

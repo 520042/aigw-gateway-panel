@@ -1,0 +1,46 @@
+# OrcaTerm（腾讯云遨驰终端）—— 两步上游：建会话 → SSE（自定义 adapter）
+# 一手来源：_refs/Agent2API 的 providers/orcaterm/*（chat.rs / credentials.rs / mod.rs）
+id = "apk-orcaterm"
+name = "OrcaTerm（腾讯遨驰）"
+enabled = true
+region = "cn"
+
+# 凭据是一枚约 2 小时时效的 JWT（微信 OAuth 后由桌面端写入 data.bin，无加密）。
+# uin 从 JWT payload 的 userId 解出，无需单独提供。
+# ★ 但这枚 token **不需要用户每 2 小时手动重取**：上游有真续期接口
+#   POST https://api.orcaterm.cloud.tencent.com/cgi/api?action=OAuthRefreshToken&uin=<userId>
+#   body {"action":"OAuthRefreshToken","data":{"accessToken":<旧JWT>}} → data.Response.AccessToken
+#   面板在临期 10 分钟内主动续期（发出请求前就换好，用户感知不到过期），
+#   401 时还会再强制刷一次并重试。续期结果写回账号池。
+#   参考项目 Agent2API providers/orcaterm/credentials.rs 即走这条路（supports_refresh=true）。
+#   只有续期本身被上游拒（INVALID_REQUEST「无法获取会话标识」）才需要重新从 data.bin 取一次。
+auth = "api_key"
+base_url = "https://lightai.cloud.tencent.com"
+format = "openai"
+upstream_kind = "orcaterm"
+# 声明它有两个作用：① 体检会探一次（none 策略源靠这个才被发现）；
+# ② 文档上说明「对话走这个路径」（实际是两步：先建会话再打它）。
+chat_path = "/assistant/chat"
+
+# 上游没有模型清单接口（面板列表来自桌面客户端内置），所以 none：
+# 模型名以 TokenHub/xxx 形式经 模型@apk-orcaterm 指定。
+# 2026-10-28 对齐 Agent2API a55e1eb：上游无清单接口（DescribeAIModelList 对普通
+# 账号回空数组），清单是桌面端 1.6.4 面板逐项对证的静态表。id 带上游真实形态
+# TokenHub/ 前缀——用户在 /v1/models 里看到什么，发出去就是什么，不用猜写法。
+models_policy = "static"
+models = [
+  "TokenHub/hy4-preview",
+  "TokenHub/hy3",
+  "TokenHub/kimi-k3",
+  "TokenHub/glm-5.3-flash",
+  "TokenHub/glm-5.3",
+  "TokenHub/glm-5.2",
+  "TokenHub/deepseek-v4.1-flash",
+  "TokenHub/deepseek-v4-flash",
+  "TokenHub/deepseek-v4-pro",
+]
+stream_dialect = "sse_delta"
+
+login_url = "https://orcaterm.cloud.tencent.com"
+
+notes = "模型经 TokenHub/ 前缀路由，裸名请求也会自动归一（表外名回退默认档 glm-5.3-flash，与参考实现同口径）。★ hy4-preview：面板有、上游未挂载（实测回流内 LLM is not loaded），收录是为了和桌面端面板一致，选中会收到明确错误而不是空白回答。\n从桌面客户端 %APPDATA%/com.orcaterm-desktop.app/data.bin（Tauri store，明文）里取出 oauth_access_token 粘贴即可（一次性，之后自动续期）。\n★ JWT 约 2 小时时效，但**面板会自动续期**：临期 10 分钟内主动调 OAuthRefreshToken 换新，401 时再强制刷一次，结果写回账号池 —— 不需要用户定时重粘。\n★ 协议是两步：先 POST /assistant/conversation 建会话，再 POST /assistant/chat 走 SSE。历史拍平进单条输入（每请求新建会话，无跨请求状态）。\n★ SSE 的错误帧不是 JSON（data: [ERROR]: [LLM_ERROR]），必须按前缀识别，否则失败会被当成「上游什么都没说」。\n★ 实测（2026-10-26）：端点健康 —— 带完整客户端头与真实 body 时回 code=10050000 Invalid or expired AccessToken（正常的鉴权失败）。注意：若**不带** X-Product / x-seqid / Origin / Referer 等头，上游会回一个容易误导的 NEED_UIN_AND_SKEY —— 那不是缺凭据，是缺头。"

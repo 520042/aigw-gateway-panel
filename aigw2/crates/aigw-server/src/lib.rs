@@ -5064,6 +5064,40 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
             .find(|(id, _)| *id == account)
             .map(|(_, s)| s.clone())
             .unwrap_or_default();
+        // ★ 临期主动续期（目前只有 OrcaTerm 需要）：它的 JWT 只有 ~2 小时时效，
+        //   等 401 再刷意味着**每次过期都先失败一次**，用户会看到一次确定性的报错。
+        //   在发出请求前先看 exp，临期就换新 —— 用户完全感知不到 token 会过期。
+        //
+        //   其余平台不走这里：它们的凭据要么长期有效（ApiKey/Cookie），要么续期
+        //   必须由 401 触发才有意义（refreshable_kind 里各自的条件已表达清楚）。
+        let secret = if spec.upstream_kind == "orcaterm"
+            && aigw_relay::orcaterm::is_expiring(&secret, 600)
+        {
+            match aigw_relay::orcaterm::refresh_secret(&st.client.http(), &secret).await {
+                Ok(fresh) => {
+                    let (hit, changed) = st.accounts.update_secret(&account, &fresh);
+                    if hit && changed {
+                        // 与 401 自杀路径同一收尾：旧凭据留下的账号级隔离/冷却不能带进新凭据
+                        on_credential_replaced(&st, &account);
+                    }
+                    tracing::info!(
+                        "OrcaTerm 账号 {account} 的 JWT 临期，已主动续期（重试不再需要 401 触发）"
+                    );
+                    fresh
+                }
+                Err(e) => {
+                    // 主动续期失败**不能让请求直接失败**：旧 token 可能还剩几分钟，
+                    // 也许正好够跑完这一次。继续用旧的发，真被拒了下面还有 401 自愈兜底。
+                    tracing::warn!(
+                        "OrcaTerm 账号 {account} 主动续期失败（{}），先用旧凭据尝试",
+                        e.body
+                    );
+                    secret
+                }
+            }
+        } else {
+            secret
+        };
         // WorkBuddy / CodeBuddy 族转发必须带 X-Domain（账号登录时上游给的归属域）。
         // 其余平台的 domain 恒为空串，注入端会跳过这个头。
         let domain = st.accounts.domain_of(&spec.id, &secret);
@@ -5206,6 +5240,11 @@ fn refreshable_kind(spec: &ProviderSpec, secret: &str) -> Option<RefreshKind> {
         // qoder：设备授权只发 access token，refresh_secret 是显式报错桩 —— 但仍然走
         // 一遍，好让用户看到「该平台没有 refreshToken 可续期」而不是含糊的「重新登录」。
         "qoder" if !secret.trim().is_empty() => Some(RefreshKind::Qoder),
+        // orcaterm：JWT 只有 ~2 小时时效，但上游有真续期接口
+        // （POST /cgi/api?action=OAuthRefreshToken&uin=<userId>）。不接续期的话用户
+        // 每 2 小时就得从桌面端 data.bin 重粘一次 —— 参考项目 Agent2API 早就写明
+        // 这个接口可用（2026-10-16 实测），我们之前漏了。
+        "orcaterm" if !secret.trim().is_empty() => Some(RefreshKind::Orcaterm),
         _ => None,
     }
 }
@@ -5216,6 +5255,7 @@ enum RefreshKind {
     Trae,
     Kiro,
     Qoder,
+    Orcaterm,
 }
 
 /// 按种类调各自 adapter 的续期实现，返回**可直接写回账号池**的新 secret。
@@ -5226,6 +5266,7 @@ async fn try_refresh_secret(kind: RefreshKind, secret: &str) -> Option<String> {
         RefreshKind::Trae => aigw_relay::trae::refresh_secret(&http, secret).await.ok(),
         RefreshKind::Kiro => aigw_relay::kiro::refresh_secret(&http, secret).await.ok(),
         RefreshKind::Qoder => aigw_relay::qoder::refresh_secret(&http, secret).await.ok(),
+        RefreshKind::Orcaterm => aigw_relay::orcaterm::refresh_secret(&http, secret).await.ok(),
     }
 }
 
