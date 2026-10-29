@@ -424,12 +424,10 @@ let SRC_EXPAND = null; // 展开的平台卡片 id
 //   其余（apk-*/web-*/wb-*/anon-*/kilo/pollinations + minimax + codearts）→ 客户端反代
 //     （minimax=MiniMax Code 设备码、codearts=华为云账号跳转登录+AK/SK，均非单纯 Key）
 //
-// ★ 为什么加了 ①：前缀只是**文件名习惯**，不是契约。our-free-model 的文件当时叫
-//   api-our-free-model.toml（id 不带前缀），于是它掉进了客户端接入 —— 它明明是
-//   聚合免费来源的本机网关，该在公益站。也不能改用 auth 字段判：api_key 同时被
-//   apk-accio / web-deepseek 这类真·客户端凭据源、以及免费组 60 多个公益站使用，
-//   靠它区分不了免费/付费。谁最清楚自己属于哪组，就由谁在 spec 里说；前缀推导
-//   保留给存量 toml（零改动向后兼容）。
+// ★ 为什么加了 ①：前缀只是**文件名习惯**，不是契约。只看前缀会归错组；也不能改用
+//   auth 字段判 —— api_key 同时被商业开放平台、客户端凭据源（apk-accio /
+//   web-deepseek）、以及免费组 60 多个公益站使用，靠它区分不了免费/付费。
+//   谁最清楚自己属于哪组，就由谁在 spec 里说；前缀推导保留给存量 toml（零改动向后兼容）。
 const SRC_GROUPS = ['custom', 'official', 'sub', 'client', 'free'];
 function srcGroupOf(p) {
   if (p.group && SRC_GROUPS.includes(p.group)) return p.group;

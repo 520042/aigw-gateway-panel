@@ -128,9 +128,9 @@ pub struct ProviderSpec {
     ///
     /// ★ 为什么要有这个字段：分组原来只靠前端按 id 前缀猜（`api-*` → 开放平台、
     ///   `sub-*` → 订阅反代…），于是「文件名 api- 开头、id 却不带前缀」的平台
-    ///   （our-free-model）就落进了客户端接入 —— 它明明是一个填 Key 直连的本机
-    ///   网关。反过来也不能靠 `auth` 判定：`api_key` 同时被 apk-accio、
-    ///   web-deepseek 这类真·客户端凭据源使用。
+    ///   就落进了错误的组。也不能靠 `auth` 判定：`api_key` 既被商业开放平台使用，
+    ///   也被 apk-accio / web-deepseek 这类客户端凭据源、以及免费组 60 多个
+    ///   公益站使用，区分不了免费/付费。
     ///   声明式 spec 自己说明白属于哪组，前端就不必维护一张 id 覆盖表。
     ///   空 = 仍按 id 前缀推导（向后兼容，存量 toml 不必改）。
     #[serde(default)]
@@ -440,9 +440,8 @@ stream_dialect = "sse_delta"
 
     /// group 字段：没写时为空（前端按 id 前缀推导），写了就原样带出来。
     ///
-    /// 为什么锁这条：our-free-model 的文件名是 api-*.toml、id 却不带前缀，
-    /// 前端按 id 猜分组把它放进了「客户端接入」。不能靠 auth 判（api_key 同时
-    /// 被 apk-accio / web-deepseek 这类客户端凭据源使用），只能由 spec 自报。
+    /// 为什么锁这条：只看前缀会归错组（文件名习惯不等于所属分组），而 auth 字段
+    /// 区分不了免费/付费（api_key 三类来源都在用），只能由 spec 自报。
     #[test]
     fn group_field_defaults_empty_and_round_trips() {
         let s = parse_spec(VALID).unwrap();
