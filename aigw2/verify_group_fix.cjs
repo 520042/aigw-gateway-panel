@@ -40,21 +40,41 @@ function ok(name, pass, detail) {
     return { found: true, group: parts[1] || '(?)', headText: parts.join(' | ') };
   });
   ok('our-free-model 卡片存在', grp.found === true);
-  ok('① our-free-model 归到「开放平台 API」', grp.found && grp.group.indexOf('开放平台') >= 0, grp.headText || '');
+  ok('① our-free-model 归到「公益站 · 免费车道」', grp.found && grp.group.indexOf('公益站') >= 0, grp.headText || '');
 
-  // 反向确认它不在客户端接入里
-  const notInClient = await page.evaluate(() => {
-    const secs = [...document.querySelectorAll('.srcgroup')];
-    for (const s of secs) {
+  // 反向确认它不在客户端接入、也不在开放平台
+  const notElsewhere = await page.evaluate(() => {
+    const wrong = [];
+    for (const s of document.querySelectorAll('.srcgroup')) {
       const hd = s.querySelector('.srcgroup-hd');
       const t = hd ? hd.innerText : '';
-      if (t.indexOf('客户端接入') >= 0) {
-        return !s.querySelector('.srccard[data-id="our-free-model"]');
-      }
+      if ((t.indexOf('客户端接入') >= 0 || t.indexOf('开放平台') >= 0)
+        && s.querySelector('.srccard[data-id="our-free-model"]')) wrong.push(t.split('\n')[1]);
     }
-    return true;
+    return wrong;
   });
-  ok('① our-free-model 已不在「客户端接入」', notInClient === true);
+  ok('① our-free-model 不在客户端接入/开放平台', notElsewhere.length === 0, notElsewhere.join(',') || '干净');
+
+  // ★ 两个 Our Free Model 同名不同源，必须都还在、且都在免费组：
+  //   anon-zen（直连 opencode.ai，无凭据）与本机网关（18899 聚合），不能互相顶掉。
+  const bothOfm = await page.evaluate(() => {
+    const ids = ['anon-zen', 'our-free-model'];
+    const res = {};
+    for (const id of ids) {
+      const c = document.querySelector('.srccard[data-id="' + id + '"]');
+      if (!c) { res[id] = null; continue; }
+      const sec = c.closest('.srcgroup');
+      const hd = sec ? sec.querySelector('.srcgroup-hd') : null;
+      const parts = hd ? hd.innerText.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+      res[id] = { group: parts[1] || '?', text: c.innerText.replace(/\n/g, ' ').slice(0, 80) };
+    }
+    return res;
+  });
+  ok('① anon-zen 仍在免费组', !!bothOfm['anon-zen'] && bothOfm['anon-zen'].group.indexOf('公益站') >= 0,
+    bothOfm['anon-zen'] ? bothOfm['anon-zen'].group : '缺失');
+  ok('① 两个 Our Free Model 并存（不同上游）',
+    !!bothOfm['anon-zen'] && !!bothOfm['our-free-model'],
+    'anon-zen + our-free-model');
 
   // ── ② OrcaTerm 抽屉文案 ──
   await page.evaluate(() => { SRC_EXPAND = 'apk-orcaterm'; render(); });

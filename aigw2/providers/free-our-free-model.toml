@@ -7,9 +7,14 @@ name = "Our Free Model（本机转发网关 · EAC 协付 / Kilo / 免费车道�
 enabled = true
 region = "intl"
 # ★ 显式声明分组：文件名是 api- 开头，id 却不带前缀，前端按 id 猜分组时会把它
-#   归进「客户端接入」——它其实是填 Key 直连一个本机 OpenAI 兼容网关（api_key 直连），
-#   属于「开放平台 API」。
-group = "official"
+#   归进「客户端接入」。
+#   归「公益站 · 免费车道」而不是「开放平台 API」：它 base_url 指向本机 18899 的
+#   forward 网关，聚合的是 EAC 协付 / Kilo / 免费车道这类**免费来源**；auth=api_key
+#   只是「进本机网关这道门要填 forwardKey」，不代表它是商业开放平台。
+#   注意 auth 字段区分不了免费/付费：免费组 66 个源里 60 多个都是 api_key。
+#   与 anon-zen 的区别：那个直连 opencode.ai（无凭据），这个是本机聚合网关，两个都叫
+#   「Our Free Model」但上游完全不同，别合并。
+group = "free"
 
 auth = "api_key"
 base_url = "http://127.0.0.1:18899/v1"
