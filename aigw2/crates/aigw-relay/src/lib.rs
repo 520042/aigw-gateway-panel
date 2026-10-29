@@ -75,6 +75,7 @@ pub fn has_adapter(kind: &str) -> bool {
             | "trae"
             | "coze"
             | "devin"
+            | "joycode"
     )
 }
 
@@ -3336,7 +3337,15 @@ mod tests {
         };
         let mut ds = mk("deepseek-v4");
         prepare_wb_body(&mut ds);
-        assert_eq!(ds["messages"][1]["reasoning_content"], serde_json::json!(""), "{ds}");
+        // ★ 占位值必须**非空**：GLM 系（glm/reflection/beam/ling/dots）上游按
+        //   「每条 assistant 都必须有非空 reasoning_content」校验，空串同样 400。
+        //   所以补的是 "." 而不是 ""。这个测试锁的是「deepseek 族会补、别的族不补」，
+        //   占位内容本身由 glm_family_always_backfills_nonempty 那一组负责。
+        let filled = ds["messages"][1]["reasoning_content"]
+            .as_str()
+            .expect("deepseek 族应补上 reasoning_content");
+        assert!(!filled.is_empty(), "占位不能是空串：{ds}");
+        assert_eq!(ds["messages"][0]["reasoning_content"], serde_json::json!("想过了"), "原有痕迹不能被覆盖：{ds}");
         let mut other = mk("hunyuan-4");
         prepare_wb_body(&mut other);
         assert!(

@@ -6,6 +6,9 @@
 <!-- 静态资源版本不在这里手写：服务端统一发 Cache-Control: no-cache，
      app.js 自己的 BUILD 常量才是唯一版本号（改前端只需 cargo build）。 -->
 <title>aigw v2 · 控制台</title>
+<!-- ★ 内联 SVG 图标：浏览器默认请求 /favicon.ico，没有这个文件时会落进 SPA 回退
+     返回 index.html（控制台里那条 404 就是这个），还多一次无效请求。 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231b1d22'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='%2359c8ff'%3E%E2%97%88%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>

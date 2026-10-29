@@ -503,6 +503,35 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
                 .iter()
                 .filter_map(|m| model_rates::rate_for(m).map(|r| (m.clone(), json!(r))))
                 .collect();
+            // ★ 需求 1/2/4：本源的账号明细 + 积分合计，随平台行一起下发。
+            //   凭证绝不下发 —— 只有展示字段（掩码名 / 健康 / 积分），secret 留在服务端。
+            let plat_accounts: Vec<Value> = account_rows
+                .iter()
+                .filter(|a| a.get("platform").and_then(|x| x.as_str()) == Some(s.id.as_str()))
+                .map(|a| {
+                    let id = a.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    // 积分取号池快照（签到/查额后写入），没查过就是 null
+                    let credit = st.pool.credit_of(&id);
+                    // 健康结论与 /api/accounts 同源（号池），否则卡片与账号页会说两套话
+                    let health = st.pool.health_of(&id).map(|(status, label, age)| {
+                        json!({"status": status, "label": label, "age_secs": age})
+                    });
+                    let blocked = st.pool.blocked_of(&id);
+                    json!({
+                        "id": id,
+                        "name": a.get("name").cloned().unwrap_or(json!("")),
+                        "enabled": a.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+                        "needs_relogin": a.get("needs_relogin").and_then(|x| x.as_bool()).unwrap_or(false),
+                        "health": health,
+                        "cooling_s": blocked.cooling_s.round(),
+                        "credit": credit,
+                    })
+                })
+                .collect();
+            let credit_total: f64 = plat_accounts
+                .iter()
+                .filter_map(|a| a.get("credit").and_then(|c| c.as_f64()))
+                .sum();
             json!({
                 "id": s.id, "name": s.name, "auth": s.auth,
                 "enabled": s.enabled,
@@ -518,6 +547,10 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
                 "models_policy": s.models_policy,
                 "placeholder": s.base_url.starts_with('@'),
                 "accounts_n": acct_n,
+                // ★ 需求 1/2/4：卡片显示账号数、抽屉里逐个展开、并显示积分（见上面 plat_accounts 的计算）
+                "accounts": plat_accounts,
+                // 卡片上直接显示积分合计；一个都没查过时为 null，前端显示「未查」
+                "credit_total": if credit_total > 0.0 { json!(credit_total) } else { Value::Null },
                 // ★ 登录用户信息（wb 族登完授权会自动拉到）：卡片上显示「登上的到底是谁」，
                 //   而不是只有一个「1 账号」。信息缺失时是空数组，前端据此不渲染那一行。
                 "profiles": account_rows
@@ -624,6 +657,16 @@ async fn platform_action(State(st): State<AppState>, body: Bytes) -> Response {
     };
     let action = action_of(&v);
     match action {
+        // ★ 需求3：点「刷新模型」= 用本平台账号凭据去上游问一遍清单，立刻写回缓存。
+        //   与 custom_action 的 sync_models 分开：那个只管自定义 API（custom rows），
+        //   内置源（wb / kilo / copilot 这类）没有「拿我的号去问一遍」的入口。
+        "refresh_models" => {
+            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            if id.is_empty() {
+                return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 id"}))).into_response();
+            }
+            refresh_platform_models(&st, id).await
+        }
         "toggle_platform" => {
             let id = match required_str(&v, "id") {
                 Ok(s) => s,
@@ -930,7 +973,85 @@ async fn custom_action(State(st): State<AppState>, body: Bytes) -> Response {
 }
 
 
-/// 「近 24h 平台健康」的统计窗口（/api/platforms 的 recent 字段）。
+/// 用**本平台已登录账号的凭据**去上游拉一次模型清单，写进每平台缓存并返回。
+///
+/// 为什么单独做：`sync_models` 只服务自定义 API（custom rows），内置源的清单要么来自
+/// TOML 静态表、要么靠 `/v1/models` 请求时按 TTL 被动补拉。用户点「刷新模型」时想要的是
+/// **立刻用我这个号去问一遍上游**，而不是等缓存过期。live 源（kilo/copilot 之类）的清单
+/// 本来就随账号权益变化，被动 TTL 跟不上。
+///
+/// 语义边界：
+/// - 非 live 策略的源没有清单端点（或清单来自静态表），拉也没有意义 → 明确回报而不是空跑。
+/// - 失败**不清空**旧清单（与 fetch_live_models 的 stale-on-error 一致）：刷新失败不该
+///   让用户原本能用的模型全消失。
+/// - 不发凭据细节，只回条数与成功/失败原因。
+async fn refresh_platform_models(st: &AppState, id: &str) -> Response {
+    let Some(spec) = st.all_specs().into_iter().find(|s| s.id == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "message": format!("平台 {id} 不存在")})),
+        )
+            .into_response();
+    };
+    if spec.models_policy != aigw_registry::ModelsPolicy::Live {
+        // static/none 策略：清单不来自上游接口，刷不出新东西。如实说清楚，
+        // 而不是回一个「0 个模型」让用户以为账号没权限。
+        return Json(json!({
+            "ok": false,
+            "message": format!(
+                "{} 的模型清单不来自上游接口（{} 策略），刷新只会走静态表：共 {} 个模型",
+                spec.name,
+                match spec.models_policy {
+                    aigw_registry::ModelsPolicy::Static => "static",
+                    aigw_registry::ModelsPolicy::None => "none",
+                    aigw_registry::ModelsPolicy::Live => "live",
+                },
+                spec.models.len()
+            ),
+            "models": spec.models,
+            "models_n": spec.models.len(),
+        }))
+        .into_response();
+    }
+    // 用平台自己的凭据（账号池里第一个可用账号）；anon 源传空串
+    let secret = st.platform_secret(&spec).unwrap_or_default();
+    match st.client.fetch_models_with_secret(&spec, &secret).await {
+        Ok(ids) => {
+            let n = ids.len();
+            // 写回每平台缓存：让 /v1/models 与后续 chat 立刻用上新清单，
+            // 不必等 TTL。ok=true 走长 TTL。
+            {
+                let mut g = st.models_cache_per.lock().unwrap_or_else(|e| e.into_inner());
+                g.insert(spec.id.clone(), (std::time::Instant::now(), ids.clone(), true));
+            }
+            invalidate_models_cache(st);
+            Json(json!({
+                "ok": true,
+                "id": spec.id,
+                "models": ids,
+                "models_n": n,
+                "message": format!("已刷新 {} 个模型", n),
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "ok": false,
+                "id": spec.id,
+                // 上游状态码必带：401 是「号失效」，404 是「端点变了」，
+                // 两者处理方式完全不同，笼统一句「刷新失败」等于没说。
+                "status": e.status,
+                "message": format!(
+                    "刷新失败（HTTP {}），已保留原有清单：{}",
+                    e.status,
+                    e.body.chars().take(200).collect::<String>()
+                ),
+            })),
+        )
+            .into_response(),
+    }
+}
 ///
 /// 一天是刻意的：公益站/免费车道被封、上游改反爬之后，失败会立刻集中出现，而
 /// 一周前的历史失败没有决策价值（反而会让刚恢复的平台一直挂着红标）。

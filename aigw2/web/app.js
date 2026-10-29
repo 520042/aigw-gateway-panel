@@ -5,7 +5,7 @@ window.addEventListener('error', (e) => {
   const f = document.getElementById('foot');
   if (f) { f.textContent = '⚠ JS错误: ' + String(e.message || 'unknown').slice(0, 60); f.style.color = '#f06a6a'; }
 });
-const BUILD = 'v20261028j';
+const BUILD = 'v20261028k';
 
 // 公益站聚合源状态（/api/free 的 sources + last_refresh）：只在需要时拉一次，
 // 手动刷新后置空，下次渲染重取。
@@ -615,28 +615,42 @@ function accountLabel(p) {
   return p.accounts_n + " 账号";
 }
 
-// ★ 2026-10-28（用户要求）：接入源卡片就地显示「登录的具体账号」——
-// 参考图那样的 名称 / 状态 / 总积分 / 剩余 / 积分到期，不必跳到账号页。
-// 数据源是 /api/accounts 的 acct_detail（按平台聚合，凭证不下发）。
+// ★ 2026-10-28（用户要求 1/4）：接入源卡片上就地显示「登录了几个号 / 一共多少积分」。
+//   V2 改进：卡片不再铺开每个账号（4 行会把卡片撑得很长、150 个源翻起来很难受），
+//   改成一行汇总 + 「点击查看」提示；明细全部收进抽屉（点卡片上的「N 账号」或「管理」）。
+//   数据来自 /api/platforms 平台行的 accounts / credit_total。
 function srcAcctBlock(p) {
-  const det = (ACCT_SNAPSHOT && ACCT_SNAPSHOT.acct_detail) || {};
-  const list = det[p.id] || [];
+  const list = Array.isArray(p.accounts) ? p.accounts : [];
   if (!list.length) return '';
-  // 账号名做掩码：保留前 6 位 + …，避免截图外泄完整手机号/UID
-  const maskName = (n) => {
+  const nOn = list.filter(function (a) { return a.enabled && !a.needs_relogin; }).length;
+  const bad = list.filter(function (a) { return a.needs_relogin; }).length;
+  const total = p.credit_total;
+  const fmt = function (c) { return Math.round(c).toLocaleString(); };
+  // 积分：没有快照时说「未查」而不是 0 —— 0 会被当成「这个号没钱了」
+  const creditTxt = typeof total === 'number'
+    ? '<b>' + esc(fmt(total)) + '</b> 积分'
+    : '<span class="faint">积分未查</span>';
+  return '<div class="faint" style="font-size:11.5px;margin:2px 0 4px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+    + '<span>账号 ' + nOn + (list.length > nOn ? '/' + list.length : '') + ' 个可用</span>'
+    + (bad ? '<span class="pill err">' + bad + ' 个待重登</span>' : '')
+    + '<span title="来自最近一次签到 / 查询积分的快照">' + creditTxt + '</span>'
+    + '<a href="#" style="font-size:11.5px" onclick="event.stopPropagation();SRC_EXPAND=\'' + att(p.id) + '\';render()">看明细 →</a>'
+    + '</div>';
+}
+
+// 抽屉里的账号明细：每个账号一行，可点开看「当前登录的是谁」。
+// acct_open 记住展开了哪个账号（window.__ACCT_OPEN），避免重绘丢失。
+function srcAcctList(p) {
+  const list = Array.isArray(p.accounts) ? p.accounts : [];
+  if (!list.length) return '';
+  const maskName = function (n) {
     const s = String(n || '');
     if (s.length <= 8) return s;
     return s.slice(0, 6) + '…' + s.slice(-4);
   };
-  const fmtCredit = (c) => (typeof c === 'number' ? Math.round(c).toLocaleString() : '—');
-  const expireTxt = (sec) => {
-    if (typeof sec !== 'number' || sec <= 0) return '';
-    const left = (sec * 1000 - Date.now()) / 3600000;
-    if (left <= 0) return '<span class="pill err">已到期</span>';
-    if (left <= 48) return '<span class="pill warn">剩 ' + Math.max(1, Math.round(left)) + ' 小时</span>';
-    return '<span class="faint">' + Math.round(left / 24) + ' 天后</span>';
-  };
-  const rows = list.slice(0, 4).map((a) => {
+  const fmtCredit = function (c) { return typeof c === 'number' ? Math.round(c).toLocaleString() : '—'; };
+  const openId = window.__ACCT_OPEN || '';
+  const rows = list.map(function (a) {
     const h = a.health || {};
     const st = a.needs_relogin
       ? '<span class="pill err">凭据失效</span>'
@@ -646,17 +660,47 @@ function srcAcctBlock(p) {
           ? '<span class="pill ok">正常</span>'
           : h.status
             ? '<span class="pill warn">' + esc(String(h.label || h.status).slice(0, 8)) + '</span>'
-            : '<span class="faint">—</span>';
-    const credit = a.balance_supported ? fmtCredit(a.credit) : '<span class="faint">—</span>';
-    return '<div class="row n" style="gap:8px;font-size:11.5px;padding:3px 0;border-top:1px dashed var(--line2)">'
-      + '<span class="mono" style="min-width:96px" title="' + esc(a.name) + '">' + esc(maskName(a.name)) + '</span>'
-      + '<span style="min-width:52px">' + st + '</span>'
-      + '<span style="min-width:70px" title="剩余积分">积分 <b>' + credit + '</b></span>'
-      + '<span>' + expireTxt(a.credit_expire_s) + '</span>'
-      + '</div>';
+            : '<span class="faint">未验活</span>';
+    const cooling = (a.cooling_s || 0) > 0 ? ' <span class="pill warn">冷却 ' + Math.round(a.cooling_s) + 's</span>' : '';
+    const credit = typeof a.credit === 'number' ? '<b>' + esc(fmtCredit(a.credit)) + '</b>' : '<span class="faint">未查</span>';
+    const isOpen = a.id === openId;
+    // 点行展开：显示这个账号当前的真实登录身份（来自 profile）+ 快捷操作
+    const detail = isOpen
+      ? '<div class="note" style="margin:4px 0 6px">'
+        + '<div>账号 ID：<span class="mono">' + esc(a.id) + '</span></div>'
+        + '<div>完整名称：<span class="mono">' + esc(a.name || '（未命名）') + '</span></div>'
+        + '<div>当前进度：' + (a.needs_relogin ? '凭据本机解不开，需要重登' : !a.enabled ? '已停用，不参与路由' : '正常参与路由') + '</div>'
+        + (h.label ? '<div>最近结论：' + esc(h.label) + (typeof h.age_secs === 'number' ? '（' + Math.round(h.age_secs / 60) + ' 分钟前）' : '') + '</div>' : '')
+        + '<div class="row" style="gap:6px;margin-top:6px">'
+        + '<button class="btn sm" onclick="acVerify(\'' + att(a.id) + '\',this)">检查</button>'
+        + '<button class="btn sm" onclick="acBalance(\'' + att(a.id) + '\',this)">查积分</button>'
+        + '<button class="btn sm" onclick="acToggle(\'' + att(a.id) + '\',' + (a.enabled ? 'false' : 'true') + ')">' + (a.enabled ? '停用' : '启用') + '</button>'
+        + '<button class="btn sm" onclick="acRename(\'' + att(a.id) + '\',this)">改名</button>'
+        + '<button class="btn sm" onclick="acDelete(\'' + att(a.id) + '\')">删除</button>'
+        + '</div></div>'
+      : '';
+    return '<div class="acct-row" style="border-top:1px dashed var(--line2);padding:5px 0;cursor:pointer" '
+      + 'onclick="acctOpen(\'' + att(a.id) + '\')" title="点击查看这个账号的登录信息">'
+      + '<div class="row n" style="gap:8px;font-size:12px;align-items:center">'
+      + '<span class="mono" style="min-width:110px" title="' + att(a.name) + '">'
+      + (isOpen ? '▾ ' : '▸ ') + esc(maskName(a.name)) + '</span>'
+      + '<span style="min-width:56px">' + st + '</span>'
+      + '<span style="min-width:76px">积分 ' + credit + '</span>'
+      + '<span>' + cooling + '</span>'
+      + '</div>' + detail + '</div>';
   }).join('');
-  const more = list.length > 4 ? '<div class="faint" style="font-size:11px;padding-top:2px">…另有 ' + (list.length - 4) + ' 个账号</div>' : '';
-  return '<div style="margin-top:6px">' + rows + more + '</div>';
+  const total = typeof p.credit_total === 'number' ? p.credit_total : null;
+  const head = '<div class="faint" style="font-size:11.5px;margin-bottom:2px">'
+    + '共 ' + list.length + ' 个账号'
+    + (total !== null ? ' · 积分合计 <b>' + esc(fmtCredit(total)) + '</b>' : ' · 积分未查询')
+    + '（点账号展开登录信息与操作）</div>';
+  return head + rows;
+}
+
+// 账号行展开/收起（抽屉内，局部重绘整页即可 —— 抽屉会按 SRC_EXPAND 重建）
+function acctOpen(id) {
+  window.__ACCT_OPEN = window.__ACCT_OPEN === id ? '' : id;
+  render();
 }
 
 // 登录用户明细行：用户名 / 邮箱 / 套餐。信息缺失时整行不渲染（不占位）。
@@ -709,8 +753,7 @@ function srcCard(p) {
       ${p.custom ? pill('ok', '自定义') : p.id.startsWith('sub-') ? pill('mut', '订阅') : p.id.startsWith('free-') ? pill('mut', '公益') : pill('mut', authTxt)}
       ${p.region === 'cn' ? pill('mut', '国内') : p.region === 'intl' ? pill('mut', '国际') : ''}
       ${qrPill(p)}
-      ${disabled ? pill('mut', '已停用') : configured ? pill('ok', p.custom ? '已配置' : p.anon ? '免凭据' : accountLabel(p)) : pill('mut', '未接入')}
-      ${unusablePill(p, disabled, usable, configured)}
+      ${disabled ? pill('mut', '已停用') : configured ? pill('ok', p.custom ? '已配置' : p.anon ? '免凭据' : accountLabel(p)) : pill('mut', '未接入')}      ${unusablePill(p, disabled, usable, configured)}
       ${p.chat_supported === false && usable ? pill('mut', '仅验活·不可对话') : ''}
       ${recentHealthPill(p)}
       ${modelCountPill(p)}
@@ -872,6 +915,20 @@ function srcModelsBlock(p) {
         oninput="setModelFilter('${att(p.id)}', this.value)" style="margin:4px 0 6px">`
     : '';
   return `${pinnedNote}${note}${search}<div class="mlist" id="ml-${esc(p.id)}">${list}</div>`;
+}
+
+// ★ 需求3：点「刷新模型」= 用本平台账号凭据去上游拉一次清单。
+// 后端 refresh_models：live 源真拉上游并写回缓存；static/none 源没有清单端点，
+// 如实回报「不来自上游接口」而不是假装成功。
+async function srcRefreshModels(id, btn) {
+  const t = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '刷新中…'; }
+  const r = await post('/api/platforms', { action: 'refresh_models', id })
+    .catch((e) => ({ ok: false, message: e.message }));
+  if (btn) { btn.disabled = false; btn.textContent = t || '刷新模型'; }
+  if (!r || !r.ok) { alert('刷新失败：' + ((r && r.message) || '未知错误')); return; }
+  alert(r.message || ('已刷新 ' + (r.models_n || 0) + ' 个模型'));
+  srcRerender();
 }
 
 // 恢复跟随上游：重新拉上游全量清单并解除固定。
@@ -1319,9 +1376,12 @@ function srcDrawer(p) {
     `${esc(p.name)}<span class="faint mono"> ${esc(p.id)}</span>`,
     `
     <div class="modal-bd">
-      ${p.accounts_n > 0 ? `<div class="note oknote">已接入 ${p.accounts_n} 个账号（账号页可查看掩码 / 停用 / 删除）</div>` : ''}
+      ${Array.isArray(p.accounts) && p.accounts.length ? `<div class="srcsec"><div class="srcsec-h">已登录账号</div>${srcAcctList(p)}</div>` : ''}
       ${unusableBanner(p)}
-      ${srcModelsBlock(p)}
+      <div class="srcsec"><div class="srcsec-h">模型清单${p.models_n ? '（' + p.models_n + ' 个）' : ''}
+        <button class="btn sm" style="margin-left:8px" onclick="srcRefreshModels('${att(p.id)}', this)"
+          title="用本平台已登录账号的凭据去上游问一遍，立刻刷新清单（不必等缓存过期）">刷新模型</button>
+      </div>${srcModelsBlock(p)}</div>
       ${body}
     </div>
 `,
