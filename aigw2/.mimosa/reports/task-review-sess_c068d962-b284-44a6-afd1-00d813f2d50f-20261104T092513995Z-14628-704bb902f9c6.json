@@ -1,0 +1,307 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20261104T092513995Z-14628-704bb902f9c6",
+  "run_status": "inconclusive",
+  "errors": [
+    {
+      "stage": "scan",
+      "target": ".auto/measure.sh",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": ".auto/checks.sh",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "crates/aigw-server/src/lib.rs",
+      "reason": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+    },
+    {
+      "stage": "supply-chain-check",
+      "target": ".",
+      "reason": "stop_budget_exhausted: focused supply-chain check was not run before the gate budget"
+    }
+  ],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "partial",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 98,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 6
+    },
+    "change_tracking": {
+      "touched_observed": 4,
+      "touched_retained": 4,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 6,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 6,
+      "selected_files": 6,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 3,
+      "scanned_files": 0,
+      "skipped_files": 0,
+      "failed_files": 3,
+      "project_checks_required": 1,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {
+      "scanner_failed": 3,
+      "stop_budget_exhausted": 1,
+      "project_check_failed": 4
+    },
+    "reasons": [
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": ".auto/measure.sh",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": ".auto/checks.sh",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "crates/aigw-server/src/lib.rs",
+        "detail": "spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "stop_budget_exhausted",
+        "stage": "supply-chain-check",
+        "target": ".",
+        "detail": "focused supply-chain check was not run before the gate budget",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": ".auto/measure.sh",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": ".auto/checks.sh",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "crates/aigw-server/src/lib.rs",
+        "detail": "scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "supply-chain-check",
+        "target": ".",
+        "detail": "stop_budget_exhausted: focused supply-chain check was not run before the gate budget",
+        "affects_completion": true
+      }
+    ],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-11-04T09:25:13.995Z",
+  "session_id": "sess_c068d962-b284-44a6-afd1-00d813f2d50f",
+  "target": ".",
+  "revision": "faa414b24cc2747a58b75fd558420b263f1da13a",
+  "rules_version": "unavailable",
+  "diff_hash": "b5393ecc6cc8fc583eac49dfca4714c0a45e21820059d8c5ab5b86ce2a5ebd71",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 5,
+    "changed_files": [
+      {
+        "file": ".auto/checks.sh",
+        "ranges": [
+          {
+            "start": 2,
+            "end": 3
+          },
+          {
+            "start": 8,
+            "end": 14
+          },
+          {
+            "start": 17,
+            "end": 25
+          },
+          {
+            "start": 28,
+            "end": 31
+          },
+          {
+            "start": 35,
+            "end": 36
+          },
+          {
+            "start": 38,
+            "end": 74
+          },
+          {
+            "start": 77,
+            "end": 77
+          }
+        ],
+        "before_hash": "68b0e7a521f27e4914327e092e0da32fbca85be0b7b93e84901b83b1bab7eb3d",
+        "after_hash": "acd7567390422967f8f3015ae30ee06c2a5f910d0975f04f0a42e6d2b0f36112"
+      },
+      {
+        "file": ".auto/measure.sh",
+        "ranges": [
+          {
+            "start": 2,
+            "end": 10
+          },
+          {
+            "start": 15,
+            "end": 17
+          },
+          {
+            "start": 20,
+            "end": 20
+          },
+          {
+            "start": 25,
+            "end": 27
+          },
+          {
+            "start": 30,
+            "end": 52
+          }
+        ],
+        "before_hash": "3864c1e11c312f7e04c7512526672579c29a3db971ca6e9a04c31370c10d8a78",
+        "after_hash": "ac4a494fae27959869ebb12d5b7248850fa40f1e4df4af85a762bc6a22b18a27"
+      },
+      {
+        "file": "Cargo.lock",
+        "ranges": [
+          {
+            "start": 172,
+            "end": 172
+          }
+        ],
+        "before_hash": "43755cb341f4f3ff71032a26157cdf2bc5b7d2fada2433c13e9f73b6b5ef1e3f",
+        "after_hash": "c2b289ee8723febfc64d20adce4b5bea75b980c986d0b135ddcabb41f065313c"
+      },
+      {
+        "file": "crates/aigw-server/Cargo.toml",
+        "ranges": [
+          {
+            "start": 22,
+            "end": 24
+          }
+        ],
+        "before_hash": "f34e1049f54b36dcb2b9525f1e122a48df03827c784523f9a9aaeaec6bcf0b88",
+        "after_hash": "0314d9cab9c7de73b97bbbf0521091039b4b7fba2cc2c01b90c8fe05fd5eefa9"
+      },
+      {
+        "file": "crates/aigw-server/src/lib.rs",
+        "ranges": [
+          {
+            "start": 350,
+            "end": 350
+          },
+          {
+            "start": 417,
+            "end": 438
+          },
+          {
+            "start": 483,
+            "end": 510
+          },
+          {
+            "start": 522,
+            "end": 522
+          },
+          {
+            "start": 10576,
+            "end": 10650
+          }
+        ],
+        "before_hash": "f8515b0e6ead0e8a507d453b789c1aa3189f59130a07294d8c79da97e2b37a86",
+        "after_hash": "524b5716789f042b8873e416792fe12bec659d5a92dce38fe86b124b8bf4844a"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-11-04T09:25:11.253Z",
+    "completed_at": "2026-11-04T09:25:13.995Z",
+    "duration_ms": 2742,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "partial/INCONCLUSIVE",
+    "latencyMs": 2742,
+    "peakMemoryBytes": 124129280,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 0,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_c068d962-b284-44a6-afd1-00d813f2d50f-20261104T092513995Z-14628-704bb902f9c6.json",
+    "latest_report": ".mimosa/reports/task-review-sess_c068d962-b284-44a6-afd1-00d813f2d50f.json",
+    "history_summary": ".mimosa/history/run-20261104T092513995Z-14628-704bb902f9c6.json"
+  }
+}

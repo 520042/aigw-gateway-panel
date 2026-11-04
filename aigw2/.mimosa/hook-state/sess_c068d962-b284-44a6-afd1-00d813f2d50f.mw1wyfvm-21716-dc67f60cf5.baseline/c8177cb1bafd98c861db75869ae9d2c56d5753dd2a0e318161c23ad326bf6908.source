@@ -347,7 +347,7 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
     next.run(req).await
 }
 pub fn build_app(st: AppState) -> Router {
-    Router::new()
+    let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/usage", get(usage))
         .route("/api/requests", get(requests))
@@ -414,8 +414,28 @@ pub fn build_app(st: AppState) -> Router {
         )
         // 请求体上限（全局）：旧实现只给 /v1/chat/completions 设了 32MB，
         // /api/* 走 axum 默认 2MB —— 用「⬆ 恢复备份」贴一个几 MB 的备份包直接 413（且是纯文本非 JSON）。
-        .layer(DefaultBodyLimit::max(MAX_CHAT_BODY))
-        .fallback(web_file)
+        .layer(DefaultBodyLimit::max(MAX_CHAT_BODY));
+
+    // ★ 响应压缩（gzip / br）：**只在可能被远程访问时**启用。
+    //
+    //   收益是真的：`/api/platforms` 实测 166KB JSON → gzip 27KB（-83.7%）。
+    //   这个接口面板「接入源」页每次打开都要拉，是首屏最大的单笔传输。
+    //
+    //   ★ 但它在本机回环上是**净亏**：本地传输几乎零成本，而压缩 166KB 的 CPU
+    //   开销是实打实的。实测（loopback，3 轮 × 30 样本）：
+    //       无压缩 23.6~25.2ms   gzip 31.9~33.7ms   慢 7.4~10.1ms
+    //   而本项目的主场景恰恰是「本机面板」—— 无条件开启等于给绝大多数用户加延迟。
+    //
+    //   ⇒ 判据用 `allow_any_ip_host`：它为 true 意味着监听的是 `0.0.0.0`/`::`
+    //   （服务器部署，可能被局域网/公网访问），那才值得用 CPU 换带宽。
+    //   本机监听时完全不挂载这一层，省掉压缩开销也省掉一次中间件调用。
+    let app = if *st.allow_any_ip_host {
+        app.layer(tower_http::compression::CompressionLayer::new())
+    } else {
+        app
+    };
+
+    app.fallback(web_file)
         // 门禁层：Host/Origin 白名单 + /api/* 令牌（见 `guard`）
         .layer(middleware::from_fn_with_state(st.clone(), guard))
         .with_state(st)
@@ -460,7 +480,34 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
         .and_then(|r| r.as_array())
         .cloned()
         .unwrap_or_default();
-    let rows: Vec<Value> = specs
+    // ★ 每个平台的「可用账号数」在这里一次性聚合出来，不再在 205 个平台的循环里
+    //   逐平台调 `secrets_for()`。
+    //
+    //   旧写法是循环里 `st.accounts.secrets_for(&s.id).len()`，代价有三层：
+    //     1. 每次都要 `lock()` 整张账号表 —— 205 次加锁；
+    //     2. 锁内线性扫全表 —— O(平台数 × 账号数)；
+    //     3. 命中的账号会把 **secret 明文 clone 出来**（`a.secret.clone()`），
+    //        而我们只要一个计数，克隆完立刻丢弃。
+    //   账号一多，这三点都会恶化；面板每刷新一次就把全部凭据明文在内存里搬一遍。
+    //
+    //   口径与 `secrets_for` 严格对齐：`platform == id && enabled && !unreadable`。
+    //   `rows_snapshot` 里 `unreadable` 对应字段名是 `needs_relogin`（同一件事，
+    //   见 accounts.rs 的 rows_snapshot：`"needs_relogin": a.unreadable`）。
+    let mut secret_n_by_platform: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for a in account_rows.iter() {
+        let Some(plat) = a.get("platform").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let enabled = a.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+        let unreadable = a
+            .get("needs_relogin")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        if enabled && !unreadable {
+            *secret_n_by_platform.entry(plat).or_insert(0) += 1;
+        }
+    }    let rows: Vec<Value> = specs
         .iter()
         .map(|s| {
             // 免密车道（auth=anon：kilo / pollinations / anon-zen）不需要账号：
@@ -472,7 +519,7 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
             let acct_n = if is_anon {
                 0
             } else {
-                st.accounts.secrets_for(&s.id).len()
+                secret_n_by_platform.get(s.id.as_str()).copied().unwrap_or(0)
             };
             let is_custom = s.id.starts_with("custom-");
             // Key 掩码按字符切：`&key[..4]` 是字节切片，Key 里出现非 ASCII
@@ -10524,6 +10571,81 @@ stream_dialect = "sse_delta"
         invalidate_models_cache(&st);
         assert!(st.models_cache.lock().unwrap().is_none(), "整表缓存未清");
         assert!(st.models_cache_per.lock().unwrap().is_empty(), "每平台缓存未清");
+    }
+
+    /// `accounts_n` 的口径必须与 `secrets_for()` 一致。
+    ///
+    /// 为了性能，`/api/platforms` 已改成在**一次**遍历里聚合各平台的可用账号数
+    /// （旧实现是循环里逐平台调 `secrets_for().len()`：205 次加锁 + 205 次全表扫描
+    /// + 每次把 secret 明文克隆出来只为取个长度）。
+    ///
+    /// 优化可以改实现，但**不能改口径**：停用的账号不算、anon 车道恒报 0。
+    /// 这条测试把这两件事钉在一起，防止聚合逻辑与 `secrets_for` 悄悄漂移。
+    #[tokio::test]
+    async fn platforms_api_account_count_matches_secrets_for() {
+        let spec = spec_toml(
+            r#"
+id = "acct-plat"
+name = "AcctPlat"
+enabled = true
+region = "cn"
+auth = "api_key"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["m1"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let anon_spec = spec_toml(
+            r#"
+id = "anon-plat"
+name = "AnonPlat"
+enabled = true
+region = "cn"
+auth = "anon"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["m1"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let st = state(vec![spec, anon_spec]);
+        // 建两条账号，其中一条停用。
+        // ★ 不直接依赖返回的 id：`add_account` 用纳秒时间戳当 id，同一测试里连续
+        //   调用偶尔会撞值；按 name 从快照里找回 id 更稳。
+        let _ = st.accounts.add_account("acct-plat", "可用号", "cookie", "secret-a");
+        let _ = st.accounts.add_account("acct-plat", "停用号", "cookie", "secret-b");
+        let off_id = st.accounts.rows_snapshot()["rows"]
+            .as_array()
+            .and_then(|rs| {
+                rs.iter()
+                    .find(|r| r["name"].as_str() == Some("停用号"))
+                    .and_then(|r| r["id"].as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or_default();
+        assert!(!off_id.is_empty(), "应能按名字找到「停用号」");
+        assert!(st.accounts.set_enabled(&off_id, false), "停用应成功");
+
+        // 口径基准：以 secrets_for 的结论为准（它才是中继实际看到的可用凭据数）
+        let expected = st.accounts.secrets_for("acct-plat").len();
+        assert_eq!(expected, 1, "前提：停用之后 secrets_for 应只算 1 条");
+
+        let app = build_app(st);
+        let res = app.oneshot(req("/api/platforms")).await.unwrap();
+        let body = body_string(res).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let rows = v["rows"].as_array().unwrap();
+        let plat = rows.iter().find(|r| r["id"] == "acct-plat").expect("acct-plat row");
+        assert_eq!(
+            plat["accounts_n"], expected,
+            "accounts_n 与 secrets_for 口径不一致：row={plat}"
+        );
+        // anon 车道恒报 0（免凭据，不该显示「1 账号」）
+        let anon = rows.iter().find(|r| r["id"] == "anon-plat").expect("anon-plat row");
+        assert_eq!(anon["accounts_n"], 0, "anon 平台必须恒报 0：row={anon}");
+        assert_eq!(anon["anon"], true, "anon 标记要下发");
     }
 
     #[tokio::test]

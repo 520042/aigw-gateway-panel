@@ -6333,7 +6333,7 @@ fn usage_or_estimate(v: &Value, in_bytes: usize) -> (i64, i64) {
     (tin, tout)
 }
 
-async fn web_file(uri: Uri) -> Response {
+async fn web_file(uri: Uri, headers: axum::http::HeaderMap) -> Response {
     // 未知的 /api/* 与 /v1/* 必须是 404 JSON，不能 SPA 回退成 index.html：
     // 旧实现让 /v1/embeddings 拿到 HTTP 200 + HTML，SDK 报「unexpected token <」
     // 而不是「该端点不支持」，误导性极强；前端也会把 HTML 当 JSON 解析。
@@ -6356,11 +6356,36 @@ async fn web_file(uri: Uri) -> Response {
     match Web::get(path) {
         Some(f) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
+            // ★ ETag：内嵌资源的字节是**编译期固定的**，同一个二进制里内容永不变，
+            //   所以拿内容哈希当强校验器是安全的。
+            //
+            //   为什么需要：`Cache-Control: no-cache` 只表示「用前必须向服务端确认」，
+            //   但**没有 ETag 时服务端无从确认**，只能整包重发 264KB 的 app.js。
+            //   实测旧行为：带 If-None-Match 也照样回 200 + 264056 字节，等于每次
+            //   刷新都全量下载。加上 ETag 后稳态只需回一个 304（几十字节）。
+            let etag = format!("\"{:016x}\"", sesskey::fnv1a(&f.data));
+            // 客户端带着同一个 ETag 回来 → 304，不重传正文。
+            if let Some(inm) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+                // 允许多值（"a", "b"）与 W/ 弱校验前缀，按标准做宽松比对。
+                if inm.split(',').any(|t| t.trim().trim_start_matches("W/") == etag) {
+                    return (
+                        StatusCode::NOT_MODIFIED,
+                        [
+                            (header::ETAG, etag),
+                            // 304 也要带上缓存语义，否则浏览器不知道还能继续用本地副本
+                            (header::CACHE_CONTROL, "no-cache".to_string()),
+                        ],
+                    )
+                        .into_response();
+                }
+            }
             (
                 [
                     (header::CONTENT_TYPE, mime.as_ref().to_string()),
-                    // 前端迭代期禁强缓存：浏览器每次向服务端校验，避免旧 JS 卡死交互
+                    // 前端迭代期禁强缓存：浏览器每次向服务端校验（现在有 ETag，
+                    // 校验命中就是 304，不必重传），避免旧 JS 卡死交互
                     (header::CACHE_CONTROL, "no-cache".to_string()),
+                    (header::ETAG, etag),
                 ],
                 f.data.to_vec(),
             )
