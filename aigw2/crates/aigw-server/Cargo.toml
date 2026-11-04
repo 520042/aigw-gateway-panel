@@ -19,6 +19,9 @@ tracing = { workspace = true }
 futures-util = { workspace = true }
 rand = { workspace = true }
 base64 = "0.22"
+# 响应压缩。/api/platforms 实测 166KB 未压缩 JSON，gzip 后约 20KB ——
+# 面板首屏与「接入源」页的主要传输成本都在这里。
+tower-http = { version = "0.6", features = ["compression-gzip", "compression-br"] }
 
 [dev-dependencies]
 tower = { workspace = true }

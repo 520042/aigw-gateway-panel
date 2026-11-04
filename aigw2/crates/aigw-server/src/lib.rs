@@ -347,7 +347,7 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
     next.run(req).await
 }
 pub fn build_app(st: AppState) -> Router {
-    Router::new()
+    let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/usage", get(usage))
         .route("/api/requests", get(requests))
@@ -414,8 +414,28 @@ pub fn build_app(st: AppState) -> Router {
         )
         // 请求体上限（全局）：旧实现只给 /v1/chat/completions 设了 32MB，
         // /api/* 走 axum 默认 2MB —— 用「⬆ 恢复备份」贴一个几 MB 的备份包直接 413（且是纯文本非 JSON）。
-        .layer(DefaultBodyLimit::max(MAX_CHAT_BODY))
-        .fallback(web_file)
+        .layer(DefaultBodyLimit::max(MAX_CHAT_BODY));
+
+    // ★ 响应压缩（gzip / br）：**只在可能被远程访问时**启用。
+    //
+    //   收益是真的：`/api/platforms` 实测 166KB JSON → gzip 27KB（-83.7%）。
+    //   这个接口面板「接入源」页每次打开都要拉，是首屏最大的单笔传输。
+    //
+    //   ★ 但它在本机回环上是**净亏**：本地传输几乎零成本，而压缩 166KB 的 CPU
+    //   开销是实打实的。实测（loopback，3 轮 × 30 样本）：
+    //       无压缩 23.6~25.2ms   gzip 31.9~33.7ms   慢 7.4~10.1ms
+    //   而本项目的主场景恰恰是「本机面板」—— 无条件开启等于给绝大多数用户加延迟。
+    //
+    //   ⇒ 判据用 `allow_any_ip_host`：它为 true 意味着监听的是 `0.0.0.0`/`::`
+    //   （服务器部署，可能被局域网/公网访问），那才值得用 CPU 换带宽。
+    //   本机监听时完全不挂载这一层，省掉压缩开销也省掉一次中间件调用。
+    let app = if *st.allow_any_ip_host {
+        app.layer(tower_http::compression::CompressionLayer::new())
+    } else {
+        app
+    };
+
+    app.fallback(web_file)
         // 门禁层：Host/Origin 白名单 + /api/* 令牌（见 `guard`）
         .layer(middleware::from_fn_with_state(st.clone(), guard))
         .with_state(st)
