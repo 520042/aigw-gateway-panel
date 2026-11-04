@@ -1,6 +1,15 @@
-# 固定 msvc 工具链（本机 rustup default 是 windows-gnu）。
-# 原因：windows-sys 0.61+ 的 raw-dylib 在 gnu 工具链上要调 dlltool.exe（本机无），
-#       msvc 工具链由 rustc 自生成 import lib + VS link.exe 链接，无此依赖。
-# 2026-10-16 M0 构建踩坑沉淀，勿删。
+# 只锁「stable 渠道」，**不锁目标三元组**。
+#
+# ★ 旧版本这里写的是 channel = "stable-x86_64-pc-windows-msvc"，
+#   在 Windows 上恰好能跑（目标 == 宿主），但在 Linux/macOS 上 rustup 会直接
+#   报 `error: target tuple in channel name 'stable-x86_64-pc-windows-msvc'`
+#   ——所有 cargo 命令（含 cargo check/test）连启动都做不到。
+#   一个只写了「Windows 目标」的 toolchain 文件，等于把项目锁死在 Windows。
+#
+# ★ Windows 上仍推荐 msvc（windows-sys 0.61+ 的 raw-dylib 在 gnu 工具链上
+#   要调 dlltool.exe）：
+#     rustup override set stable-x86_64-pc-windows-msvc
+#   或直接用 `aigw2/build-deploy.ps1`（它显式传 +stable-x86_64-pc-windows-msvc）。
+#   Linux/macOS 无需任何额外设置，宿主即目标。
 [toolchain]
-channel = "stable-x86_64-pc-windows-msvc"
+channel = "stable"

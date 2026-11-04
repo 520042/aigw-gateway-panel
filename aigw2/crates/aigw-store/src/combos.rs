@@ -45,7 +45,7 @@ pub struct Combo {
     /// round-robin 游标连续粘住几轮。
     #[serde(default = "default_sticky")]
     pub sticky_limit: u32,
-    #[serde(default = "default_true")]
+    #[serde(default = "aigw_core::default_true")]
     pub enabled: bool,
 }
 
@@ -55,10 +55,6 @@ fn default_strategy() -> String {
 fn default_sticky() -> u32 {
     1
 }
-fn default_true() -> bool {
-    true
-}
-
 /// `My Fast Chain` -> `combo:my-fast-chain`。
 ///
 /// 非拉丁名（中文）也要有稳定且 URL 安全的身份：slug 为空或含非 ASCII 时，
@@ -229,6 +225,30 @@ impl ComboStore {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// 按**名字**找链的 id，仅当这个名字唯一时返回。
+    ///
+    /// ★ 为什么需要：链的 id 是自动生成的不透明串（`combo:u-<hash>`），用户建了条
+    ///   叫「快速回退」的链之后，想按名字调用会得到 404「未知模型 快速回退」。
+    ///   记不住哈希不是用户的错。
+    ///
+    /// ★ 为什么重名时返回 None 而不是「取第一条」：静默选中其中一条会让人以为
+    ///   改的那条生效了。宁可 404 并让用户明确用 id，也不做不可预期的选择。
+    pub fn id_by_unique_name(&self, name: &str) -> Option<String> {
+        let name = name.trim();
+        if name.is_empty() || name.starts_with(COMBO_PREFIX) {
+            return None;
+        }
+        let mut hit: Option<String> = None;
+        for c in self.rows() {
+            if c.name == name {
+                if hit.is_some() {
+                    return None; // 重名：不猜
+                }
+                hit = Some(c.id.clone());
+            }
+        }
+        hit
+    }
     pub fn get(&self, id: &str) -> Option<Combo> {
         self.inner
             .lock()
@@ -386,6 +406,44 @@ impl ComboStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 链名要能直接当模型名用（id 是不透明哈希，用户记不住）。
+    #[test]
+    fn id_by_unique_name_matches_exactly_one() {
+        let st = ComboStore::empty();
+        let a = st
+            .add("快速回退", vec!["m1".into()], "fallback", 1)
+            .expect("add a");
+        assert_eq!(
+            st.id_by_unique_name("快速回退").as_deref(),
+            Some(a.id.as_str()),
+            "唯一名字应能查到 id"
+        );
+        // 前后空白要容忍（用户从面板复制过来常带空格）
+        assert_eq!(
+            st.id_by_unique_name("  快速回退 ").as_deref(),
+            Some(a.id.as_str())
+        );
+        // 不存在的名字
+        assert_eq!(st.id_by_unique_name("没有这条"), None);
+        // 空串 / 已是 combo: 前缀 → 不处理（交给原来的 id 路径）
+        assert_eq!(st.id_by_unique_name(""), None);
+        assert_eq!(st.id_by_unique_name("combo:x"), None);
+    }
+
+    /// 重名在**创建时**就被拒绝了（add 返回 Err），所以正常路径下 id_by_unique_name
+    /// 不会遇到两条同名 —— 但它仍对「历史数据里已有重名」保留防御：返回 None 不猜。
+    #[test]
+    fn duplicate_combo_name_is_rejected_at_add() {
+        let st = ComboStore::empty();
+        st.add("同名", vec!["m1".into()], "fallback", 1).expect("a");
+        let err = st
+            .add("同名", vec!["m2".into()], "fallback", 1)
+            .expect_err("同名必须被拒绝，否则第二条会静默覆盖第一条");
+        assert!(err.contains("同名") || err.contains("已存在"), "err={err}");
+        // 名字仍能唯一定位到第一条
+        assert!(st.id_by_unique_name("同名").is_some());
+    }
 
     #[test]
     fn combo_id_is_stable_and_url_safe() {

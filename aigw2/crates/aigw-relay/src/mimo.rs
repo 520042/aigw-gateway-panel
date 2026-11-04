@@ -9,6 +9,7 @@
 //! 凭据是浏览器的三个 Cookie：serviceToken / userId / xiaomichatbot_ph。
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er, secs, uuid_like};
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
 use bytes::Bytes;
@@ -20,34 +21,8 @@ pub const MIMO_BASE: &str = "https://aistudio.xiaomimimo.com";
 const MIMO_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
 
-fn er(status: u16, body: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError { status, body: body.into(), class }
-}
 
-fn secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
-fn uuid_like() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let mut b = [0u8; 16];
-    rng.fill(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: Vec<String> = b.iter().map(|x| format!("{:02x}", x)).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        h[0..4].concat(),
-        h[4..6].concat(),
-        h[6..8].concat(),
-        h[8..10].concat(),
-        h[10..16].concat()
-    )
-}
 
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
@@ -980,7 +955,10 @@ event: usage\ndata: {\"usage\":{\"promptTokens\":3,\"completionTokens\":2}}\n\n"
             hosts: vec![],
             login_url: String::new(),
             notes: String::new(),
+            group: String::new(),
             chat_supported: true,
+            verify_chat: false,
+            domain: String::new(),
             region: "global".into(),
         }
     }

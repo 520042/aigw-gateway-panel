@@ -10,8 +10,16 @@ base_url = "https://router.huggingface.co/v1"
 format = "openai"
 
 # 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+# ★ 2026-10-26 经代理复检后重写：原表 1 个模型上游已下架（Qwen/Qwen3-Coder-480B-A35B-Instruct:fastest）。
 models = [
-    "Qwen/Qwen3-Coder-480B-A35B-Instruct:fastest",
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "MiniMaxAI/MiniMax-M3.1-Flash",
+    "Qwen/Qwen3.8-27B",
+    "meta-models/Muse-Spark-Open-816B-A42B",
+    "reflection/Beam-1.0-501B-A23B",
+    "deepseek-ai/DeepSeek-V4.1-Flash",
+    "zai-org/GLM-5.3-Flash",
+    "meta-llama/Llama-3.1-8B-Instruct",
 ]
 models_policy = "live"
 stream_dialect = "sse_delta"

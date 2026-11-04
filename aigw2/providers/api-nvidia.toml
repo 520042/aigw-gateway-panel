@@ -10,15 +10,18 @@ base_url = "https://integrate.api.nvidia.com/v1"
 format = "openai"
 
 # 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+# ★ 2026-10-26 按上游实测重写：原来那 8 个里有 5 个已下架（glm-5.2 / deepseek-v4-pro /
+#   deepseek-v4-flash / minimax-m2.7 / minimax-m3），用户从兜底表选到就是 404。
+#   现按 GET https://integrate.api.nvidia.com/v1/models 的当前清单选取。
 models = [
-    "minimaxai/minimax-m2.7",
-    "minimaxai/minimax-m3",
-    "z-ai/glm-5.2",
-    "deepseek-ai/deepseek-v4-pro",
-    "deepseek-ai/deepseek-v4-flash",
+    "deepseek-ai/deepseek-v4.1-flash",
+    "z-ai/glm-5.3",
+    "z-ai/glm-5.3-flash",
+    "minimaxai/minimax-m3.1-flash",
     "moonshotai/kimi-k2.6",
     "nvidia/nemotron-3-ultra-550b-a55b",
     "nvidia/nemotron-3-super-120b-a12b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
 ]
 models_policy = "live"
 stream_dialect = "sse_delta"

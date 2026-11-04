@@ -6,7 +6,14 @@ enabled = true
 region = "intl"
 
 auth = "api_key"
-base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+# ★ base_url 取**域名根**、两条路径分别写全：
+#   Gemini 的 OpenAI 兼容层（/v1beta/openai）**没有** models 端点 —— 实测那里 404，
+#   而原生 /v1beta/models 是 403（需要 Key，即存在）。
+#   base_url 与路径是直接拼接（format!("{base}{path}")），没法在 base_url 带
+#   /v1beta/openai 的同时让清单走 /v1beta/models，所以这里把 base_url 收成域名根。
+base_url = "https://generativelanguage.googleapis.com"
+chat_path = "/v1beta/openai/chat/completions"
+models_path = "/v1beta/models"
 format = "openai"
 
 # 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）

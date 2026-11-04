@@ -9,13 +9,16 @@ auth = "api_key"
 base_url = "https://api.voyageai.com/v1"
 format = "openai"
 
-# 未找到稳定的公开模型清单，留空避免臆造（models_policy=live 时以实时 /models 为准）
+# ★ models_policy = "none"：本 API **没有清单端点**（实测 /v1/models、/models、
+#   /v1/embeddings/models 全 404），只有 /v1/embeddings。用 none 而不是 live，
+#   体检就不会一直去拉一个必然 404 的地址、也不会在报告里挂一条假 FAIL。
+#   要用它的嵌入模型时写 `voyage-3@api-voyageai`（none 策略靠后缀路由）。
 models = []
-models_policy = "live"
+models_policy = "none"
 stream_dialect = "sse_delta"
 
 chat_supported = false
 
 login_url = "https://dashboard.voyageai.com/organization/api-keys"
 
-notes = "Voyage 官方嵌入 / 重排模型；chat 端点不可用，仅供 /v1/embeddings。"
+notes = "Voyage 官方嵌入 / 重排模型；chat 端点不可用，仅供 /v1/embeddings。\n★ 该 API 没有 /models 端点（已实测三个候选路径全 404），因此 models_policy=none：模型靠 `模型名@api-voyageai` 后缀指定。"

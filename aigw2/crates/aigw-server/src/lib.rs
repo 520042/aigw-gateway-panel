@@ -47,7 +47,7 @@ pub mod backup;
 pub mod gongyi;
 pub mod errresp;
 pub mod errlog;
-pub mod sesskey;
+pub(crate) mod sesskey;
 pub mod tasks;
 pub mod streamhead;
 pub mod truncated;
@@ -87,7 +87,7 @@ pub(crate) use errresp::{
 pub(crate) use errlog::{note_stream_outcome, LastErrors, LAST_ERR_MAX_CHARS};
 pub use errlog::VERIFY_FAIL_MSG;
 #[allow(unused_imports)]
-pub(crate) use sesskey::{key_id, session_key};
+pub(crate) use sesskey::{fnv1a, key_id, session_key};
 #[allow(unused_imports)]
 pub use tasks::{supervise_loop_now, TaskStat};
 pub use tasks::{supervise_loop, TaskHealth};
@@ -383,6 +383,10 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/backup/export", post(backup_export_full))
         .route("/api/update-check", get(update_check))
         .route("/v1/models", get(models))
+        // 额度摘要（只读，与 /v1/models 同一套 key 鉴权）：
+        // 让第三方客户端能先问「还有多少额度」再决定跑不跑批。
+        .route("/v1/credits", get(credits))
+        .route("/credits", get(credits))
         // 请求体上限：axum 默认 2MB，长上下文（贴代码/长文档）会被直接 413。
         // Python 版是 32MB，这里对齐；超限由 chat_completions 包成 OpenAI 错误信封。
         .route(
@@ -456,7 +460,34 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
         .and_then(|r| r.as_array())
         .cloned()
         .unwrap_or_default();
-    let rows: Vec<Value> = specs
+    // ★ 每个平台的「可用账号数」在这里一次性聚合出来，不再在 205 个平台的循环里
+    //   逐平台调 `secrets_for()`。
+    //
+    //   旧写法是循环里 `st.accounts.secrets_for(&s.id).len()`，代价有三层：
+    //     1. 每次都要 `lock()` 整张账号表 —— 205 次加锁；
+    //     2. 锁内线性扫全表 —— O(平台数 × 账号数)；
+    //     3. 命中的账号会把 **secret 明文 clone 出来**（`a.secret.clone()`），
+    //        而我们只要一个计数，克隆完立刻丢弃。
+    //   账号一多，这三点都会恶化；面板每刷新一次就把全部凭据明文在内存里搬一遍。
+    //
+    //   口径与 `secrets_for` 严格对齐：`platform == id && enabled && !unreadable`。
+    //   `rows_snapshot` 里 `unreadable` 对应字段名是 `needs_relogin`（同一件事，
+    //   见 accounts.rs 的 rows_snapshot：`"needs_relogin": a.unreadable`）。
+    let mut secret_n_by_platform: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for a in account_rows.iter() {
+        let Some(plat) = a.get("platform").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let enabled = a.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+        let unreadable = a
+            .get("needs_relogin")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        if enabled && !unreadable {
+            *secret_n_by_platform.entry(plat).or_insert(0) += 1;
+        }
+    }    let rows: Vec<Value> = specs
         .iter()
         .map(|s| {
             // 免密车道（auth=anon：kilo / pollinations / anon-zen）不需要账号：
@@ -468,7 +499,7 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
             let acct_n = if is_anon {
                 0
             } else {
-                st.accounts.secrets_for(&s.id).len()
+                secret_n_by_platform.get(s.id.as_str()).copied().unwrap_or(0)
             };
             let is_custom = s.id.starts_with("custom-");
             // Key 掩码按字符切：`&key[..4]` 是字节切片，Key 里出现非 ASCII
@@ -2769,6 +2800,110 @@ pub fn summarize_checkin(v: &Value) -> String {
 }
 
 
+/// 额度查询：`GET /v1/credits`（别名 `/credits`）。
+///
+/// 给的是「这台网关上现在有多少可用的免费额度」——按账号聚合，按平台分组。
+/// 存在的理由：客户端只会打 `/v1/chat/completions`，额度耗尽时它看到的是一个
+/// 429，无从判断「是我用超了」还是「这个号本来就没了」。有了这个端点，脚本可以
+/// 在跑批前先问一次，用户也能在浏览器里直接看。
+///
+/// 与 `/api/accounts` 的区别：那个是**管理面**（含掩码名、登录态、健康详情，
+/// 要面板令牌）；这个是**数据面的只读摘要**，与 `/v1/models` 同一套 key 鉴权，
+/// 所以第三方客户端能直接调。
+///
+/// 口径纪律：
+/// - 只统计**已查过快照**的账号。没查过就是 null，绝不补 0 —— 0 会被读成
+///   「这个号没钱了」，而真实情况往往是「今天还没签到所以没刷快照」。
+/// - `total` 为 0 且所有账号都没有快照时，明确回 `known: false`，让调用方知道
+///   这是「未知」而不是「确实为零」。
+async fn credits(State(st): State<AppState>, req: Request) -> Response {
+    // key 白名单：与 /v1/models 同源。越权 key 不该看到别的平台的额度分布。
+    let key = req.extensions().get::<AccessKeyCtx>().cloned();
+    let allowed: Option<std::collections::HashSet<String>> = key.as_ref().map(|k| {
+        k.0.allow_models
+            .iter()
+            .map(|m| aigw_store::bare_model(m).to_string())
+            .collect()
+    });
+    let account_rows: Vec<Value> = st
+        .accounts
+        .rows_snapshot()
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut platforms: Vec<Value> = Vec::new();
+    let mut grand_total = 0.0f64;
+    let mut any_known = false;
+    for s in st.all_specs().iter().filter(|s| st.platform_usable(s)) {
+        // 这把 key 若对该平台的模型一个都没开放，就不必把它的额度暴露出去。
+        if let Some(allow) = &allowed {
+            let spec_models: Vec<String> = if s.models_policy == aigw_registry::ModelsPolicy::Live {
+                st.models_cache_per
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&s.id)
+                    .map(|(_, live, _)| live.clone())
+                    .unwrap_or_else(|| s.models.clone())
+            } else {
+                s.models.clone()
+            };
+            let visible = spec_models
+                .iter()
+                .any(|m| allow.contains(aigw_store::bare_model(m)));
+            if !visible {
+                continue;
+            }
+        }
+        let mut rows: Vec<Value> = Vec::new();
+        let mut subtotal = 0.0f64;
+        let mut sub_known = false;
+        for a in account_rows
+            .iter()
+            .filter(|a| a.get("platform").and_then(|x| x.as_str()) == Some(s.id.as_str()))
+        {
+            let Some(id) = a.get("id").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let credit = st.pool.credit_of(id);
+            if credit.is_some() {
+                sub_known = true;
+                any_known = true;
+                subtotal += credit.unwrap_or(0.0);
+            }
+            rows.push(json!({
+                "account": a.get("name").cloned().unwrap_or(json!(id)),
+                "enabled": a.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+                // 没查过就是 null：补 0 会被读成「没钱了」
+                "credit": credit,
+                "needs_relogin": a.get("needs_relogin").and_then(|x| x.as_bool()).unwrap_or(false),
+            }));
+        }
+        // 免密车道的额度是上游按 IP 共享的，没有账号可统计 —— 明确标成 unlimited 形态，
+        // 而不是列一个「0 积分」的空平台让人以为没额度。
+        let anon = s.auth == aigw_registry::AuthKind::Anon;
+        grand_total += subtotal;
+        platforms.push(json!({
+            "id": s.id,
+            "name": s.name,
+            "anon": anon,
+            "known": if anon { true } else { sub_known },
+            "credit_total": if anon || sub_known { json!(subtotal) } else { Value::Null },
+            "accounts": rows,
+        }));
+    }
+    Json(json!({
+        "object": "credits",
+        "total": if any_known { json!(grand_total) } else { Value::Null },
+        // known=false 表示「本网关还没有任何额度快照」，不是「零额度」。
+        "known": any_known,
+        "unit": "points",
+        "hint": "额度快照来自签到/查额，最近一次刷新的时间见 /api/accounts；anon 平台的额度由上游按 IP 控制，不在此统计。",
+        "platforms": platforms,
+    }))
+    .into_response()
+}
+
 /// 在线更新检查（对齐 21 号 dsh /v1/status 版本自证纪律）：GET /api/update-check
 /// 本地 = 编译版本 + 部署目录时间；远端 = GitHub 仓库最新 main commit。
 async fn update_check() -> Json<Value> {
@@ -3316,6 +3451,20 @@ async fn logs_view(
     }
     Json(json!({"ok": true, "lines": lines, "file_size": size}))
 }
+/// 凭据加密状态的 JSON 视图（`/api/health` 用）。
+///
+/// ★ 抽成独立函数是为了只调一次 [`aigw_store::secret::encryption_status`]：
+///   它内部会真实做一次密封+开封自检（DPAPI 调用），
+///   在 `json!` 里写三遍等于每次 health 都跑三次自检。
+fn enc_json() -> Value {
+    let e = aigw_store::secret::encryption_status();
+    json!({
+        "backend": e.backend(),
+        "ok": e.is_encrypted(),
+        "objection": e.objection(),
+    })
+}
+
 async fn health(State(st): State<AppState>) -> Json<Value> {
     let skipped = st.skipped_specs.as_ref();
     // ok 只在服务本身能跑时为 true；被跳过的 spec 不影响 ok（否则一个写错的
@@ -3330,6 +3479,11 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
         // 令牌值本身永远不通过 API 回显（面板可能被局域网其他设备打开）。
         "token_required": st.current_token().is_some(),
         "token_source": st.token_source_now(),
+        // ★ 凭据落盘加密状态：面板据此决定是否显示告警。
+        //   `backend` 是稳定标识（dpapi / aes-256-gcm / none），前端不要按中文匹配。
+        //   ★ 为什么要上报：旧实现在非 Windows 上静默明文落盘，用户基本不可能发现。
+        //   把它变成结构化字段后，「凭据裸奔」就可以被自动化检查。
+        "encryption": enc_json(),
         // 后台任务：ok_runs / err_runs / last_ok_s_ago / last_err / last_err_s_ago。
         // 「该在 24 小时前跑过一次的任务已经 3 天没动静」只有这里看得见。
         "tasks": st.tasks.snapshot(),
@@ -3724,6 +3878,46 @@ fn assemble_models(st: &AppState) -> (Value, Vec<(String, String)>) {
     (json!({"object": "list", "data": data}), index)
 }
 
+/// `/v1/models` 的响应构造：**同一份 body 只算一次 ETag**，并支持条件请求。
+///
+/// ★ 为什么值得做：客户端（Cursor / LibreChat / Continue / 各种 SDK）会在每次
+///   打开设置页、每次切模型时拉一遍 `/v1/models`。这份清单在 158 个接入源下
+///   有几百个模型条目（几十 KB JSON），而它 99% 的时间是不变的（只有 TTL 到期
+///   或用户改了配置才变）。没有 ETag 就只能每次重新序列化 + 全量传输。
+///
+/// ETag 用 body 的 FNV-1a 哈希（定长、零依赖）：这里需要的是「变没变」，
+/// 不是密码学强度 —— 攻击者能构造哈希碰撞也只影响自己的缓存。
+///
+/// 同时发 `Cache-Control: no-cache`（**允许缓存但每次必须验证**）而不是
+/// `no-store`：后者会让客户端每次都重新下载全文，等于白做 ETag。
+fn models_response(body: String, if_none_match: Option<&str>) -> Response {
+    let etag = format!("\"{:016x}\"", sesskey::fnv1a(body.as_bytes()));
+    if let Some(inm) = if_none_match {
+        // 按 RFC 9110：客户端可能发多个 ETag（逗号分隔）或 `*`
+        let matched = inm.split(',').any(|t| {
+            let t = t.trim();
+            t == "*" || t == etag || t.strip_prefix("W/") == Some(etag.as_str())
+        });
+        if matched {
+            return Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(header::ETAG, &etag)
+                .header(header::CACHE_CONTROL, "no-cache")
+                .body(Body::empty())
+                .unwrap_or_else(|_| StatusCode::NOT_MODIFIED.into_response());
+        }
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::ETAG, etag.as_str()),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 async fn models(st: State<AppState>, req: Request) -> Response {
     // `?platform=<id>`：只看某个平台的清单。
     // 有它是因为面板/错误文案会让人「去查这个平台到底有哪些模型」——没有过滤就只能
@@ -3749,6 +3943,12 @@ async fn models(st: State<AppState>, req: Request) -> Response {
     // 不过滤的后果不是安全问题（chat 侧早已 403），而是**可用性**问题：客户端
     // 拿到 148 个模型，逐个试过去 147 个 403，日志里全是对不上号的报错。
     let key = req.extensions().get::<AccessKeyCtx>().cloned();
+    // 条件请求头：在算 body **之前**取出来，命中缓存时就不必再构造响应头。
+    let inm = req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     // ① 整表缓存命中：锁内只取一份 Arc 快照，过滤与序列化都在锁外做
     let cached = st
         .models_cache
@@ -3758,16 +3958,15 @@ async fn models(st: State<AppState>, req: Request) -> Response {
         .map(|(at, _, body)| (*at, body.clone()));
     if let Some((at, body)) = cached {
         if at.elapsed() < MODELS_TTL_ALL {
-            return (
-                [(header::CONTENT_TYPE, "application/json")],
+            return models_response(
                 filter_models_by_platform(
                     &st,
                     filter_models_for_key(merge_combo_models(&st, &body), key.as_ref()),
                     want_platform.as_deref(),
                 )
                 .to_string(),
-            )
-                .into_response();
+                inm.as_deref(),
+            );
         }
     }
     // ② 单飞：冷启动/过期时只让一个请求去拉上游，其余等待复用结果。
@@ -3782,16 +3981,15 @@ async fn models(st: State<AppState>, req: Request) -> Response {
         .map(|(at, _, body)| (*at, body.clone()));
     if let Some((at, body)) = cached {
         if at.elapsed() < MODELS_TTL_ALL {
-            return (
-                [(header::CONTENT_TYPE, "application/json")],
+            return models_response(
                 filter_models_by_platform(
                     &st,
                     filter_models_for_key(merge_combo_models(&st, &body), key.as_ref()),
                     want_platform.as_deref(),
                 )
                 .to_string(),
-            )
-                .into_response();
+                inm.as_deref(),
+            );
         }
     }
 
@@ -3817,16 +4015,15 @@ async fn models(st: State<AppState>, req: Request) -> Response {
     let body = std::sync::Arc::new(body);
     let mut g = st.models_cache.lock().unwrap_or_else(|e| e.into_inner());
     *g = Some((Instant::now(), index, body.clone()));
-    (
-        [(header::CONTENT_TYPE, "application/json")],
+    models_response(
         filter_models_by_platform(
-                    &st,
-                    filter_models_for_key(merge_combo_models(&st, &body), key.as_ref()),
-                    want_platform.as_deref(),
-                )
-            .to_string(),
+            &st,
+            filter_models_for_key(merge_combo_models(&st, &body), key.as_ref()),
+            want_platform.as_deref(),
+        )
+        .to_string(),
+        inm.as_deref(),
     )
-        .into_response()
 }
 
 /// 把模型链作为虚拟条目并进 `/v1/models`。
@@ -3997,6 +4194,7 @@ fn invalidate_models_cache(st: &AppState) {
         let mut g = st.models_cache_per.lock().unwrap_or_else(|e| e.into_inner());
         g.clear();
     }
+    st.invalidate_specs_cache();
 }
 
 /// 把原始请求的会话标识搬到转换后的 OpenAI 请求体上。
@@ -4968,14 +5166,23 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
     // （`claude-sonnet-4-5-20250929`）或点号版本（`claude-sonnet-4.5`），
     // 这里回填成平台清单里的写法，否则上游会回 400 模型不存在。
     let upstream_model = st.canonical_model_for(&spec, &upstream_model);
-    // body 的 model 改写为剥后缀/回填后的版本
-    let mut vb = v.clone();
-    vb["model"] = json!(upstream_model);
-    // 私有字段（协议转换时携带的会话标识）绝不能发给上游
-    if let Some(o) = vb.as_object_mut() {
-        o.remove("_aigw_session");
-    }
-    let body: Bytes = Bytes::from(vb.to_string());
+    // 会话键要在**移走 `v` 之前**算：它在下面构造 body 时被 move 掉了。
+    let skey = session_key(&v);
+    // body 的 model 改写为剥后缀/回填后的版本。
+    //
+    // ★ 这里用 **move 而不是 clone**：`v` 是整个请求体（长对话可以是几百 KB 的
+    //   JSON 树），而 `v` 在这之后**再也不会被用到**（唯一的下游消费者就是 body）。
+    //   克隆它只是为了改一个 `model` 字段和删一个私有字段 —— 白白深拷贝整棵树，
+    //   而这段代码在每个对话请求、每次换号重试时都会跑一遍。
+    let body: Bytes = {
+        let mut vb = v;
+        if let Some(o) = vb.as_object_mut() {
+            o.insert("model".to_string(), json!(upstream_model));
+            // 私有字段（协议转换时携带的会话标识）绝不能发给上游
+            o.remove("_aigw_session");
+        }
+        Bytes::from(serde_json::to_vec(&vb).unwrap_or_default())
+    };
 
     // 账号 candidates：anon 平台走免密单账号；自定义 API 用 CustomStore 里的 Key；
     // 秘塔无账号时回退匿名指纹；其余从 AccountStore 取启用账号（明文 secret）。
@@ -4989,7 +5196,6 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
         });
     }
     let ids: Vec<String> = pool_accounts.iter().map(|(id, _)| id.clone()).collect();
-    let skey = session_key(&v);
     // 失败换号：**一个账号出事 ≠ 整个平台不可用**。旧实现只试 `pick` 挑出来的那一个，
     // 于是账号池里还有 3 个健康号时，一个 401 死 cookie / 429 限流 / 402 额度耗尽也会
     // 原样透给调用方。换号有代价（会话粘性与上游 prompt cache 都会掉），所以：
@@ -5073,7 +5279,8 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
         let secret = if spec.upstream_kind == "orcaterm"
             && aigw_relay::orcaterm::is_expiring(&secret, 600)
         {
-            match aigw_relay::orcaterm::refresh_secret(&st.client.http(), &secret).await {
+            let http = aigw_relay::auth_login::auth_http();
+            match aigw_relay::orcaterm::refresh_secret(&http, &secret).await {
                 Ok(fresh) => {
                     let (hit, changed) = st.accounts.update_secret(&account, &fresh);
                     if hit && changed {
@@ -5789,7 +5996,7 @@ async fn runtime_set(State(st): State<AppState>, body: Bytes) -> Response {
         Err(r) => return r,
     };
     let patch = v.get("cfg").cloned().unwrap_or(v);
-    let (changed, clamped) = st.cfg.apply(&patch);
+    let (changed, clamped, save_err) = st.cfg.apply(&patch);
     // 同步到号池：max_inflight 是 pick 的硬门槛，必须在同一个请求里生效
     if changed.iter().any(|c| c == "max_inflight") {
         st.pool.set_max_inflight(st.cfg.max_inflight());
@@ -5838,8 +6045,20 @@ async fn runtime_set(State(st): State<AppState>, body: Bytes) -> Response {
             clamped.join("、")
         ));
     }
+    // ★ 落盘失败必须明说：内存已生效、重启会回退。只回「已更新 N 项」会让用户
+    //   以为设置永久保存了，等到重启后发现全部复原，只会当成「面板有 bug」。
+    if let Some(e) = &save_err {
+        msg.push_str(&format!(
+            "；★ 但**没能写入磁盘**（{e}）：本次修改只在内存中生效，重启后会自动回退。             请检查数据目录是否可写（磁盘满/只读/被杀软锁定）。"
+        ));
+    }
     Json(json!({
+        // ok 保留「请求本身处理成功」的语义；落盘是否成功由 persistence 单独表达，
+        // 前端据此决定提示用绿色还是黄色（不能因为写盘失败就把整个操作判成错误——
+        // 参数确实已经在内存里生效了）。
         "ok": true,
+        "persisted": save_err.is_none(),
+        "persist_error": save_err,
         "changed": changed,
         "clamped": clamped,
         "message": msg,
@@ -6479,6 +6698,47 @@ stream_dialect = "sse_delta"
         assert!(all.contains("alpha") && all.contains("beta"), "{all}");
     }
 
+    /// `/v1/credits` 的额度口径：没查过快照的账号必须是 null 而不是 0，
+    /// 整表无快照时 total 必须是 null 且 known=false。
+    ///
+    /// 为什么钉这条：补 0 会让「今天还没签到」显示成「这个号没钱了」，
+    /// 用户会去充值或换号；known=false 则让调用方能区分「未知」与「确实为零」。
+    #[tokio::test]
+    async fn credits_reports_null_for_unknown_balances() {
+        let spec = spec_toml(
+            r#"
+id = "credit-probe"
+name = "CreditProbe"
+enabled = true
+auth = "anon"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["alpha"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let st = state(vec![spec]);
+        let app = build_app(st);
+        let body = body_string(app.clone().oneshot(req("/v1/credits")).await.unwrap()).await;
+        let v: Value = serde_json::from_str(&body).expect("credits 必须是 JSON");
+        assert_eq!(v["object"], json!("credits"));
+        // 没有任何额度快照 → total/known 都要表达「未知」
+        assert_eq!(v["known"], json!(false), "无快照时 known 必须是 false: {body}");
+        assert!(v["total"].is_null(), "无快照时 total 必须是 null 而不是 0: {body}");
+        let plats = v["platforms"].as_array().expect("platforms 数组");
+        let hit = plats
+            .iter()
+            .find(|p| p["id"] == json!("credit-probe"))
+            .expect("平台应当出现: {body}");
+        // anon 平台没有账号可统计，标成 anon 而不是列一堆 0
+        assert_eq!(hit["anon"], json!(true));
+        assert_eq!(hit["credit_total"], json!(0.0));
+        // 别名路径同样可达
+        let alias = body_string(app.oneshot(req("/credits")).await.unwrap()).await;
+        assert!(alias.contains("\"object\":\"credits\""), "{alias}");
+    }
+
     #[tokio::test]
     async fn key_rate_limit_is_per_access_key_and_leaves_other_keys_alone() {
         // 每把 key 1/分钟：A 第 2 条 429，B 仍能过 1 条，不带 key 的匿名请求不受影响。
@@ -6791,6 +7051,95 @@ stream_dialect = "sse_delta"
         assert_eq!(v["db"]["backend"], json!("sqlite"), "body={body}");
         assert_eq!(v["db"]["events"], json!(1), "body={body}");
         assert_eq!(v["db"]["bytes"], json!(15), "-wal 必须算进去：{body}");
+    }
+
+    /// ★ 契约测试：`/api/health` 必须报出凭据加密状态。
+    ///
+    /// 为什么要测它：旧实现在非 Windows 上静默明文落盘，而界面上没有任何迹象。
+    /// 把状态上报到 health 后，「凭据裸奔」至少是可被自动化检查的。
+    /// 这里只锁「字段存在 + backend 是已知值」，不锁具体后端 ——
+    /// 本机是 DPAPI 还是 AES 取决于运行环境，锁死会让测试在另一台机器上假红。
+    #[tokio::test]
+    async fn health_reports_credential_encryption_status() {
+        let st = state(vec![]);
+        let res = build_app(st).oneshot(req("/api/health")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: Value = serde_json::from_str(&body_string(res).await).unwrap();
+        let enc = &v["encryption"];
+        assert!(enc.is_object(), "health 必须带 encryption 字段：{v}");
+        let backend = enc["backend"].as_str().expect("backend 必须是字符串");
+        assert!(
+            ["dpapi", "aes-256-gcm", "none"].contains(&backend),
+            "backend 必须是已知值，实际 {backend}"
+        );
+        // ok 与 backend 必须一致：不能出现「backend=none 但 ok=true」这种自相矛盾。
+        let ok = enc["ok"].as_bool().expect("ok 必须是布尔");
+        assert_eq!(ok, backend != "none", "自相矛盾：backend={backend} ok={ok}");
+        if ok {
+            assert!(enc["objection"].is_null(), "可用时不应带异议：{enc}");
+        } else {
+            assert!(enc["objection"].is_string(), "不可用时必须给原因：{enc}");
+        }
+    }
+
+    /// ★ 契约测试：`/v1/models` 必须支持 ETag 条件请求。
+    ///
+    /// 为什么要测：客户端（Cursor / LibreChat / Continue）会在每次打开设置页、
+    /// 每次切模型时拉一遍 `/v1/models`。158 个接入源下这份清单是几十 KB，
+    /// 而它 99% 的时间不变 —— 没有 ETag 就等于每次都重新序列化 + 全量传输。
+    /// 这里锁住三件事：① 响应带 ETag 与 `Cache-Control: no-cache`；
+    /// ② 带上同一个 ETag 回来必须是 304 + 空 body；
+    /// ③ 不同 ETag 仍然回 200（不能把「不匹配」误判成命中）。
+    #[tokio::test]
+    async fn models_supports_etag_conditional_requests() {
+        let st = state(vec![]);
+        let app = build_app(st);
+
+        let first = app.clone().oneshot(req("/v1/models")).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let etag = first
+            .headers()
+            .get("etag")
+            .expect("/v1/models 必须带 ETag")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(etag.starts_with('"') && etag.ends_with('"'), "ETag 应带引号：{etag}");
+        assert_eq!(
+            first
+                .headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache"),
+            "必须是 no-cache（允许缓存但每次验证），no-store 会让 ETag 白做"
+        );
+
+        // 同一个 ETag 回来 → 304 + 空 body
+        let cond = Request::get("/v1/models")
+            .header("host", "127.0.0.1:8800")
+            .header("if-none-match", &etag)
+            .body(Body::empty())
+            .unwrap();
+        let second = app.clone().oneshot(cond).await.unwrap();
+        assert_eq!(second.status(), StatusCode::NOT_MODIFIED, "命中 ETag 应回 304");
+        assert_eq!(
+            second
+                .headers()
+                .get("etag")
+                .and_then(|v| v.to_str().ok()),
+            Some(etag.as_str()),
+            "304 也必须回带 ETag（RFC 9110）"
+        );
+        assert!(body_string(second).await.is_empty(), "304 不能带 body");
+
+        // 不同 ETag → 仍然 200 全文
+        let other = Request::get("/v1/models")
+            .header("host", "127.0.0.1:8800")
+            .header("if-none-match", "\"0000000000000000\"")
+            .body(Body::empty())
+            .unwrap();
+        let third = app.oneshot(other).await.unwrap();
+        assert_eq!(third.status(), StatusCode::OK, "ETag 不匹配必须回 200 全文");
     }
 
     #[tokio::test]
@@ -9565,6 +9914,12 @@ biz_err = ["登录", "失效"]
 
     #[tokio::test]
     async fn token_generate_rotates_immediately_and_persists() {
+        // ★ 密钥目录指到临时位置：不这么做的话，这条测试会去用户真实的
+        //   ~/.config/aigw2/ 写密钥；那个目录在 CI/沙箱里可能不可写 →
+        //   密钥生成失败 → 面板令牌回到明文落盘 → 测试假红。
+        aigw_store::secret::set_key_dir_override(Some(
+            std::env::temp_dir().join(format!("aigw-tokenkey-{}", std::process::id())),
+        ));
         // 轮换要「立刻生效」：旧令牌下一次请求就该 401，新令牌立刻可用。
         // 同时必须落盘 —— 否则重启后回到旧令牌，等于用户以为换了锁其实没换。
         let tmp = tempfile::tempdir().unwrap();
@@ -10196,6 +10551,81 @@ stream_dialect = "sse_delta"
         invalidate_models_cache(&st);
         assert!(st.models_cache.lock().unwrap().is_none(), "整表缓存未清");
         assert!(st.models_cache_per.lock().unwrap().is_empty(), "每平台缓存未清");
+    }
+
+    /// `accounts_n` 的口径必须与 `secrets_for()` 一致。
+    ///
+    /// 为了性能，`/api/platforms` 已改成在**一次**遍历里聚合各平台的可用账号数
+    /// （旧实现是循环里逐平台调 `secrets_for().len()`：205 次加锁 + 205 次全表扫描
+    /// + 每次把 secret 明文克隆出来只为取个长度）。
+    ///
+    /// 优化可以改实现，但**不能改口径**：停用的账号不算、anon 车道恒报 0。
+    /// 这条测试把这两件事钉在一起，防止聚合逻辑与 `secrets_for` 悄悄漂移。
+    #[tokio::test]
+    async fn platforms_api_account_count_matches_secrets_for() {
+        let spec = spec_toml(
+            r#"
+id = "acct-plat"
+name = "AcctPlat"
+enabled = true
+region = "cn"
+auth = "api_key"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["m1"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let anon_spec = spec_toml(
+            r#"
+id = "anon-plat"
+name = "AnonPlat"
+enabled = true
+region = "cn"
+auth = "anon"
+base_url = "https://example.invalid/v1"
+format = "openai"
+models = ["m1"]
+models_policy = "static"
+stream_dialect = "sse_delta"
+"#,
+        );
+        let st = state(vec![spec, anon_spec]);
+        // 建两条账号，其中一条停用。
+        // ★ 不直接依赖返回的 id：`add_account` 用纳秒时间戳当 id，同一测试里连续
+        //   调用偶尔会撞值；按 name 从快照里找回 id 更稳。
+        let _ = st.accounts.add_account("acct-plat", "可用号", "cookie", "secret-a");
+        let _ = st.accounts.add_account("acct-plat", "停用号", "cookie", "secret-b");
+        let off_id = st.accounts.rows_snapshot()["rows"]
+            .as_array()
+            .and_then(|rs| {
+                rs.iter()
+                    .find(|r| r["name"].as_str() == Some("停用号"))
+                    .and_then(|r| r["id"].as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or_default();
+        assert!(!off_id.is_empty(), "应能按名字找到「停用号」");
+        assert!(st.accounts.set_enabled(&off_id, false), "停用应成功");
+
+        // 口径基准：以 secrets_for 的结论为准（它才是中继实际看到的可用凭据数）
+        let expected = st.accounts.secrets_for("acct-plat").len();
+        assert_eq!(expected, 1, "前提：停用之后 secrets_for 应只算 1 条");
+
+        let app = build_app(st);
+        let res = app.oneshot(req("/api/platforms")).await.unwrap();
+        let body = body_string(res).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let rows = v["rows"].as_array().unwrap();
+        let plat = rows.iter().find(|r| r["id"] == "acct-plat").expect("acct-plat row");
+        assert_eq!(
+            plat["accounts_n"], expected,
+            "accounts_n 与 secrets_for 口径不一致：row={plat}"
+        );
+        // anon 车道恒报 0（免凭据，不该显示「1 账号」）
+        let anon = rows.iter().find(|r| r["id"] == "anon-plat").expect("anon-plat row");
+        assert_eq!(anon["accounts_n"], 0, "anon 平台必须恒报 0：row={anon}");
+        assert_eq!(anon["anon"], true, "anon 标记要下发");
     }
 
     #[tokio::test]

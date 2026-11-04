@@ -9,6 +9,9 @@ region = "cn"
 
 # cookie 车道，但允许留空（留空走匿名指纹；粘贴 uid-sid 走登录额度）
 auth = "cookie"
+# 扫码只是「获取凭据」的另一条路径：扫码换回 uid-sid 后照样按 cookie 形态入库。
+# paste 必须留着 —— 扫码走不通时用户仍要能自己录入。
+login_methods = ["paste", "qr"]
 base_url = "https://metaso.cn"
 format = "openai"
 
@@ -22,4 +25,4 @@ biz_err = ["额度", "限流", "验证", "WAF"]
 login_url = "https://metaso.cn/"
 hosts = ["metaso.cn"]
 
-notes = "免登录即可用（匿名约 13 次/IP/窗口，搜索带引用来源）。想提高额度：登录 metaso.cn 后从 Cookies 复制 uid 和 sid，拼成 uid-sid 粘贴（约 500/天）。被人机验证时可在设置里配置代理。"
+notes = "免登录即可用（匿名约 13 次/IP/窗口，搜索带引用来源）。想提高额度：点「开始登录」用微信扫一扫（自动换 uid-sid 入库），或登录 metaso.cn 后从 Cookies 复制 uid 和 sid 拼成 uid-sid 粘贴（约 500/天）。被人机验证时可在设置里配置代理。"

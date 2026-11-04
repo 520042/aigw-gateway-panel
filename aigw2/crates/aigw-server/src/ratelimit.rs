@@ -8,7 +8,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -32,12 +32,12 @@ struct RateSlot {
 /// 分钟），面板上表现为「所有平台突然一起 429」。本机多个进程、或拿到面板令牌的
 /// 任意客户端都能造成这种效果。
 pub struct RateLimiter {
-    per_ip: u32,
-    global: u32,
+    per_ip: AtomicU32,
+    global: AtomicU32,
     ip: Mutex<HashMap<IpAddr, RateSlot>>,
     /// 按访问密钥（key id）的每分钟上限，见下面 `hit_key`。顺序：
     /// 谁最容易被一把 key 打穿，就先扣谁的额度。
-    pub key_rate: u32,
+    key_rate: AtomicU32,
     /// key id → 该 key 的计数槽。只放「非空」的槽，key 删掉后自然过期淘汰。
     key: Mutex<HashMap<String, RateSlot>>,
     g: Mutex<RateSlot>,
@@ -63,10 +63,10 @@ impl RateLimiter {
     pub fn new(per_ip: u32, global: u32) -> RateLimiter {
         let now = Instant::now();
         RateLimiter {
-            per_ip,
-            global,
+            per_ip: AtomicU32::new(per_ip),
+            global: AtomicU32::new(global),
             ip: Mutex::new(HashMap::new()),
-            key_rate: 0,
+            key_rate: AtomicU32::new(0),
             key: Mutex::new(HashMap::new()),
             g: Mutex::new(RateSlot { win: now, count: 0 }),
             rejected: AtomicU64::new(0),
@@ -75,20 +75,20 @@ impl RateLimiter {
     }
 
     pub fn per_ip(&self) -> u32 {
-        self.per_ip
+        self.per_ip.load(Ordering::Relaxed)
     }
 
     pub fn global(&self) -> u32 {
-        self.global
+        self.global.load(Ordering::Relaxed)
     }
 
     pub fn enabled(&self) -> bool {
-        self.per_ip > 0 || self.global > 0
+        self.per_ip() > 0 || self.global() > 0
     }
 
     /// 按 key 限流是否启用。
     pub fn key_enabled(&self) -> bool {
-        self.key_rate > 0
+        self.key_rate.load(Ordering::Relaxed) > 0
     }
 
     /// 记一次「带着访问密钥」的 /v1 请求。
@@ -112,7 +112,7 @@ impl RateLimiter {
         }
         let slot = m.entry(key_id.to_string()).or_insert(RateSlot { win: now, count: 0 });
         roll(slot, now);
-        if slot.count >= self.key_rate {
+        if slot.count >= self.key_rate.load(Ordering::Relaxed) {
             let wait = retry_after(slot, now);
             drop(m);
             self.note_reject("key", wait);
@@ -131,17 +131,17 @@ impl RateLimiter {
         {
             let mut g = self.g.lock().unwrap_or_else(|e| e.into_inner());
             roll(&mut g, now);
-            if self.global > 0 && g.count >= self.global {
+            if self.global() > 0 && g.count >= self.global() {
                 let wait = retry_after(&g, now);
                 drop(g);
                 self.note_reject("global", wait);
                 return Err(wait);
             }
-            if self.global > 0 {
+            if self.global() > 0 {
                 g.count += 1;
             }
         }
-        if self.per_ip > 0 {
+        if self.per_ip() > 0 {
             if let Some(ip) = ip {
                 let mut m = self.ip.lock().unwrap_or_else(|e| e.into_inner());
                 if m.len() >= RATE_MAX_IP_BUCKETS {
@@ -151,11 +151,11 @@ impl RateLimiter {
                 if m.len() < RATE_MAX_IP_BUCKETS {
                     let slot = m.entry(ip).or_insert(RateSlot { win: now, count: 0 });
                     roll(slot, now);
-                    if slot.count >= self.per_ip {
+                    if slot.count >= self.per_ip() {
                         let wait = retry_after(slot, now);
                         drop(m);
                         // 这条没被放行：退回刚才预扣的全局额度
-                        if self.global > 0 {
+                        if self.global() > 0 {
                             let mut g = self.g.lock().unwrap_or_else(|e| e.into_inner());
                             g.count = g.count.saturating_sub(1);
                         }
@@ -180,6 +180,34 @@ impl RateLimiter {
         });
     }
 
+    /// 当前的每密钥上限（供 `runtime_set` 做「只改变动那档」的读-改-写）。
+    pub fn key_rate_now(&self) -> u32 {
+        self.key_rate.load(Ordering::Relaxed)
+    }
+
+    /// 运行时改三个上限（面板「运行参数」页调用）。
+    ///
+    /// ★ 为什么必须有：`/api/runtime` 改完 rpm 字段后面板回「已更新 N 项，立即生效」，
+    ///   而限流器原来只在构造时接受 `with_limits` —— 改了等于没改。用户以为把
+    ///   每 IP 上限从 300 收到 10 就收紧了，实际仍是 300，属于**安全相关的静默失效**。
+    pub fn set_rates(&self, per_ip: u32, global: u32, key_rate: u32) {
+        self.per_ip.store(per_ip, Ordering::Relaxed);
+        self.global.store(global, Ordering::Relaxed);
+        self.key_rate.store(key_rate, Ordering::Relaxed);
+        // 上限变小时，已累计的计数可能立刻超过新上限：不重置的话，用户收紧后
+        // 第一批请求会被旧计数连带挡下，看起来像「改了之后更难用了」。
+        // 这里把窗口一起重置，让新上限从下一请求重新计起。
+        let now = Instant::now();
+        if let Ok(mut g) = self.g.lock() {
+            *g = RateSlot { win: now, count: 0 };
+        }
+        if let Ok(mut m) = self.ip.lock() {
+            m.clear();
+        }
+        if let Ok(mut k) = self.key.lock() {
+            k.clear();
+        }
+    }
     /// 给面板/health 的快照：限流是否启用、上限多少、被挡过几次、上次多久前。
     pub fn snapshot(&self) -> Value {
         let last = self.last_reject.lock().unwrap_or_else(|e| e.into_inner());
@@ -193,9 +221,9 @@ impl RateLimiter {
         };
         json!({
             "enabled": self.enabled(),
-            "per_ip_rpm": self.per_ip,
-            "global_rpm": self.global,
-            "key_rpm": self.key_rate,
+            "per_ip_rpm": self.per_ip(),
+            "global_rpm": self.global(),
+            "key_rpm": self.key_rate.load(Ordering::Relaxed),
             "rejected_total": self.rejected.load(Ordering::Relaxed),
             "last_reject_s_ago": ago,
             "last_reject_scope": scope,

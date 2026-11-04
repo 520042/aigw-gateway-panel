@@ -13,6 +13,7 @@
 //! 凭据：留空可匿名使用；填 `uid-sid`（旧版格式）或整段含 uid=/sid= 的 Cookie 即登录。
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er};
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
 use bytes::Bytes;
@@ -24,13 +25,6 @@ use tokio::sync::mpsc;
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-fn er(status: u16, body: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError {
-        status,
-        body: body.into(),
-        class,
-    }
-}
 
 fn nanos() -> u128 {
     std::time::SystemTime::now()
@@ -92,9 +86,14 @@ fn login_cookie(secret: &str) -> String {
             return format!("uid={}; sid={};", uid, sid);
         }
     }
-    // uid-sid 形态
+    // uid-sid 形态（扫码路径的产出：auth_login 里是 format!("{uid}-{sid}")）
+    //
+    // ★ 必须从**右边**切：uid 与 sid 都可能自带 '-'（实测秘塔的 uid 是
+    // `u-<hex>` 这种形状）。用 split_once 从左切会把 "u-123-s-456" 解成
+    // uid="u" + sid="123-s-456"，转发时带的是半个 uid —— 上游按匿名处理，
+    // 额度从登录档掉回窗口档，而且不报任何错，极难被发现。
     if !s.contains(' ') && !s.contains('=') && s.contains('-') {
-        let (u, sd) = s.split_once('-').unwrap_or(("", ""));
+        let (u, sd) = s.rsplit_once('-').unwrap_or(("", ""));
         if !u.is_empty() && !sd.is_empty() {
             return format!("uid={}; sid={};", u, sd);
         }
@@ -122,15 +121,27 @@ fn base_headers(cookie: &str) -> Vec<(String, String)> {
 }
 
 /// 从首页 HTML 提取 meta-token（字符串查找，不依赖 regex crate）。
+///
+/// ★ 必须在**整个标签**里找 `content="`，不能从 `meta-token` 出现的位置往后找：
+/// 属性顺序在 HTML 里不固定，`<meta content="X" name="meta-token">` 是合法写法，
+/// 旧实现从 key 处向后搜 content 会直接漏掉这种排列，表现为「首页未找到 meta-token」，
+/// 整条车道用不了。
 fn extract_meta_token(html: &str) -> Option<String> {
     let key = "meta-token";
-    let idx = html.find(key)?;
-    let rest = &html[idx..];
-    let ci = rest.find("content=\"")?;
-    let start = ci + "content=\"".len();
-    let tail = &rest[start..];
+    let at = html.find(key)?;
+    // 回退到该标签的开头、前进到它的结尾，把整个 <meta …> 圈出来。
+    let tag_start = html[..at].rfind('<').unwrap_or(0);
+    let tag_end = html[at..].find('>').map(|o| at + o).unwrap_or(html.len());
+    let tag = &html[tag_start..tag_end];
+    let ci = tag.find("content=\"")?;
+    let tail = &tag[ci + "content=\"".len()..];
     let end = tail.find('"')?;
-    Some(tail[..end].to_string())
+    let tok = tail[..end].to_string();
+    if tok.is_empty() {
+        None
+    } else {
+        Some(tok)
+    }
 }
 
 struct Meta {
@@ -269,7 +280,7 @@ fn parse_frame(v: &Value) -> Result<(String, String, Option<Value>), Option<Rela
                     reasoning.push_str(r);
                 }
                 if let Some(cit) = delta.get("citations") {
-                    if cit.is_array() && !cit.as_array().unwrap().is_empty() {
+                    if cit.as_array().is_some_and(|a| !a.is_empty()) {
                         citations = Some(cit.clone());
                     }
                 }
@@ -376,7 +387,7 @@ pub async fn chat_nonstream(
     if !thinking.trim().is_empty() {
         msg["reasoning_content"] = json!(thinking.trim());
     }
-    if citations.is_array() && !citations.as_array().unwrap().is_empty() {
+    if citations.as_array().is_some_and(|a| !a.is_empty()) {
         msg["citations"] = citations;
     }
     Ok(json!({
@@ -547,5 +558,166 @@ pub async fn verify(http: &reqwest::Client, spec: &ProviderSpec, secret: &str) -
             status == 401 || status == 403 || status == 200
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 凭据解析是扫码路径与手动粘贴路径的汇合点：微信扫码换回来的就是 "uid-sid"
+    /// 这一种形态，手动粘贴则可能整段 Cookie。两种都必须落到同一条 cookie 片段，
+    /// 否则扫码成功但转发仍然匿名（额度从 500/天 掉回 13/窗口），且没有任何报错。
+    #[test]
+    fn login_cookie_accepts_both_paste_shapes() {
+        // uid-sid（扫码路径产出的形态，两侧都是不带 '-' 的 hex）
+        assert_eq!(
+            login_cookie("8f3a91c2e04b7d65-1a2b3c4d5e6f7089"),
+            "uid=8f3a91c2e04b7d65; sid=1a2b3c4d5e6f7089;"
+        );
+        // uid 自带 '-' 时也要切对：秘塔的 uid 存在 `u-<hex>` 形状，
+        // 从左切会把 uid 截成 "u"，转发就退化成匿名了。
+        assert_eq!(login_cookie("u-8f3a91c2-1a2b3c4d"), "uid=u-8f3a91c2; sid=1a2b3c4d;");
+        // 整段 Cookie（手动粘贴路径）
+        assert_eq!(
+            login_cookie("other=1; uid=U9; sid=S9; trailing=2"),
+            "uid=U9; sid=S9;"
+        );
+        // 空 / 无凭据 → 匿名（空片段，不是错误）
+        assert_eq!(login_cookie(""), "");
+        assert_eq!(login_cookie("   "), "");
+        // 既不是整段 Cookie 也不是 uid-sid → 匿名，不能拼出半个 cookie
+        assert_eq!(login_cookie("garbage"), "");
+        // 只有 uid 没有 sid → 匿名（半对凭据上游会 401，不如直说没有）
+        assert_eq!(login_cookie("uid=only"), "");
+    }
+
+    /// 匿名 Cookie 也必须带齐门票三件套，且每次调用都不同（随机）。
+    #[test]
+    fn build_cookie_always_carries_ticket_triplet() {
+        let a = build_cookie("");
+        assert!(a.contains("tid="), "{a}");
+        assert!(a.contains("_c_WBKFRo="), "{a}");
+        assert!(a.contains("_nb_ioWEgULi="), "{a}");
+        assert!(!a.contains("uid="), "匿名不该带 uid: {a}");
+        // 两次调用随机值不同
+        assert_ne!(a, build_cookie(""));
+        // 有凭据时门票仍在
+        let b = build_cookie("u1-s1");
+        assert!(b.contains("uid=u1; sid=s1;"), "{b}");
+        assert!(b.contains("tid="), "{b}");
+    }
+
+    /// 模型名 → (mode, engine) 的路由表。写错一项的后果是「选了 research
+    /// 却按 detail 发」——不报错，只是结果不对，所以逐项钉住。
+    #[test]
+    fn route_maps_every_documented_alias() {
+        assert_eq!(route("metaso:concise"), ("concise", ""));
+        assert_eq!(route("concise"), ("concise", ""));
+        assert_eq!(route("metaso:research"), ("research", ""));
+        assert_eq!(route("metaso:scholar"), ("detail", "scholar"));
+        assert_eq!(route("metaso:video"), ("detail", "video"));
+        assert_eq!(route("metaso:deepresearch"), ("strong-research", ""));
+        // 未知 / 默认 → 深入搜索
+        assert_eq!(route("metaso:search"), ("detail", ""));
+        assert_eq!(route("whatever"), ("detail", ""));
+    }
+
+    /// system 提示必须前置拼进 query，且多轮历史只取最后一轮作为提问 ——
+    /// 秘塔的 query 是「一次搜索」，把整段历史塞进去会污染检索词。
+    #[test]
+    fn build_query_hoists_system_and_keeps_last_turn() {
+        let msgs = vec![
+            json!({"role": "system", "content": "你是搜索助手"}),
+            json!({"role": "user", "content": "第一轮问题"}),
+            json!({"role": "assistant", "content": "第一轮回答"}),
+            json!({"role": "user", "content": "最后一问"}),
+        ];
+        let q = build_query(&msgs);
+        assert!(q.starts_with("你是搜索助手"), "{q}");
+        assert!(q.ends_with("最后一问"), "{q}");
+        assert!(!q.contains("第一轮问题"), "历史提问不该进检索词: {q}");
+        assert!(!q.contains("第一轮回答"), "历史回答不该进检索词: {q}");
+    }
+
+    /// 没有 system、或 system 只有空白时，query 就是纯提问，不能多出空行。
+    #[test]
+    fn build_query_without_system_is_just_the_question() {
+        let msgs = vec![json!({"role": "user", "content": "问题"})];
+        assert_eq!(build_query(&msgs), "问题");
+        let msgs = vec![
+            json!({"role": "system", "content": "   "}),
+            json!({"role": "user", "content": "问题"}),
+        ];
+        assert_eq!(build_query(&msgs), "问题");
+    }
+
+    /// 内容帧解析：正文与思考走不同字段，citations 只在非空数组时才带出来。
+    #[test]
+    fn parse_frame_separates_content_reasoning_and_citations() {
+        let f = json!({"choices": [{"delta": {
+            "content": "正文",
+            "reasoning_content": "思考",
+            "citations": [{"title": "来源"}]
+        }}]});
+        let (c, r, cit) = parse_frame(&f).unwrap();
+        assert_eq!(c, "正文");
+        assert_eq!(r, "思考");
+        assert!(cit.is_some(), "非空 citations 应当带出");
+
+        // 空 citations 数组 → None（面板不该显示一个空来源列表）
+        let f = json!({"choices": [{"delta": {"content": "x", "citations": []}}]});
+        let (_, _, cit) = parse_frame(&f).unwrap();
+        assert!(cit.is_none());
+    }
+
+    /// 控制帧：心跳与 conversation_init 都不产生内容，也不能当错误。
+    #[test]
+    fn parse_frame_ignores_control_frames() {
+        for typ in ["heartbeat", "conversation_init", "anything_else"] {
+            let f = json!({"type": typ});
+            let (c, r, cit) = parse_frame(&f).unwrap();
+            assert!(c.is_empty() && r.is_empty() && cit.is_none(), "帧 {typ} 应当静默");
+        }
+    }
+
+    /// 错误帧按 code 分类：429 限速、401/403 凭据、4001 额度，其余按瞬时故障。
+    /// 分类错了会让「等一下就好」被当成「重新登录」，或反过来。
+    #[test]
+    fn parse_frame_classifies_error_codes() {
+        let cases = [
+            (429, ErrorClass::Rate),
+            (401, ErrorClass::Auth),
+            (403, ErrorClass::Auth),
+            (4001, ErrorClass::Quota),
+            (5000, ErrorClass::Transient),
+        ];
+        for (code, want) in cases {
+            let f = json!({"type": "error", "code": code, "msg": "boom"});
+            let err = parse_frame(&f).unwrap_err().expect("错误帧必须带 RelayError");
+            assert!(
+                std::mem::discriminant(&err.class) == std::mem::discriminant(&want),
+                "code={code} 分类错了: {:?}",
+                err.class
+            );
+            assert!(err.body.contains("boom"), "错误原因要透传: {}", err.body);
+        }
+    }
+
+    /// 从首页 HTML 提取 meta-token：属性顺序无关，缺了要明确返回 None。
+    #[test]
+    fn extract_meta_token_handles_attribute_order() {
+        assert_eq!(
+            extract_meta_token(r#"<meta name="meta-token" content="TOK123">"#).as_deref(),
+            Some("TOK123")
+        );
+        assert_eq!(
+            extract_meta_token(r#"<meta content="TOK456" name="meta-token">"#).as_deref(),
+            Some("TOK456")
+        );
+        // 没有该标签（改版 / 验证页）
+        assert_eq!(extract_meta_token("<html><body>验证中</body></html>"), None);
+        // 有 key 但没有 content 属性
+        assert_eq!(extract_meta_token(r#"<meta name="meta-token">"#), None);
     }
 }

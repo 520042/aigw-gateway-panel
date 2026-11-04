@@ -11,8 +11,15 @@ region = "cn"
 
 # 短信登录（手机号 + 验证码）：与微信扫码二选一，前端抽屉两个都提供。
 # 扫码要求该微信已绑定讯飞账号；短信登录对「只有手机号号」的用户是唯一通路。
-auth = "sms_code"
-login_methods = ["sms", "pwd", "qr"]
+# auth 是「凭据的**形态**」，决定出站怎么带（Cookie → Cookie 头；其余 → Bearer）。
+# 这家实际用的是 Bearer token，所以是 api_key；短信/扫码只是可选的**获取**方式，
+# 由 login_methods 表达（两者是不同维度，别混）。
+auth = "api_key"
+# ★ 必须保留 paste：凭据本质就是一个 token 字符串（signer="loomy" 会把 secret
+#   双写成 Bearer + token 头），完全可以由用户从浏览器登录后粘贴进来。
+#   原先只列 sms+pwd+qr 而漏掉 paste，等于**用户无法录入凭据**（项目铁律也不允许
+#   依赖扫码），这个平台于是只能看不能接。
+login_methods = ["paste", "sms", "pwd", "qr"]
 base_url = "https://loomyad.xunfei.cn/api/v1"
 format = "openai"
 chat_path = "/chat/completions"
@@ -36,4 +43,4 @@ biz_err = ["登录已失效", "登录", "失效", "未登录", "授权"]
 login_url = "https://loomy.xunfei.cn/login"
 hosts = ["loomy.xunfei.cn", "loomyad.xunfei.cn", "xunfei.cn"]
 
-notes = "讯飞 Loomy 模型网关，模型 id 为 provider/model 形态（如 imodel/spark-x）。凭据为登录后的 session，鉴权头会自动双写 token 与 traceparent。模型清单实时拉取。"
+notes = "凭据是一个 token 字符串：浏览器登录 loomy.xunfei.cn 后从会话/请求头里取出粘贴即可（也可走短信/扫码）。讯飞 Loomy 模型网关，模型 id 为 provider/model 形态（如 imodel/spark-x）。凭据为登录后的 session，鉴权头会自动双写 token 与 traceparent。模型清单实时拉取。"

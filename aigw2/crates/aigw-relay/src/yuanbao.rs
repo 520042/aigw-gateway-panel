@@ -10,6 +10,7 @@
 //! 凭据：secret 为 yuanbao.tencent.com 的登录 Cookie，必须含 `hy_user` 与 `hy_token`。
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er};
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
 use bytes::Bytes;
@@ -21,13 +22,6 @@ const AGENT_ID: &str = "naQivTmsDa";
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
-fn er(status: u16, body: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError {
-        status,
-        body: body.into(),
-        class,
-    }
-}
 
 fn nanos() -> u128 {
     std::time::SystemTime::now()
@@ -477,5 +471,88 @@ pub async fn verify(http: &reqwest::Client, spec: &ProviderSpec, secret: &str) -
             v.get("id").and_then(|x| x.as_str()).is_some_and(|s| !s.is_empty())
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 元宝凭据必须是 hy_user + hy_token 两条，缺一不可：只发一条上游回 401，
+    /// 而用户看到 401 会以为账号被封，不会想到是自己少复制了一项。
+    #[test]
+    fn parse_cookie_requires_both_hy_fields() {
+        assert_eq!(
+            parse_cookie("other=1; hy_user=U1; hy_token=T1; x=2"),
+            Ok(("U1".into(), "T1".into()))
+        );
+        // 缺一条 → 明确报错，且文案要点名要什么
+        let e = parse_cookie("hy_user=only").unwrap_err();
+        assert!(e.contains("hy_user") && e.contains("hy_token"), "{e}");
+        assert!(parse_cookie("hy_token=only").is_err());
+        assert!(parse_cookie("").is_err());
+        assert!(parse_cookie("garbage").is_err());
+    }
+
+    /// 模型到 chatModelId 的映射：带 r1 的走推理模型，其余走 v3。
+    /// 映射反了会静默降级 —— 用户选了长思考却拿到快模型。
+    #[test]
+    fn chat_model_id_splits_reasoning_from_fast() {
+        assert_eq!(chat_model_id("deepseek-r1"), "deep_seek");
+        assert_eq!(chat_model_id("hunyuan-r1"), "deep_seek");
+        assert_eq!(chat_model_id("deepseek-v3"), "deep_seek_v3");
+        assert_eq!(chat_model_id("hunyuan-turbo"), "deep_seek_v3");
+        // 默认（未指定）走 v3
+        assert_eq!(chat_model_id(""), "deep_seek_v3");
+    }
+
+    /// 首轮不加角色前缀、后续轮加 `#[role]` —— 元宝的 prompt 协议就是这样，
+    /// 给第一条也加前缀会让模型把「用户说过的话」当成引用材料来评论。
+    #[test]
+    fn build_prompt_prefixes_only_after_the_first_turn() {
+        let one = vec![json!({"role": "user", "content": "你好"})];
+        assert_eq!(build_prompt(&one), "你好");
+
+        let multi = vec![
+            json!({"role": "user", "content": "第一问"}),
+            json!({"role": "assistant", "content": "第一答"}),
+            json!({"role": "user", "content": "第二问"}),
+        ];
+        let p = build_prompt(&multi);
+        assert!(p.starts_with("第一问"), "首轮不该带前缀: {p}");
+        assert!(p.contains("#[assistant]"), "后续轮要带角色前缀: {p}");
+        assert!(p.contains("#[user]"), "{p}");
+    }
+
+    /// 空消息（纯空白 / 没有 text 块）必须被跳过，否则 prompt 里会出现
+    /// 一堆孤零零的 `#[assistant]` 空段。
+    #[test]
+    fn build_prompt_skips_empty_messages() {
+        let msgs = vec![
+            json!({"role": "user", "content": "有内容"}),
+            json!({"role": "assistant", "content": "   "}),
+            json!({"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}),
+        ];
+        let p = build_prompt(&msgs);
+        assert_eq!(p, "有内容", "空白与纯图片消息都该被跳过");
+    }
+
+    /// SSE 帧解析：event 名可以来自 `event:` 行，也可以来自 JSON 的 type 字段。
+    /// 只认其中一种会导致某类帧被当成空事件丢弃（表现为回复中途截断）。
+    #[test]
+    fn parse_sse_frame_accepts_event_line_or_type_field() {
+        let (ev, v) = parse_sse_frame("event: text\ndata: {\"a\":1}").unwrap();
+        assert_eq!(ev, "text");
+        assert_eq!(v["a"], json!(1));
+
+        // 没有 event 行 → 回落到 JSON 的 type
+        let (ev, _) = parse_sse_frame("data: {\"type\":\"delta\"}").unwrap();
+        assert_eq!(ev, "delta");
+
+        // 没有 data → 不是帧
+        assert!(parse_sse_frame("event: text").is_none());
+        assert!(parse_sse_frame("").is_none());
+        // 坏 JSON 丢这一帧，不 panic
+        assert!(parse_sse_frame("data: {bad").is_none());
     }
 }

@@ -9,13 +9,17 @@ auth = "api_key"
 base_url = "https://maas-api.lanyun.net/v1"
 format = "openai"
 
-# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+# ★ 2026-10-26 按上游实测重写：原表有 4 个模型上游已下架（deepseek-v3.1 / /maas/zhipuai/GLM-5 / MiniMax-M2.1 / qwen3-32b），用户从兜底表选到就是 404。
 models = [
-    "deepseek-v3.1",
     "/maas/deepseek-ai/DeepSeek-V3.2",
-    "/maas/zhipuai/GLM-5",
-    "MiniMax-M2.1",
-    "qwen3-32b",
+    "automodel",
+    "kimi-k3",
+    "kimi-k2.7-code",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "/maas/minimax/MiniMax-M2.5",
+    "minimax-m2.7",
 ]
 models_policy = "live"
 stream_dialect = "sse_delta"

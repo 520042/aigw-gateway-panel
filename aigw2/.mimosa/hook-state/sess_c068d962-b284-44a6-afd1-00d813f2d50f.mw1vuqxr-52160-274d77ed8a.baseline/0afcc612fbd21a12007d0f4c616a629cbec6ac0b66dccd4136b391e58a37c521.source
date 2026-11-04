@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# 正确性闸门：优化 UI 操作体验时，不能让核心能力退化。
+# 任何一项失败 → 该轮实验判 checks_failed，不能保留。
+set -uo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+fail=0
+
+# 1) Rust 全量测试必须通过（UI 改动不该影响后端，但防止连带破坏）
+if ! CARGO_TARGET_DIR=C:/aigw-target cargo +stable-x86_64-pc-windows-msvc test --workspace -q >/tmp/aigw_checks_cargo.log 2>&1; then
+  echo "FAIL: cargo test 未通过（详见 /tmp/aigw_checks_cargo.log）"
+  tail -20 /tmp/aigw_checks_cargo.log
+  fail=1
+fi
+
+# 2) 前端 JS 必须语法合法
+if ! node --check web/app.js >/dev/null 2>&1; then
+  echo "FAIL: web/app.js 语法错误"
+  fail=1
+fi
+
+# 3) 关键登录链路不能被改坏：Accio 两个站的授权 URL 域名必须正确
+if ! CARGO_TARGET_DIR=C:/aigw-target cargo +stable-x86_64-pc-windows-msvc test -p aigw-relay -q --lib accio 2>&1 | grep -q "test result: ok"; then
+  echo "FAIL: Accio 登录链路测试未通过"
+  fail=1
+fi
+
+# 4) 服务能起来且 /api/platforms 正常返回（防止把面板改崩）
+if ! curl -s -m 5 http://127.0.0.1:8801/api/platforms 2>/dev/null | grep -q '"rows"'; then
+  echo "FAIL: /api/platforms 不可用"
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "CHECKS FAILED"
+  exit 1
+fi
+echo "CHECKS OK"
+exit 0

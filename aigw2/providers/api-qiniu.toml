@@ -9,9 +9,17 @@ auth = "api_key"
 base_url = "https://api.qnaigc.com/v1"
 format = "openai"
 
-# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+# ★ 2026-10-26 按上游实测重写：原表有 1 个模型上游已下架（mimo-v2-flash），用户从兜底表选到就是 404。
 models = [
-    "mimo-v2-flash",
+    "meituan/longcat-flash-lite",
+    "qwen3-vl-30b-a3b-thinking",
+    "deepseek-r1-0528",
+    "deepseek-r1",
+    "doubao-1.5-pro-32k",
+    "doubao-1.5-thinking-pro",
+    "doubao-1.5-vision-pro",
+    "glm-4.5",
 ]
 models_policy = "live"
 stream_dialect = "sse_delta"

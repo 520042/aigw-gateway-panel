@@ -5,6 +5,8 @@
 //! 白名单、`[::1]:8800` 这类 IPv6 字面量的括号处理、以及「哪些出站目标禁止被当成上游」。
 //! 拆出来后每条规则都能直接写单测，不用先拼一个 AppState 再发一个 HTTP 请求。
 
+pub use aigw_core::ct_eq;
+
 use aigw_registry::ProviderSpec;
 
 /// Host 头取主机名：`127.0.0.1:8800` → `127.0.0.1`；`[::1]:8800` → `[::1]`。
@@ -45,18 +47,6 @@ pub fn is_ip_literal(host: &str) -> bool {
     h.parse::<std::net::Ipv4Addr>().is_ok() || h.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
-/// 常量时间比较（令牌校验用，避免逐字节短路泄露长度/前缀）。
-pub fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
 
 /// Host / Origin 主机名是否放行。
 ///

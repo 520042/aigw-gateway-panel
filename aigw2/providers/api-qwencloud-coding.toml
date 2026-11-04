@@ -25,3 +25,5 @@ stream_dialect = "sse_delta"
 login_url = "https://home.qwencloud.com/api-keys"
 
 notes = "QwenCloud Coding Plan endpoint (9router alicode-intl, same base URL as FCC)."
+
+# ★ 2026-10-26 实测：/v1/models 返回 405「Coding Plan is currently only available for Coding Agents」——这个端点只服务 Coding Agent 客户端，网关形态的清单请求被拒。端点活着，是准入限制。

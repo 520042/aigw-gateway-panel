@@ -1,0 +1,20 @@
+# Accio（阿里 Phoenix 网关 / ADK）—— Gemini 风格信封，token 在请求体里
+# 一手来源：_refs/Agent2API 的 providers/accio/*（protocol.rs / stream.rs / endpoints.rs）
+id = "apk-accio"
+name = "Accio（阿里 Phoenix）"
+enabled = false
+region = "intl"
+
+# accessToken 直接粘贴；它不走 Authorization 头，而是被放进请求体的 token 字段。
+auth = "api_key"
+base_url = "https://phoenix-gw.alibaba.com/api/adk/llm"
+format = "openai"
+upstream_kind = "accio"
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://www.accio.com"
+
+# notes 用「单行 + 显式换行」而不是三引号：内容里有反引号/括号组合时三引号会被
+# TOML 解析器误判（本项目踩过两次）。
+notes = "★ 已停用（2026-10-26 实测）：ADK 推理网关 /api/adk/llm/generateContent 会返回阿里云**滑块验证页**（响应体含 rgv587_flag=sm 与 bixi-intl.alicdn.com/punish 链接），而不是 API 响应 —— 试过两组不同请求头（含/不含 Origin、Referer）结果相同。这说明该端点对非官方客户端有强制人机校验，纯 HTTP 网关形态无法通过（与本项目「不做浏览器/扫码」的铁律冲突）。\n同一时刻业务接口 /api/llm/config 正常回 403 auth failed（端点活着）。\n⇒ 保留 adapter 与配置以便官方放开后重启，但默认 enabled=false，避免用户配好 token 仍拿到 HTML 而困惑。\n★ 这家不是 OpenAI 协议：请求体是 Gemini 风格信封（contents/parts），响应是 ADK 帧，token 放在请求体而不是 Authorization 头。若将来可用，模型名靠 模型名@apk-accio 指定。"

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# 测量：跑真实浏览器操作序列，解析 METRIC 行。
+# 指标口径见 _e2e.js —— ops_pass_pct 是「模拟用户操作通过率」。
+set -uo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+# 确保有服务在跑（8801 是专用测试端口，不碰用户正在用的 8800）
+if ! curl -s -m 2 http://127.0.0.1:8801/api/health >/dev/null 2>&1; then
+  "C:/aigw-target/debug/aigw.exe" --port 8801 --no-import >/tmp/aigw_8801_measure.log 2>&1 &
+  disown 2>/dev/null || true
+  for _ in $(seq 1 60); do
+    curl -s -m 2 http://127.0.0.1:8801/api/health >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+fi
+
+# 先落盘再解析：不经 tee，避免管道悬挂让调用方等不到 EOF
+timeout 300 node _e2e.js >/tmp/aigw_measure_out.log 2>&1
+rc=$?
+
+# 无论 node 退出码如何，只要拿到了指标就报（失败会被上层识别为 discard）
+grep -E '^METRIC ' /tmp/aigw_measure_out.log || true
+grep -E '^操作序列' /tmp/aigw_measure_out.log || true
+
+exit 0

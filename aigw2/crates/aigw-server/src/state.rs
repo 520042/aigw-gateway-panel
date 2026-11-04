@@ -14,13 +14,13 @@ use aigw_relay::auth_login::LoginEngine;
 use aigw_relay::OutClient;
 use aigw_store::{AccountStore, CustomStore, FlagStore, FreeStore, Store};
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use crate::livecfg;
 use crate::{assemble_models, sync_custom_models, TaskHealth, LastErrors};
 use crate::ratelimit::RateLimiter;
-use crate::models::{custom_to_spec, free_to_spec, ModelsEntry, MODELS_FETCH_CONCURRENCY};
+use crate::models::{custom_to_spec, free_to_spec, models_ttl, ModelsEntry, MODELS_FETCH_CONCURRENCY};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -66,12 +66,11 @@ pub struct AppState {
     /// 面板访问令牌：`Some` 时 /api/* 必须携带（X-AIGW-Token / Bearer / Cookie）。
     /// `None` = 本机免令牌（默认；仅回环监听时允许）。
     ///
-    /// ★ 用 `Mutex` 而不是只读的 `Arc<Option<_>>`：面板里要能轮换令牌
-    /// （`/api/token`）。只读字段意味着「换一次令牌就重启一次服务」，而对外监听
-    /// 自动生成的令牌只在启动日志里出现过一次 —— 泄漏后没法在运行中换掉。
-    pub token: Arc<Mutex<Option<String>>>,
+    /// ★ 用 `RwLock` 支持多读单写：令牌读取非常频繁（每个 API 请求都要校验），
+    /// 只有 `/api/token` 轮换时才写入。RwLock 比 Mutex 更适合这种读多写少场景。
+    pub token: Arc<RwLock<Option<String>>>,
     /// 令牌来源（可变：面板里轮换后变成 "panel"）。
-    pub token_source: Arc<Mutex<&'static str>>,
+    pub token_source: Arc<RwLock<&'static str>>,
     /// ★ 2026-10-26（P3）：在线配置（并发/超时/重试/限流），面板改完立即生效。
     pub cfg: Arc<livecfg::RuntimeCfg>,
     /// Host / Origin 白名单（DNS 重绑定与跨站 CSRF 防线）。
@@ -114,6 +113,8 @@ pub struct AppState {
     ///   把线上 proxy.json 改成了外部代理），而且「服务用哪个目录」应当只由启动时
     ///   那一个值决定，运行中环境变量变了也不该换地方。
     pub data_dir: Arc<Option<std::path::PathBuf>>,
+    /// 全量平台缓存（custom/free/flags 变更时需清空）。
+    specs_cache: Arc<RwLock<Option<Vec<ProviderSpec>>>>,
 }
 
 /// 回环主机名白名单（Host / Origin 校验用）。
@@ -199,10 +200,10 @@ impl AppState {
             models_cache: Arc::new(Mutex::new(None)),
             models_cache_per: Arc::new(Mutex::new(std::collections::HashMap::new())),
             models_lock: Arc::new(tokio::sync::Mutex::new(())),
-            token: Arc::new(Mutex::new(None)),
+            token: Arc::new(RwLock::new(None)),
             allow_hosts: Arc::new(loopback_hosts()),
             allow_any_ip_host: Arc::new(false),
-            token_source: Arc::new(Mutex::new("")),
+            token_source: Arc::new(RwLock::new("")),
             // 默认从 data_dir 读；测试/未注入时用临时默认（不落盘）
             cfg: livecfg::RuntimeCfg::load(
                 &std::env::temp_dir().join("aigw-livecfg-default"),
@@ -214,6 +215,7 @@ impl AppState {
             last_err: Arc::new(LastErrors::new()),
             started_at: Arc::new(Instant::now()),
             data_dir: Arc::new(None),
+            specs_cache: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -264,7 +266,7 @@ impl AppState {
     /// 安全策略注入（main 用）：`token=None` 表示本机免令牌；`hosts` 覆盖 Host/Origin
     /// 白名单（对外监听时把绑定 IP 也加进去）。
     pub fn with_security(mut self, token: Option<String>, hosts: Vec<String>) -> AppState {
-        self.token = Arc::new(Mutex::new(token));
+        self.token = Arc::new(RwLock::new(token));
         self.allow_hosts = Arc::new(hosts);
         self
     }
@@ -288,7 +290,7 @@ impl AppState {
     }
 
     pub fn with_token_source(mut self, src: &'static str) -> AppState {
-        self.token_source = Arc::new(Mutex::new(src));
+        self.token_source = Arc::new(RwLock::new(src));
         self
     }
 
@@ -302,18 +304,18 @@ impl AppState {
     /// ★ 每次都要重新读锁，不要把结果缓存进长生命周期的局部变量：`/api/token`
     /// 能在请求之间换掉令牌，缓存住的值会让「刚轮换完只在部分路径生效」。
     pub fn current_token(&self) -> Option<String> {
-        self.token.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.token.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 当前令牌来源标签（"cli" / "env" / "auto" / "panel" / ""）。
     pub fn token_source_now(&self) -> &'static str {
-        *self.token_source.lock().unwrap_or_else(|e| e.into_inner())
+        *self.token_source.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// 轮换令牌：内存里的令牌与来源标签一起换（落盘由调用方负责）。
     pub fn set_panel_token(&self, t: Option<String>, src: &'static str) {
-        *self.token.lock().unwrap_or_else(|e| e.into_inner()) = t;
-        *self.token_source.lock().unwrap_or_else(|e| e.into_inner()) = src;
+        *self.token.write().unwrap_or_else(|e| e.into_inner()) = t;
+        *self.token_source.write().unwrap_or_else(|e| e.into_inner()) = src;
     }
 
     /// 通配监听（0.0.0.0 / ::）时放开「任意 IP 字面量 Host」。
@@ -326,9 +328,21 @@ impl AppState {
         self
     }
 
+    /// 清空全量平台缓存（custom/free/flags 变更时调用）。
+    pub fn invalidate_specs_cache(&self) {
+        if let Ok(mut g) = self.specs_cache.write() {
+            *g = None;
+        }
+    }
+
     /// 全量平台 = 文件 spec + 自定义 API + 公益站（动态并进）。
     /// 面板上停用的平台在这里统一置 `enabled=false`（文件 spec 不就地改写）。
     pub fn all_specs(&self) -> Vec<ProviderSpec> {
+        if let Ok(g) = self.specs_cache.read() {
+            if let Some(c) = g.as_ref() {
+                return c.clone();
+            }
+        }
         let mut v = self.specs.clone();
         for c in self.custom.rows() {
             let mut sp = custom_to_spec(&c);
@@ -347,6 +361,9 @@ impl AppState {
             if s.enabled && self.flags.is_platform_disabled(&s.id) {
                 s.enabled = false;
             }
+        }
+        if let Ok(mut g) = self.specs_cache.write() {
+            *g = Some(v.clone());
         }
         v
     }
@@ -701,13 +718,20 @@ impl AppState {
             .filter(|s| self.platform_routable(s))
             .filter(|s| s.models_policy == aigw_registry::ModelsPolicy::Live)
             .filter(|s| {
-                // 中毒时旧实现 `.map(..).unwrap_or(false)` 会把**所有** live 平台当成
-                // 「已有缓存」，于是一个都不补拉，冷启动的未知模型直接 503。
-                !self
+                // ★ 与 GET /v1/models 侧同一判据（models_ttl）：缺失或已过期的都要补拉。
+                //   旧实现只看 contains_key——缓存一旦建起来（哪怕早过了 TTL），chat
+                //   直连请求上游新上的模型就永远 404，直到有人 GET 过一次 /v1/models
+                //   或重启。长驻服务 + kilo 这类常上新模型的 live 平台，这是实打实的
+                //   模型获取缺口。中毒教训保留：判据拿不到时宁可按缺失处理（补拉）。
+                match self
                     .models_cache_per
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .contains_key(&s.id)
+                    .get(&s.id)
+                {
+                    None => true,
+                    Some((at, ids, ok)) => at.elapsed() >= models_ttl(ids, *ok),
+                }
             })
             .collect();
         if targets.is_empty() {

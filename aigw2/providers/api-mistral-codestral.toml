@@ -9,13 +9,16 @@ auth = "api_key"
 base_url = "https://codestral.mistral.ai/v1"
 format = "openai"
 
-# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+# ★ models_policy = "none"：Codestral（codestral.mistral.ai）**没有 /v1/models 端点**
+#   —— 实测 GET /v1/models 返回 404 {"message":"no Route matched with those values"}，
+#   而 POST /v1/chat/completions 是 401（存在、需要 Key）。
+#   用 live 会让体检每次都去拉一个必然 404 的地址、报假 FAIL。
 models = [
     "codestral-latest",
 ]
-models_policy = "live"
+models_policy = "none"
 stream_dialect = "sse_delta"
 
 login_url = "https://console.mistral.ai/"
 
-notes = "Codestral IDE endpoint, distinct from La Plateforme keys (FCC)."
+notes = "Codestral IDE endpoint, distinct from La Plateforme keys (FCC)。\n★ 该端点没有 /v1/models，模型靠 `codestral-latest@api-mistral-codestral` 后缀指定。"

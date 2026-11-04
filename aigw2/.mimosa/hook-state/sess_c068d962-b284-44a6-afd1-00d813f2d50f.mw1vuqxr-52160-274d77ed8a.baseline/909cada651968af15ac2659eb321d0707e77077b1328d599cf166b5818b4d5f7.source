@@ -1,0 +1,37 @@
+# 修复 8 个 sub-*.toml 的 login_url（先前 PowerShell 替换引入了字面 \n 粘连）
+import re, tomllib, io
+
+MAP = {
+  'sub-antigravity': 'https://antigravity.google.com',
+  'sub-claude': 'https://claude.ai/login',
+  'sub-codex': 'https://chatgpt.com/auth/login',
+  'sub-devin': 'https://app.devin.ai/login',
+  'sub-grok': 'https://grok.com',
+  'sub-kimi-ai': 'https://kimi.com/login',
+  'sub-kimi': 'https://kimi.moonshot.cn',
+  'sub-meta': 'https://muse.ai/login',
+}
+BASE = r'C:\Users\liang.zhao\Downloads\网关项目\aigw2\providers'
+
+def valid(p):
+    try:
+        with open(p, 'rb') as f:
+            tomllib.load(f)
+        return True
+    except Exception:
+        return False
+
+for pid, url in MAP.items():
+    p = f'{BASE}\\{pid}.toml'
+    with open(p, encoding='utf-8') as f:
+        raw = f.read()
+    # 字面 \n 粘连 → 真实换行
+    fixed = raw.replace('\\n', '\n')
+    # 规范化多余空行
+    fixed = re.sub(r'\n{3,}', '\n\n', fixed)
+    # 若 login_url 已正确存在则跳过插入
+    if not re.search(r'^login_url\s*=', fixed, re.M):
+        fixed = re.sub(r'(enabled = true\n)', r'\1login_url = "%s"\n' % url, fixed, count=1)
+    with open(p, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(fixed)
+    print(pid, 'OK' if valid(p) else 'STILL-INVALID')

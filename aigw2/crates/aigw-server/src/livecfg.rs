@@ -129,15 +129,22 @@ impl RuntimeCfg {
         })
     }
 
-    /// 批量更新（面板 POST 用）。返回 (改动字段, 被夹到边界的字段)。
+    /// 批量更新（面板 POST 用）。返回 `(改动字段, 被夹到边界的字段, 落盘错误)`。
     ///
     /// 只接受 FIELDS 里声明的名字——未知键忽略，不做「存着以后用」的宽容，
     /// 否则拼错的键会静默堆积在 runtime.json 里永远不生效。
-    pub fn apply(&self, patch: &Value) -> (Vec<String>, Vec<String>) {
+    ///
+    /// ★ 第三个返回值是**落盘结果**。旧实现是 `fn apply(..) -> (Vec, Vec)`，`save()`
+    ///   内部把 `fs::write` / `fs::rename` 的 `Err` 全部 `let _ =` 吞掉 —— 于是内存里
+    ///   改了、面板回「已更新 N 项，立即生效」、用户也确实看到行为变了，
+    ///   **但重启后全部回退**。用户只会记得「这个面板的设置有 bug，改两次才生效」，
+    ///   而真正的原因是磁盘写不进去（目录只读 / 磁盘满 / 杀软锁文件）。
+    ///   现在把错误交回调用方，面板能明确说「已生效但没存下来」。
+    pub fn apply(&self, patch: &Value) -> (Vec<String>, Vec<String>, Option<String>) {
         let mut changed: Vec<String> = Vec::new();
         let mut clamped: Vec<String> = Vec::new();
         let Some(obj) = patch.as_object() else {
-            return (changed, clamped);
+            return (changed, clamped, None);
         };
         for (name, _, _, _) in FIELDS {
             let Some(raw) = obj.get(*name).and_then(|x| x.as_u64()) else { continue };
@@ -159,18 +166,20 @@ impl RuntimeCfg {
                 changed.push((*name).to_string());
             }
         }
-        if !changed.is_empty() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            self.updated_at.store(now, Ordering::Relaxed);
-            self.save();
+        if changed.is_empty() {
+            return (changed, clamped, None);
         }
-        (changed, clamped)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.updated_at.store(now, Ordering::Relaxed);
+        let err = self.save().err();
+        (changed, clamped, err)
     }
 
-    fn save(&self) {
+    /// 落盘。返回 `Err(人话原因)` —— 调用方必须把失败告诉用户（见 `apply` 的注释）。
+    fn save(&self) -> Result<(), String> {
         let v = json!({
             "max_inflight": self.max_inflight(),
             "upstream_timeout_s": self.upstream_timeout_s.load(Ordering::Relaxed),
@@ -182,13 +191,22 @@ impl RuntimeCfg {
             "updated_at": self.updated_at.load(Ordering::Relaxed),
         });
         if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("无法创建目录 {}：{e}", dir.display()))?;
         }
-        // 原子落盘：先写 .tmp 再 rename，避免写一半崩溃留下坏文件
+        // 原子落盘：先写 .tmp 再 rename，避免写一半崩溃留下坏文件。
+        // ★ 不走 `aigw_store::write_atomic`：本文件刻意保持「aigw-server 内部小工具」
+        //   不引 store 的落盘闸门，避免与 Store 的写序互相阻塞（它们的写入频率都极低）。
+        let text = serde_json::to_string_pretty(&v)
+            .map_err(|e| format!("序列化失败：{e}"))?;
         let tmp = self.path.with_extension("json.tmp");
-        if std::fs::write(&tmp, serde_json::to_string_pretty(&v).unwrap_or_default()).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.path);
-        }
+        std::fs::write(&tmp, &text).map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            // rename 失败时 tmp 会留在原地；清掉它以免下次误判（失败本身已上报）
+            let _ = std::fs::remove_file(&tmp);
+            format!("重命名到 {} 失败：{e}", self.path.display())
+        })?;
+        Ok(())
     }
 }
 
@@ -213,7 +231,9 @@ mod tests {
     fn apply_and_persist() {
         let d = tmp_dir("apply");
         let c = RuntimeCfg::load(&d);
-        let (changed, clamped) = c.apply(&json!({"max_inflight": 5, "upstream_timeout_s": 600}));
+        let (changed, clamped, err) =
+            c.apply(&json!({"max_inflight": 5, "upstream_timeout_s": 600}));
+        assert!(err.is_none(), "临时目录可写，落盘不应失败：{err:?}");
         assert!(changed.contains(&"max_inflight".to_string()));
         assert!(clamped.is_empty());
         assert_eq!(c.max_inflight(), 5);
@@ -226,7 +246,7 @@ mod tests {
     #[test]
     fn out_of_range_is_clamped() {
         let c = RuntimeCfg::load(&tmp_dir("clamp"));
-        let (_, clamped) = c.apply(&json!({"max_inflight": 9999}));
+        let (_, clamped, _) = c.apply(&json!({"max_inflight": 9999}));
         assert!(clamped.contains(&"max_inflight".to_string()));
         assert_eq!(c.max_inflight(), 16, "应夹到上界");
     }
@@ -234,14 +254,39 @@ mod tests {
     #[test]
     fn unknown_keys_ignored() {
         let c = RuntimeCfg::load(&tmp_dir("unknown"));
-        let (changed, _) = c.apply(&json!({"not_a_field": 123}));
+        let (changed, _, _) = c.apply(&json!({"not_a_field": 123}));
         assert!(changed.is_empty());
+    }
+
+    /// ★ 落盘失败必须**可见**（旧实现静默吞掉 Err）。
+    ///
+    /// 场景：数据目录只读 / 磁盘满 / 杀软锁文件。旧行为是内存改了、面板回「已生效」、
+    /// 用户也确实看到行为变了，但重启后全部回退 —— 用户只会记得「这面板设置改两次
+    /// 才生效」，而真正的原因是磁盘写不进去。
+    #[test]
+    fn save_failure_is_reported_not_swallowed() {
+        let d = tmp_dir("savefail");
+        let c = RuntimeCfg::load(&d);
+        // 把 runtime.json 的父目录换成一个**文件**，让 create_dir_all 必然失败。
+        // （直接设只读目录在 Windows 上不可靠：管理员/ACL 可能仍然可写。）
+        let blocked = d.join("blocked");
+        std::fs::write(&blocked, b"x").unwrap();
+        // 用一个新实例，path 指向被文件占住的目录
+        let c2 = RuntimeCfg::load(&blocked.join("nested"));
+        let (changed, _, err) = c2.apply(&json!({"max_inflight": 7}));
+        assert!(changed.contains(&"max_inflight".to_string()), "内存应已改");
+        assert_eq!(c2.max_inflight(), 7, "内存值应已生效");
+        let e = err.expect("落盘失败必须返回错误，不能静默");
+        assert!(!e.is_empty(), "错误原因不能是空串");
+        // 原实例仍然正常（不受另一个实例的失败影响）
+        let (_, _, ok) = c.apply(&json!({"max_inflight": 3}));
+        assert!(ok.is_none(), "可写目录不应报错：{ok:?}");
     }
 
     #[test]
     fn zero_rpm_means_unlimited() {
         let c = RuntimeCfg::load(&tmp_dir("rpm"));
-        c.apply(&json!({"per_ip_rpm": 0}));
+        let _ = c.apply(&json!({"per_ip_rpm": 0}));
         assert_eq!(c.per_ip_rpm(), 0);
     }
 }

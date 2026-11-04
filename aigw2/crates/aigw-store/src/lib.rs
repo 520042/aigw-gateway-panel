@@ -910,7 +910,8 @@ impl Store {
         })
     }
 
-    pub fn usage_by_platform(&self) -> serde_json::Value {        let mut agg: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
+    pub fn usage_by_platform(&self) -> serde_json::Value {
+        let mut agg: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
         match &self.backend {
             Backend::Db(conn) => {
                 {
@@ -920,6 +921,7 @@ impl Store {
                                 COUNT(*),
                                 SUM(CASE WHEN ok<>0 THEN 1 ELSE 0 END),
                                 SUM(CASE WHEN ok=0 AND cancelled=0 THEN 1 ELSE 0 END),
+                                SUM(CASE WHEN cancelled<>0 THEN 1 ELSE 0 END),
                                 SUM(tin),
                                 SUM(tout)
                          FROM usage_events GROUP BY platform",
@@ -932,13 +934,17 @@ impl Store {
                                 r.get::<_, Option<i64>>(3)?.unwrap_or(0),
                                 r.get::<_, Option<i64>>(4)?.unwrap_or(0),
                                 r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                                r.get::<_, Option<i64>>(6)?.unwrap_or(0),
                             ))
                         }) {
-                            for (platform, req, ok_n, fail_n, tin, tout) in rows.flatten() {
+                            for (platform, req, ok_n, fail_n, cancelled, tin, tout) in
+                                rows.flatten()
+                            {
                                 agg.insert(
                                     platform,
                                     json!({
                                         "requests": req, "success": ok_n, "failed": fail_n,
+                                        "cancelled": cancelled,
                                         "tokensIn": tin, "tokensOut": tout,
                                     }),
                                 );
@@ -1129,6 +1135,43 @@ pub fn now_unix() -> f64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// 两种后端的聚合结果必须**同形状**：DB 走 SQL、JSON 走内存循环，
+    /// 一旦一边漏统计某个字段，面板在降级模式下就会少一列（前端读到 undefined）。
+    #[test]
+    fn backend_shapes_agree_on_every_counter() {
+        fn feed(st: &Store) {
+            let mut ok_ev = ev(100.0, "m", true);
+            ok_ev.platform = "p".into();
+            st.usage_record(ok_ev);
+            let mut fail_ev = ev(101.0, "m", false);
+            fail_ev.platform = "p".into();
+            st.usage_record(fail_ev);
+            let mut cancel_ev = ev(102.0, "m", false);
+            cancel_ev.platform = "p".into();
+            cancel_ev.cancelled = true;
+            st.usage_record(cancel_ev);
+        }
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Store::open(db_dir.path());
+        assert!(db.is_db());
+        feed(&db);
+        let json_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(json_dir.path().join("panel.db")).unwrap();
+        let js = Store::open(json_dir.path());
+        assert!(!js.is_db(), "这一条必须覆盖 JSON 降级后端");
+        feed(&js);
+
+        let a = db.usage_by_platform();
+        let b = js.usage_by_platform();
+        let ka: Vec<&str> = a["p"].as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        let kb: Vec<&str> = b["p"].as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        assert_eq!(ka, kb, "两种后端的字段集合必须一致");
+        assert_eq!(a["p"]["cancelled"], json!(1), "DB 后端也要统计 cancelled");
+        assert_eq!(b["p"]["cancelled"], json!(1));
+        assert_eq!(a["p"]["requests"], json!(3));
+        assert_eq!(b["p"]["requests"], json!(3));
+    }
     use super::*;
 
     fn ev(ts: f64, model: &str, ok: bool) -> UsageEvent {

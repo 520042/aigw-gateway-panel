@@ -332,19 +332,35 @@ pub(crate) fn upstream_hint(spec: &ProviderSpec, status: u16, class: Option<Erro
 // 糊过去：Claude Code / DSH 这类客户端是按 type 字段决定要不要重试的，
 // 类型不对就会把「额度耗尽」当成「参数写错」一直重试，或反过来直接放弃。
 
+/// Anthropic 协议的 `error.type`：**状态判定复用 `error_type`**，这里只做名称换算。
+///
+/// ★ 为什么不再单独写一份状态映射：那样会有三份（openai / anthropic / responses）
+///   各自演进。实测已经不同步 —— 501/504/402 在 Anthropic 那两个函数里落到
+///   `api_error`，而客户端把 `api_error` 当「上游故障」会重试一个永远失败的请求
+///   （501 是「你选错了端点」、504 是网关侧超时、402 是额度耗尽，都不是上游抖动）。
+fn anthropic_type(status: u16) -> &'static str {
+    match error_type(status) {
+        // 四种名字两边通用
+        "invalid_request_error" => "invalid_request_error",
+        "authentication_error" => "authentication_error",
+        "permission_error" => "permission_error",
+        "not_found_error" => "not_found_error",
+        "rate_limit_error" => "rate_limit_error",
+        // Anthropic 没有 insufficient_quota：额度耗尽更接近 rate_limit 语义
+        "insufficient_quota" => "rate_limit_error",
+        // 503 在 Anthropic 里是 overloaded_error（**可重试**），这是对的：
+        // 本地并发闸/上游限流确实是临时状态。
+        _ => {
+            if status == 503 {
+                "overloaded_error"
+            } else {
+                "api_error"
+            }
+        }
+    }
+}
 pub(crate) fn anthropic_error(status: u16, msg: &str) -> Response {
-    let etype = match status {
-        400 => "invalid_request_error",
-        // 413（请求体超上限）也是请求本身的问题，归 invalid_request_error。
-        // 漏了它会落到 api_error —— 客户端按「上游故障」重试一个永远超限的请求。
-        413 => "invalid_request_error",
-        401 => "authentication_error",
-        403 => "permission_error",
-        404 => "not_found_error",
-        429 => "rate_limit_error",
-        503 => "overloaded_error",
-        _ => "api_error",
-    };
+    let etype = anthropic_type(status);
     (
         StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
         Json(json!({"type": "error", "error": {"type": etype, "message": msg}})),
@@ -353,15 +369,7 @@ pub(crate) fn anthropic_error(status: u16, msg: &str) -> Response {
 }
 
 pub(crate) fn responses_error(status: u16, msg: &str) -> Response {
-    let kind = match status {
-        400 => "invalid_request_error",
-        413 => "invalid_request_error",
-        401 => "authentication_error",
-        403 => "permission_error",
-        404 => "not_found_error",
-        429 => "rate_limit_error",
-        _ => "api_error",
-    };
+    let kind = error_type(status);
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
     (
         code,
@@ -392,6 +400,27 @@ pub(crate) fn extract_upstream_message(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// ★ 三份协议的类型映射必须由**同一处状态判定**派生。
+    ///   实测不同步过：501（选错端点）/504（网关超时）/402（额度耗尽）在 Anthropic
+    ///   那两个手写映射里落到 `api_error`，客户端会把它们当上游抖动反复重试。
+    #[test]
+    fn error_types_share_one_status_classification() {
+        // OpenAI 侧（chat/completions 与 responses 共用 error_type）
+        assert_eq!(error_type(501), "invalid_request_error", "501 是选错端点，不是上游挂了");
+        assert_eq!(error_type(504), "gateway_timeout");
+        assert_eq!(error_type(402), "insufficient_quota");
+        assert_eq!(error_type(429), "rate_limit_error");
+        // Anthropic 侧：不允许再出现「什么都归 api_error」的退化
+        assert_eq!(anthropic_type(501), "invalid_request_error");
+        assert_eq!(anthropic_type(402), "rate_limit_error", "额度耗尽不该让客户端当上游抖动");
+        assert_eq!(anthropic_type(429), "rate_limit_error");
+        // 503 在 Anthropic 里是 overloaded_error（可重试）——临时状态确实该重试
+        assert_eq!(anthropic_type(503), "overloaded_error");
+        // 504 是网关侧超时，Anthropic 没有对应名，归 api_error（可重试）
+        assert_eq!(anthropic_type(504), "api_error");
+    }
+
     use super::*;
 
     #[test]

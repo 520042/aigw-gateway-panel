@@ -1,0 +1,24 @@
+# Accio 大陆站（阿里 Phoenix 网关 / ADK）—— 与 apk-accio 同一套实现，只有登录站点不同
+# 一手来源：_refs/Agent2API 的 providers/accio/endpoints.rs
+#   国际版  https://www.accio.com      （域名 accio.com → 区域 GLOBAL）
+#   国内版  https://www.accio-ai.com   （域名 accio-ai.com → 区域 CN）
+# ★ 两个地区**共用同一个业务网关**（phoenix-gw.alibaba.com），差别只在登录站点与
+#   `x-package-region`。因此这里 base_url 与国际站逐字相同，只有 region/login_url 不同。
+id = "apk-accio-cn"
+name = "Accio 大陆站（阿里 Phoenix）"
+enabled = false
+region = "cn"
+
+# accessToken 直接粘贴；它不走 Authorization 头，而是被放进请求体的 token 字段。
+auth = "api_key"
+base_url = "https://phoenix-gw.alibaba.com/api/adk/llm"
+format = "openai"
+upstream_kind = "accio"
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://www.accio-ai.com"
+
+# notes 用「单行 + 显式换行」而不是三引号：内容里有反引号/括号组合时三引号会被
+# TOML 解析器误判（本项目踩过两次）。
+notes = "★ 已停用（2026-10-26 实测）：ADK 推理网关 /api/adk/llm/generateContent 会返回阿里云**滑块验证页**（响应体含 rgv587_flag=sm 与 bixi-intl.alicdn.com/punish 链接），而不是 API 响应 —— 与国际站同源同表现。保留配置以便官方放开后重启。\n★ 与国际站（apk-accio）的差别只有登录站点：大陆站账号在 www.accio-ai.com 登录，国际站在 www.accio.com。**两站账号不通用**，用错站的号会「登录成功但拿不到模型」。\n★ 跳转登录由后端 accio_start 生成授权页，域名判据是 id 的 `-cn` 后缀 = 大陆站。\n★ 这家不是 OpenAI 协议：请求体是 Gemini 风格信封（contents/parts），响应是 ADK 帧，token 放在请求体而不是 Authorization 头。模型名靠 模型名@apk-accio-cn 指定。"

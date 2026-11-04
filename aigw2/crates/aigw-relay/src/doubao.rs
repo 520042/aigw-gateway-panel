@@ -522,3 +522,135 @@ pub async fn verify(http: &reqwest::Client, _spec: &ProviderSpec, secret: &str) 
         Err(_) => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 设备号必须是 **19 位纯数字**：豆包按固定长度校验，短一位或多一个非数字
+    /// 字符都会被当成非法设备（表现为滑块验证 710022004）。这条断言同时钉住
+    /// `{:0<19}` 的补位方向 —— 左对齐补空格曾经让整条车道风控全挂。
+    #[test]
+    fn device_ids_are_nineteen_digits() {
+        for secret in ["", "cookie-abc", "很长的一串中文凭据", "x"] {
+            let (dev, web) = device_ids(secret);
+            assert_eq!(dev.len(), 19, "device_id 必须 19 位: {dev:?} (secret={secret:?})");
+            assert_eq!(dev, web, "device_id 与 web_id 必须同源同值");
+            assert!(
+                dev.chars().all(|c| c.is_ascii_digit()),
+                "device_id 必须全数字: {dev:?}"
+            );
+        }
+    }
+
+    /// 同凭据必须派生同设备号：换设备号等于换设备，会话不能续接、风控也会重判。
+    #[test]
+    fn device_ids_are_stable_per_credential() {
+        assert_eq!(device_ids("same"), device_ids("same"));
+        assert_ne!(device_ids("a"), device_ids("b"));
+    }
+
+    /// 设备的 query 参数必须**成套自洽**：砍任何一条都会触发风控滑块。
+    /// 这里钉住「必须出现的键」，防止有人为了清爽删参数。
+    #[test]
+    fn url_params_carry_the_full_device_fingerprint() {
+        let q = url_params("secret");
+        for key in [
+            "aid=497858",
+            "device_platform=web",
+            "pc_version=",
+            "real_aid=497858",
+            "samantha_web=1",
+            "tea_uuid=",
+            "use-olympus-account=1",
+            "web_id=",
+        ] {
+            assert!(q.contains(key), "缺参数 {key}: {q}");
+        }
+        // tea_uuid 与 device_id 必须同值（强约束）
+        let dev = device_ids("secret").0;
+        assert!(q.contains(&format!("device_id={dev}")), "{q}");
+        assert!(q.contains(&format!("tea_uuid={dev}")), "{q}");
+        assert!(q.contains(&format!("web_id={dev}")), "{q}");
+    }
+
+    /// 模式标志决定「思考 / 联网 / 自动 CoT」，发错等于让用户多花钱或少了能力。
+    #[test]
+    fn mode_flags_match_the_documented_tiers() {
+        assert_eq!(mode_flags("doubao-think")["use_deep_think"], json!(true));
+        let expert = mode_flags("doubao-expert");
+        assert_eq!(expert["use_deep_think"], json!(true));
+        assert_eq!(expert["use_search"], json!(true));
+        assert_eq!(mode_flags("doubao-coding")["use_auto_cot"], json!(true));
+        // 普通档不带任何标志（别偷偷开思考）
+        assert_eq!(mode_flags("doubao-fast"), json!({}));
+        assert_eq!(mode_flags("doubao-2.1-turbo"), json!({}));
+    }
+
+    /// 模型白名单：认得的必须全在，不认得的一个都不能混进去
+    /// （误判会让非豆包模型名被路由到这条车道）。
+    #[test]
+    fn is_doubao_model_accepts_known_and_rejects_others() {
+        for m in [
+            "doubao-pro", "doubao-fast", "doubao-lite", "doubao-think",
+            "doubao-expert", "doubao-coding", "doubao-2.1-turbo",
+            "doubao-2.1-turbo-alt", "doubao-2.1-pro", "doubao-2.1-lite",
+        ] {
+            assert!(is_doubao_model(m), "{m} 应当被认作豆包模型");
+        }
+        for m in ["gpt-4o", "doubao-unknown", "doubao", "", "qwen"] {
+            assert!(!is_doubao_model(m), "{m} 不该被认作豆包模型");
+        }
+    }
+
+    /// SSE 解析：外层 JSON 里的 event_data 是**内嵌 JSON 字符串**，必须再解一层。
+    /// 只解外层会拿到一个字符串而不是对象，正文永远是空 —— 症状是「有回复但没内容」。
+    #[test]
+    fn sse_parse_unwraps_nested_event_data() {
+        let line = r#"data: {"event_type":2001,"event_data":"{\"message\":{\"content_type\":10000,\"content\":\"{\\\"text\\\":\\\"你好\\\"}\"}}"}"#;
+        let (et, inner) = sse_parse(line).expect("应当解析出帧");
+        assert_eq!(et, 2001);
+        assert!(inner.is_object(), "event_data 应当被再解一层: {inner}");
+        assert_eq!(inner["message"]["content_type"], json!(10000));
+    }
+
+    /// [DONE] 与非 data 行都不能产出帧。
+    #[test]
+    fn sse_parse_skips_done_and_non_data_lines() {
+        assert!(sse_parse("data: [DONE]").is_none());
+        assert!(sse_parse("event: foo").is_none());
+        assert!(sse_parse("").is_none());
+        // 坏 JSON 只是这一帧丢，不 panic
+        assert!(sse_parse("data: {bad json").is_none());
+    }
+
+    /// 正文抽取：content_type 白名单决定哪些帧算正文。白名单外的帧
+    /// （插件/工具事件）不能被拼进回答。
+    #[test]
+    fn extract_takes_text_only_from_whitelisted_content_types() {
+        let frame = |ct: i64| {
+            let inner = json!({"message": {"content_type": ct, "content": "{\"text\":\"正文\"}"}});
+            extract(&(2001, inner))
+        };
+        for ct in [10000, 2001, 2008, 2071] {
+            let (text, _, _) = frame(ct);
+            assert!(!text.is_empty() || ct == 2008, "content_type={ct} 应当被取用");
+        }
+        // 非白名单：不产出正文
+        let (text, _, _) = frame(9999);
+        assert!(text.is_empty(), "content_type=9999 不该产出正文: {text:?}");
+        // 非 2001 的 event_type 同样不产出
+        let (text, _, _) = extract(&(2002, json!({"message": {"content_type": 10000, "content": "{\"text\":\"x\"}"}})));
+        assert!(text.is_empty());
+    }
+
+    /// content_type=2008 是「思考帧」：正文为空，内容全部归到 thinking。
+    /// 若照普通帧处理，思考过程会被当成回答正文吐给用户。
+    #[test]
+    fn extract_routes_2008_to_thinking() {
+        let inner = json!({"message": {"content_type": 2008, "content": "{\"text\":\"我在想\"}"}});
+        let (text, thinking, _) = extract(&(2001, inner));
+        assert!(text.is_empty(), "2008 不该产出正文: {text:?}");
+        assert_eq!(thinking, "我在想");
+    }
+}

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -9,6 +9,19 @@
 <!-- ★ 内联 SVG 图标：浏览器默认请求 /favicon.ico，没有这个文件时会落进 SPA 回退
      返回 index.html（控制台里那条 404 就是这个），还多一次无效请求。 -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231b1d22'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='%2359c8ff'%3E%E2%97%88%3C/text%3E%3C/svg%3E">
+<!-- ★ 主题必须在样式表**之前**定下来。
+     放在 body 末尾或 app.js 里会出现「先渲染亮色再翻成暗色」的闪白（FOUC）——
+     本地面板每次刷新都闪一下，很难受。这里同步读 localStorage，首帧就是对的。
+     取值：light / dark / auto（auto = 跟随系统，由 style.css 的媒体查询接管）。 -->
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('aigw-theme') || 'auto';
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    // auto 时不设属性，交给 CSS 的 prefers-color-scheme
+  } catch (e) { /* 隐私模式下 localStorage 可能抛错，忽略即可 */ }
+})();
+</script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -22,6 +35,9 @@
            用量看板同属「已接入资源怎么用/用了多少」，放一栏才符合使用路径。 -->
       <button class="navbtn" data-v="accounts"><span class="ic">☰</span>模型与用量</button>
       <button class="navbtn" data-v="usage"><span class="ic">◔</span>用量明细</button>
+      <!-- ★ 2026-11 补：日志视图（viewLogs）一直有实现，但导航里没有入口，
+           用户只能手改 URL #/logs 才进得去。补上。 -->
+      <button class="navbtn" data-v="logs"><span class="ic">≡</span>日志</button>
       <!-- ★ 2026-10-26（P3）：运行配置（并发/超时/重试/限流，热更新无需重启） -->
       <button class="navbtn" data-v="runtime"><span class="ic">⚙</span>运行配置</button>
       <button class="navbtn" data-v="about"><span class="ic">ⓘ</span>关于</button>

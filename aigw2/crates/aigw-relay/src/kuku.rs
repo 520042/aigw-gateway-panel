@@ -14,6 +14,7 @@
 //! 业务失败是 HTTP 200 + status.code/errno != 0，所以**不能只看 HTTP 状态码**。
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er};
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
 use base64::Engine;
@@ -37,13 +38,6 @@ const PATH_MODEL_LIST: &str = "/wenchain/genflowpro/model/list";
 const PATH_SENDMSG: &str = "/wenchain/genflowpro/sendmsg";
 const PATH_SSE: &str = "/wenchain/genflowpro/sse/getchatcontent";
 
-fn er(status: u16, body: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError {
-        status,
-        body: body.into(),
-        class,
-    }
-}
 
 fn nanos() -> u128 {
     std::time::SystemTime::now()
@@ -785,4 +779,123 @@ pub async fn fetch_models(http: &reqwest::Client, spec: &ProviderSpec, secret: &
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 凭据解析接受两种粘贴形态：整段 Cookie 与 JSON。百度还会下发
+    /// `_BFESS` 变体，落到解析器里必须是同一条凭据 —— 漏了它，用户从
+    /// 新版控制台复制的 Cookie 会直接报「请包含 BDUSS 和 STOKEN」。
+    #[test]
+    fn parse_cred_accepts_cookie_and_json_shapes() {
+        // 整段 Cookie
+        assert_eq!(
+            parse_cred("other=1; BDUSS=BD9; STOKEN=ST9"),
+            Ok(("BD9".into(), "ST9".into()))
+        );
+        // _BFESS 变体
+        assert_eq!(
+            parse_cred("BDUSS_BFESS=B1; STOKEN_BFESS=S1"),
+            Ok(("B1".into(), "S1".into()))
+        );
+        // JSON（小写键）
+        assert_eq!(
+            parse_cred(r#"{"bduss":"BJ","stoken":"SJ"}"#),
+            Ok(("BJ".into(), "SJ".into()))
+        );
+        // JSON（大写键）
+        assert_eq!(
+            parse_cred(r#"{"BDUSS":"BU","STOKEN":"SU"}"#),
+            Ok(("BU".into(), "SU".into()))
+        );
+    }
+
+    /// 缺一条就必须报错，而不是拼出半个凭据去撞上游 401 ——
+    /// 用户看到「凭据不全」能自己修，看到 401 只会以为账号被封。
+    #[test]
+    fn parse_cred_rejects_incomplete_credentials() {
+        assert!(parse_cred("BDUSS=only").is_err());
+        assert!(parse_cred("STOKEN=only").is_err());
+        assert!(parse_cred("garbage").is_err());
+        assert!(parse_cred(r#"{"bduss":"only"}"#).is_err());
+        // 错误文案要指名要什么
+        let e = parse_cred("").unwrap_err();
+        assert!(e.contains("BDUSS") && e.contains("STOKEN"), "{e}");
+    }
+
+    /// 设备号由凭据确定性派生：同号必须同设备号（换设备号等于换设备，
+    /// 上游会当成新会话），且不能出现 0（下游/上游都有非零假设）。
+    #[test]
+    fn device_id_is_deterministic_and_nonzero() {
+        let a = device_id("bduss-abc");
+        assert_eq!(a, device_id("bduss-abc"), "同凭据必须同设备号");
+        assert_ne!(a, device_id("bduss-xyz"), "不同凭据应当不同设备号");
+        assert!(a.chars().all(|c| c.is_ascii_digit()), "设备号应全数字: {a}");
+        assert!(!a.is_empty() && a != "0", "设备号不能为空或 0: {a}");
+    }
+
+    /// reasoning_effort → 库库思考档位。未知值必须回 0（不思考），
+    /// 而不是默认给一档 —— 用户没要思考时不该替他花钱。
+    #[test]
+    fn think_mode_maps_effort_and_defaults_to_off() {
+        let mode = |v: Value| think_mode(&v);
+        assert_eq!(mode(json!({"reasoning_effort": "minimal"})), 1);
+        assert_eq!(mode(json!({"reasoning_effort": "low"})), 1);
+        assert_eq!(mode(json!({"reasoning_effort": "medium"})), 2);
+        assert_eq!(mode(json!({"reasoning_effort": "high"})), 3);
+        assert_eq!(mode(json!({"reasoning_effort": "xhigh"})), 4);
+        // 缺省 / 未知 → 关思考
+        assert_eq!(mode(json!({})), 0);
+        assert_eq!(mode(json!({"reasoning_effort": "bogus"})), 0);
+    }
+
+    /// 多轮历史要整段带进对比转录（库库没有原生多轮），单轮则原样发，
+    /// 不该套一层 CONVERSATION_JSON 外壳 —— 那会让回答变成翻译腔。
+    #[test]
+    fn build_prompt_wraps_only_multi_turn() {
+        let single = vec![json!({"role": "user", "content": "问题"})];
+        let (text, inst) = build_prompt(&single).unwrap();
+        assert_eq!(text, "问题");
+        assert!(inst.is_empty());
+
+        let multi = vec![
+            json!({"role": "system", "content": "系统提示"}),
+            json!({"role": "user", "content": "第一问"}),
+            json!({"role": "assistant", "content": "第一答"}),
+            json!({"role": "user", "content": "第二问"}),
+        ];
+        let (text, inst) = build_prompt(&multi).unwrap();
+        assert_eq!(inst, "系统提示");
+        assert!(text.contains("CONVERSATION_JSON"), "{text}");
+        assert!(text.contains("第一问") && text.contains("第一答"), "{text}");
+    }
+
+    /// 没有任何 user 消息时必须 400，而不是发一个空请求给上游。
+    #[test]
+    fn build_prompt_requires_a_user_turn() {
+        let only_system = vec![json!({"role": "system", "content": "只有系统提示"})];
+        let err = build_prompt(&only_system).unwrap_err();
+        assert_eq!(err.status, 400);
+        // 纯空白的 user 也算没有
+        let blank = vec![json!({"role": "user", "content": "   "})];
+        assert!(build_prompt(&blank).is_err());
+    }
+
+    /// 多模态 content 数组只取文本块，非文本块（图片等）被跳过但也
+    /// 不能让整条消息消失 —— 否则带图的一轮会变成空消息被丢掉。
+    #[test]
+    fn msg_text_extracts_text_blocks_only() {
+        let m = json!({"role": "user", "content": [
+            {"type": "text", "text": "看这个"},
+            {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
+            {"type": "input_text", "text": "还有这个"},
+        ]});
+        assert_eq!(msg_text(&m), "看这个还有这个");
+        // 纯字符串形态
+        assert_eq!(msg_text(&json!({"content": "纯文本"})), "纯文本");
+        // 缺 content
+        assert_eq!(msg_text(&json!({})), "");
+    }
 }

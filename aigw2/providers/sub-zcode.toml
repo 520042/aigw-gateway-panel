@@ -1,0 +1,44 @@
+# ZCode 国内站（智谱开放平台 · 编码套餐订阅通道）
+#
+# 一手来源：_refs/Agent2API/desktop-tauri/src-tauri/server/src/server/core/providers/zcode
+#          + 上游权威配置 GET https://zcode.z.ai/api/v1/client/configs（2026-10-26 实测）
+#
+# ★ 与 api-zhipu（官方 API Key 通道）不是一回事：那条路要自己去开放平台申请 Key、
+#   走开放平台计费；本条走的是 **ZCode 客户端的订阅登录态**（Coding Plan 额度），
+#   不需要 API Key。两者并存，各取所需。
+#
+# ★ 推理端点是 OpenAI 兼容的（openai:chat schema），因此无需 adapter，走默认字节透传。
+#   端点与模型名均取自上游 configs，不靠推测。
+#
+# ★ 端点取舍（别照 configs 直接改）：上游 configs 的 builtinProviders 给的 coding-plan 是
+#   **anthropic schema**（baseUrl /api/anthropic），而这里配的是 /api/coding/paas/v4 ——
+#   后者在 configs 的 providers[] 里标为 openai:chat，与本面板「只做 OpenAI 透传、
+#   不做协议转换」的架构一致（format=anthropic 的源会被 platform_supported 判为不支持）。
+#   两条路径实测都活着（401 = 缺凭据）。要改成 anthropic 端点，得先给 relay 加转换。
+#
+# 凭据：粘贴 access_token（从 ZCode 客户端登录后取得）。登录态的原生链路是
+#       「跳转 + 轮询」（POST /api/v1/oauth/cli/init 拿 authorize_url → 用户打开 →
+#       GET /api/v1/oauth/cli/poll/{flow_id} 取 token，实测可用），尚未接入本面板的
+#       登录引擎；在此之前用粘贴凭据。
+id = "sub-zcode"
+name = "ZCode 国内站（订阅）"
+enabled = true
+region = "cn"
+login_url = "https://zcode.z.ai"
+
+auth = "api_key"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+models_path = "/models"
+format = "openai"
+
+# 上游 configs 的 builtinModels（2026-10-26 实测）：GLM-5.3（defaultModel）/ GLM-5.3-Flash。
+# ★ 早先这里写的是 GLM-5.2 / GLM-5-Turbo —— 那是 configs 里 providers[] 某个旧条目的值，
+#   不是权威清单。权威来源是 builtinModels 与 builtinProviders[].defaultModel。
+models = [
+    "GLM-5.3",
+    "GLM-5.3-Flash",
+]
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+notes = "ZCode 编码套餐订阅通道（国内）。与 api-zhipu 的官方 API Key 通道并存：想用开放平台 Key 的用 api-zhipu，想用 ZCode 订阅额度的用本条。凭据为订阅登录态的 access_token，粘贴即可；原生的跳转+轮询登录链路尚未接入。"

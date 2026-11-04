@@ -1,0 +1,46 @@
+# Command Code —— AI SDK v5 风格的 NDJSON 上游（自定义 adapter，非 OpenAI 透传）
+# 一手来源：_refs/Agent2API 的 providers/commandcode/*（endpoints.rs / plan.rs /
+#          protocol/commandcode_outbound.rs），规格 _recon/commandcode-spec.md
+id = "api-commandcode"
+name = "Command Code"
+enabled = true
+region = "intl"
+
+auth = "api_key"
+base_url = "https://api.commandcode.ai"
+format = "openai"
+# 生成端点不是 /chat/completions，是 AI SDK 风格的 /alpha/generate
+chat_path = "/alpha/generate"
+# 模型目录是公开可读的 OpenAI 标准格式（实测 200，94 个模型）
+models_path = "/provider/v1/models"
+models_policy = "live"
+upstream_kind = "commandcode"
+stream_dialect = "sse_delta"
+
+# 静态兜底（live 拉不到时用）：按上游目录 94 条里的主力模型选
+models = [
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "gpt-6-astra",
+    "gpt-5.5",
+    "deepseek/deepseek-v4.1-flash",
+    "zai-org/GLM-5.3",
+    "moonshotai/Kimi-K3.1-Pro",
+    "Qwen/Qwen3.8-Max",
+    "google/gemini-3.8-flash",
+    "xai/grok-4.7",
+]
+
+login_url = "https://commandcode.ai/studio"
+
+notes = """用户 Key 形如 user_ 开头，在 commandcode.ai/studio 获取后粘贴。
+
+★ 这一家**不是 OpenAI 透传**（走 upstream_kind=commandcode 的自定义 adapter）：
+  · 生成端点 /alpha/generate，请求体是 {config, params:{model, messages, max_tokens,
+    stream, system, ...}}，system 提到顶层、不在 messages 里；
+  · 响应是 application/x-ndjson（一行一个 JSON、没有 data: 前缀），且 **HTTP 恒 200**
+    —— 认证失败/限流/余额不足全部以流内 {"type":"error"} 事件表达，所以"看状态码
+    判断成败"在这里完全失效；
+  · 请求头要带 CLI 伪装（User-Agent: cli / x-command-code-version / x-cli-environment）。
+    实测无 Key 时带不带都回同样的 401，所以它不是鉴权条件；但同一账号的两种请求来自
+    两种 UA 是可观测的破绽，因此照样逐字对齐。"""

@@ -9,16 +9,17 @@ auth = "api_key"
 base_url = "https://api.llm7.io/v1"
 format = "openai"
 
-# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+# ★ 2026-10-26 按上游实测重写：原表有 6 个模型上游已下架（gpt-5.5 / deepseek-v4-flash / grok-4.5 / default 等），用户从兜底表选到就是 404。
 models = [
-    "gpt-5.5",
     "claude-opus-5",
-    "deepseek-v4-flash",
-    "grok-4.5",
     "kimi-k3",
-    "default",
-    "fast",
-    "pro",
+    "DeepSeek-V4.1-Flash",
+    "Inkling-Small",
+    "L3-8B-Lunaris-v1-Turbo",
+    "Voxtral-Mini-3B-2507",
+    "Voxtral-Small-24B-2507",
+    "anthropic/claude-opus-4-6",
 ]
 models_policy = "live"
 stream_dialect = "sse_delta"

@@ -54,25 +54,53 @@ async function refreshFree() {
 
 const $ = (s) => document.querySelector(s);
 // ── 弹窗骨架 ──────────────────────────────────────────────
-// 全站 14 处 modal 都是同一套外壳（遮罩 + 标题栏 + ✕ + 内容区），标题文案与内容不同而已。
+// 全站 22 处 modal 都是同一套外壳（遮罩 + 标题栏 + ✕ + 内容区），标题文案与内容不同而已。
 // 抽成两个小函数，避免每加一个弹窗就重抄一遍关闭逻辑（过去就因为某处漏写 or 写错
 // "this.closest('.modal-mask').remove()" 导致点了 ✕ 关不掉）。
 //
 // 点击遮罩关闭：判定 event.target === this，只有点在**遮罩本身**（不是冒泡上来的内容区）
 // 才关 —— 否则在输入框里拖选文本松手都会被当成「点外面」。
+//
+// ESC 关闭：全站只在一个 keydown 监听里做，按「最上层弹窗」关一个。
+// 以前每个弹窗各写各的，结果是有的能按 ESC 有的不能；而且遮罩层是可以叠的
+// （抽屉里再开「积分明细」），各自监听会一按全关。
 function modalShell(title, bodyHtml, opts) {
   const o = opts || {};
   const cls = o.drawer ? 'modal drawer' : 'modal';
   const id = o.id ? ' id="' + o.id + '"' : '';
-  const onMask = o.onMask || '';
   const close = o.close || 'this.closest(\'.modal-mask\').remove()';
+  // 遮罩点击默认就是「关闭」。以前这里写的是 o.onMask || ''，拼出来变成
+  // onclick="if(event.target===this){}" —— 空语句，什么都没发生。结果是除了
+  // 自己传了 onMask 的抽屉，其余 21 个弹窗点遮罩都关不掉（只能找 ✕ 或 ESC）。
+  const onMask = o.onMask || close;
   const x = o.closable === false ? '' : '<b class="x" onclick="' + close + '">✕</b>';
+  // data-close 让 ESC 走同一个关闭动作：抽屉要连带清 SRC_EXPAND 再重渲染，
+  // 直接 remove 会留下「已展开」的幽灵状态。
+  const escAttr = o.closable === false ? ' data-noclose="1"' : ' data-close="' + esc3(close) + '"';
   return '<div class="modal-mask" onclick="if(event.target===this){' + onMask + '}">'
-    + '<div class="' + cls + '"' + id + '>'
+    + '<div class="' + cls + '"' + id + escAttr + '>'
     + '<div class="modal-hd">' + title + x + '</div>'
     + '<div class="modal-bd">' + bodyHtml + '</div>'
     + '</div></div>';
 }
+// 把关闭表达式塞进属性值时用的转义（属性是双引号包起来的）。
+const esc3 = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+// 全局只挂一个 ESC 监听：关最上层那个弹窗，用它的 data-close 动作。
+// 有弹窗时 ESC 一律归它 —— 页面自己的 ESC（日志/接入源搜索框清空关键词）在
+// 没有弹窗时才可能触发，两者不会打架。
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const masks = document.querySelectorAll('.modal-mask');
+  if (!masks.length) return;
+  const top = masks[masks.length - 1];
+  const box = top.querySelector('.modal');
+  if (!box || box.dataset.noclose) return;
+  e.preventDefault();
+  const expr = box.dataset.close;
+  if (expr) { try { new Function(expr).call(box); } catch (_) { top.remove(); } }
+  else top.remove();
+});
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -161,10 +189,54 @@ function renderHdBtns(v) {
   }
   // 代理设置：每个页面都有（直连/全局/绕过大陆，所有流程即时生效）
   btns.push(`<button class="btn sm" onclick="showProxySettings()" title="出站网络代理（直连 / 全局 / 绕过大陆）">⇅ 代理设置</button>`);
+  // 主题切换：每个页面都有。图标反映「当前是什么」，点一下切下一个。
+  const t = currentTheme();
+  const ico = t === 'light' ? '☀' : t === 'dark' ? '☾' : '◐';
+  const lbl = t === 'light' ? '亮色' : t === 'dark' ? '暗色' : '跟随系统';
+  btns.push(`<button class="btn sm" onclick="cycleTheme()" title="主题：${lbl}（点击切换 亮色 → 暗色 → 跟随系统）">${ico} ${lbl}</button>`);
   // 全局刷新：每个页面都有（替代原「退出」）
   btns.push(`<button class="btn sm" onclick="window.location.reload()" title="全局刷新（重载面板数据）">⟳ 刷新</button>`);
   box.innerHTML = btns.join('');
 }
+
+// ── 主题 ────────────────────────────────────────────────────────────────
+// 三个取值：light / dark / auto（auto = 跟随系统，由 CSS 的 prefers-color-scheme 接管）。
+// 真实来源是 localStorage['aigw-theme']，index.html 里的内联脚本在首帧就应用它，
+// 这里只负责读取与轮转。不要在 JS 里另存一份状态 —— 两处不同步就会出现
+// 「刷新后按钮显示暗色、页面其实是亮色」。
+function currentTheme() {
+  try {
+    const t = localStorage.getItem('aigw-theme');
+    return (t === 'light' || t === 'dark') ? t : 'auto';
+  } catch (_) { return 'auto'; }
+}
+
+function applyTheme(t) {
+  const root = document.documentElement;
+  if (t === 'light' || t === 'dark') root.setAttribute('data-theme', t);
+  else root.removeAttribute('data-theme');   // auto：交回给 CSS 媒体查询
+  try { localStorage.setItem('aigw-theme', t); } catch (_) {}
+}
+
+function cycleTheme() {
+  const order = ['auto', 'light', 'dark'];
+  const next = order[(order.indexOf(currentTheme()) + 1) % order.length];
+  // 只在**这一次切换**期间开启颜色过渡：常驻过渡会让页面滚动/重排也走动画。
+  const html = document.documentElement;
+  html.classList.add('theme-anim');
+  applyTheme(next);
+  setTimeout(() => html.classList.remove('theme-anim'), 260);
+  // 顶栏按钮文字要跟着变，但不必重渲染整个视图（那会打断正在进行的轮询）
+  renderHdBtns(currentViewId());
+}
+
+/// 当前视图 id（与 route() 同一套推导，供非路由场景读取）。
+function currentViewId() {
+  const v = (location.hash || '#/overview').replace('#/', '');
+  return VIEWS[v] ? v : 'overview';
+}
+
+
 
 // 代理设置弹窗（direct / global / bypass_cn）
 async function showProxySettings() {
@@ -186,9 +258,9 @@ async function showProxySettings() {
       <input type="hidden" id="px-mode" value="${cur.mode}">
       <label>代理地址</label>
       <input class="q mono" id="px-url" placeholder="http://127.0.0.1:7890" value="${esc(cur.url || '')}" ${cur.mode === 'direct' ? 'disabled' : ''}>
-      <div style="margin:6px 0 2px"><button class="btn sm" onclick="testProxy()">⚡ 测试连通</button> <span id="pxTest" class="faint"></span></div>
-      <div class="faint" style="font-size:12px">保存后立即生效（登录、上游转发、模型同步全部从代理走），无需重启</div>
-      <div class="faint" style="font-size:12px">本机与局域网地址（127.0.0.1 / 192.168.x / localhost / *.local 等）在任何模式下都直连：代理进程连不到你的内网，硬走代理只会得到"连不上"的假故障</div>
+      <div style="margin:var(--sp-2) 0 2px"><button class="btn sm" onclick="testProxy()">⚡ 测试连通</button> <span id="pxTest" class="faint"></span></div>
+      <div class="faint fs-sm">保存后立即生效（登录、上游转发、模型同步全部从代理走），无需重启</div>
+      <div class="faint fs-sm">本机与局域网地址（127.0.0.1 / 192.168.x / localhost / *.local 等）在任何模式下都直连：代理进程连不到你的内网，硬走代理只会得到"连不上"的假故障</div>
       <div class="modal-foot">
         <button class="btn pri" onclick="saveProxy()">保存并应用</button>
       </div>`);
@@ -210,9 +282,9 @@ async function testProxy() {
     return;
   }
   if (r && r.reachable) {
-    out.innerHTML = "<span style=\"color:#4cc38a\">✓ " + esc(r.message || "可达") + "</span>";
+    out.innerHTML = "<span class=\"c-ok\">✓ " + esc(r.message || "可达") + "</span>";
   } else {
-    out.innerHTML = "<span style=\"color:#f06a6a\">✗ " + esc((r && r.message) || "不可达") + "</span>";
+    out.innerHTML = "<span class=\"c-err\">✗ " + esc((r && r.message) || "不可达") + "</span>";
   }
 }
 
@@ -309,7 +381,7 @@ async function showGatewayInfo() {
     // 成功也要带说明：否则「刷新成功但只拿到 0 个站」与「拿到 43 个站」在面板上一样。
     if (t.last_ok) line += '（' + t.last_ok + '）';
     if (t.last_err) line += ' · 最近失败（' + agoText(t.last_err_s_ago) + '）：' + t.last_err;
-    taskHtml += '<div class="faint" style="font-size:12px">' + esc(line) + '</div>';
+    taskHtml += '<div class="faint fs-sm">' + esc(line) + '</div>';
   }
   if (taskHtml) taskHtml = '<label>后台任务</label>' + taskHtml;
   // 限流现场：429 只出现在响应体里，界面上必须说清「挡住过几次、多久前、哪档触顶」，
@@ -328,7 +400,7 @@ async function showGatewayInfo() {
     } else {
       line += ' · 还没有请求被挡下';
     }
-    limHtml = '<label>限流</label><div class="faint" style="font-size:12px">' + esc(line) + '</div>';
+    limHtml = '<label>限流</label><div class="faint fs-sm">' + esc(line) + '</div>';
   }
   // 积分资产一行（后端 health.credits，口径与选号逻辑一致）：
   // 「还剩多少、几个号快作废」是用户最关心的两个数，放任务与限流之间。
@@ -337,23 +409,23 @@ async function showGatewayInfo() {
   if (cr && cr.accounts > 0) {
     let cline = cr.accounts + ' 个账号共 ' + Math.round(cr.total) + ' 分';
     if (cr.expiring_soon > 0) {
-      cline += ' · <b style="color:#e5a23c">' + cr.expiring_soon + ' 个号 48 小时内到期</b>';
+      cline += ' · <b class="c-warn">' + cr.expiring_soon + ' 个号 48 小时内到期</b>';
     }
     if (typeof cr.earliest_expire_s === 'number' && cr.earliest_expire_s > 0) {
       const d = new Date(cr.earliest_expire_s * 1000);
       cline += ' · 最早 ' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
     }
     cline += ' · 明细在「账号」页';
-    creditHtml = '<label>积分资产</label><div class="faint" style="font-size:12px">' + cline + '</div>';
+    creditHtml = '<label>积分资产</label><div class="faint fs-sm">' + cline + '</div>';
   }
   const mk = modalShell('服务网关信息', `
       <label>代理地址（base_url）</label>
       <input class="q mono" readonly value="${esc(base)}/v1" onclick="this.select();copyText(this.value)">
       <label>API Key</label>
       <input class="q mono" readonly value="${esc(gwKey)}" onclick="this.select();copyText(this.value)">
-      <div class="faint" style="font-size:12px;margin:-4px 0 6px">${esc(keyNote)}</div>
+      <div class="faint" style="font-size:var(--fs-sm);margin:-4px 0 6px">${esc(keyNote)}</div>
       <label>可用模型</label>
-      <div class="faint" style="font-size:12px">${modelsN} 个模型可用（共 ${platN} 个平台规格）· 模型名写 <code>模型id@平台</code> 或任意清单内模型</div>
+      <div class="faint fs-sm">${modelsN} 个模型可用（共 ${platN} 个平台规格）· 模型名写 <code>模型id@平台</code> 或任意清单内模型</div>
       ${taskHtml}
       ${limHtml}
       ${creditHtml}
@@ -412,6 +484,30 @@ let SRC_BADONLY = false; // 只看「近 24h 有失败」的接入源
 // 只看「支持扫码登录」的接入源（按平台声明的 login_methods 含 qr 判定）
 let SRC_QRSONLY = false;
 let SRC_EXPAND = null; // 展开的平台卡片 id
+// 当前抽屉正在展示哪个平台（null = 未展开）。
+// 用途：判断「换平台了」从而停掉上一轮的自动轮询 —— 见 viewSources 里抽屉分支的说明。
+let srcDrawerPlatform = null;
+// 抽屉里的「一次性操作结果」（保存凭据 / 验活失败），跨 route() 存活。
+// 结构：{ platform, ok, text } | null。关抽屉或换平台时清空。
+let SRC_LOGIN_NOTICE = null;
+// 接入源列表的虚拟滚动状态。
+// SRC_FLAT 是「分组标题行 + 平台行」的扁平序列（见 viewSources），
+// 行高固定，靠 translateY 把可见窗口挪到正确位置。
+const SRC_ROW_H = 32;          // 平台行高（与 .src-row 的 height 必须一致）
+const SRC_GRP_H = 26;          // 分组标题行高（.src-row.grp）
+let SRC_FLAT = [];             // 扁平行序列
+let SRC_LIST_OVER = 6;         // 视口上下各多渲染几行，滚动时不露白
+let SRC_SEL = null;            // 当前详情栏展示的平台 id
+// 扫码/授权轮询的状态机。声明放在这里（而不是挨着 srcQrSchedule）是因为
+// viewSources 里的抽屉分支要先读 SRC_QR_ACTIVE 判断「要不要贴回一次性提示」，
+// 而 viewSources 在文件里更早 —— 用 let 声明在下面会落进 TDZ，运行时直接抛
+// ReferenceError，整个接入源页白屏。
+let SRC_QR_TIMER = null;       // 下一次 poll 的 setTimeout 句柄
+let SRC_QR_ACTIVE = false;     // 是否处于自动轮询（终态/过期后关掉）
+let SRC_QR_TRIES = 0;          // 连续自动重开二维码次数（防死循环）
+let SRC_POLL_INFLIGHT = false; // 在途请求闩，双保险
+let SRC_SESSION = null;
+let SRC_POLL_N = 0;            // 已轮询次数（跳转授权有上限，扫码没有）
 
 // 分组规则（用户拍板 + 参考项目登录方式核对）：
 //   ① spec 自报 group 优先（providers/*.toml 的 group 字段，后端随平台行下发）；
@@ -441,8 +537,11 @@ const GROUP_META = {
   custom:   { t: '自定义 API', desc: '自填 名称/协议/URL/Key，自动同步模型（CherryStudio 式）', open: true },
   official: { t: '开放平台 API', desc: '官方平台 API Key 直连', open: false },
   sub:      { t: '订阅反代', desc: '订阅账号 OAuth 授权 → 网关反代', open: false },
-  client:   { t: '客户端接入', desc: '网页版 / 客户端凭据（Cookie / Token）', open: false },
-  free:     { t: '公益站 · 免费车道', desc: '公益中转聚合 + 免 Key 免费车道（Kilo / Pollinations / OpenCode Zen）', open: false },
+  // ★ 主从布局下默认展开「客户端接入」与「公益站」：
+  //   这两组是用户真正会登录/看额度的（6/32 与 4/67 有内容），一进来就该看到平台行。
+  //   custom 组默认展开是因为它需要「新建」入口；其余三组都是纯列表，收起更快。
+  client:   { t: '客户端接入', desc: '网页版 / 客户端凭据（Cookie / Token）', open: true },
+  free:     { t: '公益站 · 免费车道', desc: '公益中转聚合 + 免 Key 免费车道（Kilo / Pollinations / OpenCode Zen）', open: true },
 };
 
 async function viewSources(el) {
@@ -453,6 +552,10 @@ async function viewSources(el) {
   //   注意：本工程没有 React 式的全局 S 对象，状态放模块级变量（与 __DISABLED_MODELS 同风格）。
   await api('/api/accounts').then((a) => { ACCT_SNAPSHOT = a; }).catch(() => {});
   window.__DISABLED_MODELS = pl.disabled_models || [];
+  // 主从布局下，右侧详情与左侧列表的选中切换都走 srcSelect()，它需要能按 id
+  // 反查平台行 —— 把这一轮的 /api/platforms 结果挂到 window 上供它读取。
+  // （不用闭包传参：srcSelect 是 onclick 全局函数，拿不到 viewSources 的作用域。）
+  window.__PL_ROWS = pl.rows || [];
   // 「近 24h 有问题」= 台账里这段窗口内有失败记录。样本数为 0 的平台不进来
   //（没跑过 ≠ 坏了，把它算进来只会让人以为一堆平台挂了）。
   const isBad = (p) => !!(p.recent && p.recent.failed > 0);
@@ -475,30 +578,27 @@ async function viewSources(el) {
   const isIn = (p) => !!p.anon || p.accounts_n > 0;
   const loggedN = pl.rows.filter(isIn).length;
 
-  let h = `<div class="srcbar">
-    <div class="srcbar-i"><i>平台</i><b>${pl.total}</b></div>
-    <div class="srcbar-i"><i>已接入</i><b>${loggedN}</b></div>
-    <div class="srcbar-i"><i>账号凭据</i><b>${pl.rows.reduce((a, p) => a + (p.accounts_n || 0), 0)}</b></div>
-    <div class="srcbar-i" title="支持扫码登录的接入源（点下面「仅看扫码」可筛）"><i>可扫码</i><b>${qrN}</b></div>
-    <div class="srcbar-i" title="台账里近 24 小时有失败记录的接入源"><i>近24h有问题</i><b${badN ? ' style="color:#e5484d"' : ''}>${badN}</b></div>
-    <button class="btn sm gh" style="margin-left:auto" onclick="SRC_HELP=!SRC_HELP;render()">怎么用 ${SRC_HELP ? '▴' : '▾'}</button>
+  // ── 顶部：KPI 卡组 + 工具条 ──
+  //
+  // 旧版这里是「横条里塞 5 个数字 + 一行筛选按钮」，和下面的卡片墙挤在一起。
+  // 主从布局下筛选已经收进左列表的 chips，所以这里只留 KPI（一眼看全貌）
+  // 与右侧的批量管理菜单。
+  let h = `<div class="grid g4 mb-3">
+    <div class="card kpi"><div class="lb">平台总数</div><div class="vl">${pl.total}</div><div class="ex">${loggedN} 个已接入</div></div>
+    <div class="card kpi"><div class="lb">账号凭据</div><div class="vl">${pl.rows.reduce((a, p) => a + (p.accounts_n || 0), 0)}</div><div class="ex">secret 仅后台使用</div></div>
+    <div class="card kpi"><div class="lb">可扫码登录</div><div class="vl">${qrN}</div><div class="ex">豆包 / 库库 / 小浣熊 / Loomy / 秘塔 / 智谱</div></div>
+    <div class="card kpi"><div class="lb">近 24h 有问题</div><div class="vl"${badN ? ' style="color:var(--err)"' : ''}>${badN}</div><div class="ex">台账里有失败记录的平台</div></div>
   </div>`;
   if (SRC_HELP) {
-    h += `<div class="note">接入三步：① 点卡片接入（官方/公益站填 Key；客户端/订阅跳转登录后粘贴凭据）② 客户端 base_url 填 <code>${esc(location.origin)}/v1</code>、api_key 填 <code>admin</code> ③ model 填 <code>模型id@平台</code> 或清单内模型。</div>`;
+    h += `<div class="note">接入三步：① 点左侧平台，在右侧完成登录或填 Key ② 客户端 base_url 填 <code>${esc(location.origin)}/v1</code>、api_key 填 <code>admin</code> ③ model 填 <code>模型id@平台</code> 或清单内模型。</div>`;
   }
   h += `<div class="srcbar2">
-    <input class="q" placeholder="搜索平台名称 / id / 说明…" value="${esc(SRC_Q)}"
-      oninput="SRC_Q=this.value;srcRerender()" onkeydown="if(event.key==='Escape'){SRC_Q='';this.value='';srcRerender()}">
-    <button class="btn sm ${SRC_BADONLY ? 'pri' : 'gh'}" onclick="SRC_BADONLY=!SRC_BADONLY;srcRerender()"
-      title="只看台账里近 24 小时有失败记录的接入源">${SRC_BADONLY ? '✔ ' : ''}仅看有问题${badN ? '（' + badN + '）' : ''}</button>
-    <button class="btn sm ${SRC_QRSONLY ? 'pri' : 'gh'}" onclick="SRC_QRSONLY=!SRC_QRSONLY;srcRerender()"
-      title="只看支持扫码登录的接入源（豆包 / 库库 / 小浣熊 / Loomy）">${SRC_QRSONLY ? '✔ ' : ''}仅看扫码${qrN ? '（' + qrN + '）' : ''}</button>
-    <span class="faint" style="font-size:11.5px">显示 ${rows.length} 个</span>
+    <button class="btn sm gh" onclick="SRC_HELP=!SRC_HELP;srcRerender()">怎么用 ${SRC_HELP ? '▴' : '▾'}</button>
     <!-- ★ 2026-10-28（用户要求，参考图「⋯ 管理操作」）：接入源栏右侧一键管理入口。
          把「账号运维」类批量动作收敛到一处：健康检查 / 签到 / 成长任务 / 猫猫旅行。
          菜单项都是既有能力的复用（同一套 /api/checkin 与 /api/accounts 动作），
          不新增后端路径 —— 用户不必先跳到账号页才知道有这些操作。 -->
-    <div class="menu-wrap" style="margin-left:auto">
+    <div class="menu-wrap ml-auto">
       <button class="btn sm" onclick="event.stopPropagation();srcMgrToggle()" title="批量管理：健康检查 / 签到 / 成长任务 / 猫猫旅行">⋯ 管理操作</button>
       <div id="srcMgrMenu" class="menu-pop" style="display:none">
         <div class="menu-sec">额度与批量管理</div>
@@ -515,36 +615,60 @@ async function viewSources(el) {
     </div>
   </div>`;
 
+  // ── 主从两栏：左列表（虚拟滚动）+ 右详情 ──
+  //
+  // 改造理由见 style.css 里 .src-split 的注释：205 个平台铺成卡片墙实测 16 屏、
+  // 1206 个 DOM 节点。这里改成「紧凑列表 + 详情常驻」：
+  // · 列表按可见区渲染（虚拟滚动），DOM 从 1206 降到约 150
+  // · 详情常驻 = 换平台只需点一下，不用开关抽屉
+  //
+  // ⊕ 用的是「分组标题 + 平台行」扁平序列（不是嵌套），虚拟滚动才好算偏移。
+  const flat = [];
   for (const g of groups) {
-    const meta = GROUP_META[g];
     const items = byGroup[g] || [];
-    const onN = items.filter(isIn).length;
-    // 任何筛选生效时都强制展开：否则命中的卡片全在收起的分组里，用户点了一下看不到任何变化。
-    const open = SRC_BADONLY || SRC_QRSONLY || (SRC_OPEN[g] ?? meta.open);
-    h += `<section class="card glass srcgroup">
-      <div class="srcgroup-hd" onclick="SRC_OPEN['${att(g)}']=!SRC_OPEN['${att(g)}'];srcRerender()">
-        <span class="sg-arrow">${open ? '▾' : '▸'}</span>
-        <b>${esc(meta.t)}</b>
-        <span class="faint">${esc(meta.desc)}</span>
-        <span class="pill mut">${onN}/${items.length} 接入</span>
-        ${g === 'custom' ? '<button class="btn sm pri" style="margin-left:auto" onclick="event.stopPropagation();openCustomApi()">＋ 新建自定义 API</button>' : ''}
-        ${g === 'free' ? '<button class="btn sm" style="margin-left:auto" onclick="event.stopPropagation();refreshFree()">⟳ 刷新公益站</button>' : ''}
+    if (!items.length) continue;
+    // 筛选生效时强制展开，否则命中的平台全在收起的分组里，点了看不到变化
+    const anyFilter = SRC_BADONLY || SRC_QRSONLY || !!SRC_Q;
+    const open = anyFilter || (SRC_OPEN[g] ?? GROUP_META[g].open);
+    flat.push({ kind: 'grp', g, onN: items.filter(isIn).length, total: items.length, open });
+    if (open) for (const p of items) flat.push({ kind: 'row', p });
+  }
+  // 当前选中的平台：SRC_EXPAND 优先；否则取第一个平台行（进页面就有内容可看）
+  let sel = SRC_EXPAND ? pl.rows.find((x) => x.id === SRC_EXPAND) : null;
+  if (!sel) {
+    const firstRow = flat.find((x) => x.kind === 'row');
+    sel = firstRow ? firstRow.p : null;
+  }
+
+  h += `<div class="src-split">
+    <div class="src-list-col">
+      <div class="src-list-hd">
+        <div class="t">全部平台</div>
+        <div class="s">共 ${pl.total} 个 · 显示 ${rows.length} 个</div>
       </div>
-      ${open && g === 'free' && fm ? `<div class="note" style="margin:8px 0 10px">${freeSourceLine(fm)}</div>` : ''}
-      ${open ? `<div class="srcgrid">${items.map((p) => srcCard(p)).join('') || '<div class="empty">该分组暂无平台</div>'}</div>` : ''}
-    </section>`;
-  }
+      <div class="src-list-filters">
+        <button class="chip ${!SRC_BADONLY && !SRC_QRSONLY ? 'on' : ''}" onclick="SRC_BADONLY=false;SRC_QRSONLY=false;srcRerender()">全部</button>
+        <button class="chip ${SRC_BADONLY ? 'on' : ''}" onclick="SRC_BADONLY=!SRC_BADONLY;srcRerender()" title="只看台账里近 24 小时有失败记录的接入源">有问题${badN ? ' ' + badN : ''}</button>
+        <button class="chip ${SRC_QRSONLY ? 'on' : ''}" onclick="SRC_QRSONLY=!SRC_QRSONLY;srcRerender()" title="只看支持扫码登录的接入源">可扫码${qrN ? ' ' + qrN : ''}</button>
+      </div>
+      <div class="src-list-search">
+        <input class="q" placeholder="搜索名称 / id / 说明…" value="${esc(SRC_Q)}"
+          oninput="srcQueryChanged(this.value)" onkeydown="if(event.key==='Escape'){srcQueryChanged('');this.value=''}">
+      </div>
+      <div class="src-list-vp" id="srcListVp" onscroll="srcOnListScroll()">
+        <div class="src-list-inner" id="srcListInner" style="height:${flat.length * SRC_ROW_H}px"></div>
+      </div>
+    </div>
+    <div class="src-detail-col">${sel ? srcDetail(sel) : '<div class="card empty">没有匹配的平台</div>'}</div>
+  </div>`;
+
+  // 列表数据挂到模块变量，滚动时按需渲染（不在闭包里，srcOnListScroll 要读）
+  SRC_FLAT = flat;
   el.innerHTML = h;
-  // 登录抽屉
-  if (SRC_EXPAND) {
-    const p = pl.rows.find((x) => x.id === SRC_EXPAND);
-    if (p) {
-      el.insertAdjacentHTML('beforeend', srcDrawer(p));
-      const d = document.getElementById('srcDrawer');
-      if (d) { d.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
-    }
-  }
+  srcRenderListWindow();
 }
+
+
 
 // 近 24h 失败率徽章（数据由后端 /api/platforms 的 recent 字段给出）。
 //
@@ -578,7 +702,7 @@ function lastErrNote(p) {
   // 只显示前 140 字，全文放 title；overflow-wrap 兜住没有空格的长串。
   const full = String(e.text);
   const shown = full.length > 140 ? full.slice(0, 140) + '…' : full;
-  return '<div class="faint" style="font-size:11px;margin:-2px 0 7px;overflow-wrap:anywhere" title="' +
+  return '<div class="faint" style="font-size:var(--fs-xs);margin:-2px 0 7px;overflow-wrap:anywhere" title="' +
     esc(full) + '">最近失败' + when + '：' + esc(code) + esc(shown) + '</div>';
 }
 
@@ -639,11 +763,11 @@ function srcAcctBlock(p) {
   const creditTxt = typeof total === 'number'
     ? '<b>' + esc(fmt(total)) + '</b> 积分'
     : '<span class="faint">积分未查</span>';
-  return '<div class="faint" style="font-size:11.5px;margin:2px 0 4px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
-    + '<span>账号 ' + nOn + (list.length > nOn ? '/' + list.length : '') + ' 个可用</span>'
-    + (bad ? '<span class="pill err">' + bad + ' 个待重登</span>' : '')
-    + '<span title="来自最近一次签到 / 查询积分的快照">' + creditTxt + '</span>'
-    + '<a href="#" style="font-size:11.5px" onclick="event.stopPropagation();SRC_EXPAND=\'' + att(p.id) + '\';render()">看明细 →</a>'
+  return '<div class="src-acct-bar" style="font-size:var(--fs-xs);margin:var(--sp-1) 0 var(--sp-2);display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:var(--sp-2) var(--sp-3);background:linear-gradient(90deg, rgba(91,141,239,.08) 0%, rgba(255,255,255,.02) 100%);border-radius:var(--r-md);border:1px solid rgba(91,141,239,.25)">'
+    + '<span style="display:flex;align-items:center;gap:4px"><span style="color:var(--ok)">●</span> ' + nOn + (list.length > nOn ? '/' + list.length : '') + ' 个账号</span>'
+    + (bad ? '<span class="pill err" style="padding:1px 6px">' + bad + ' 待重登</span>' : '')
+    + '<span title="来自最近一次签到 / 查询积分的快照" class="ml-auto">' + creditTxt + '</span>'
+    + '<button class="btn sm" style="padding:var(--sp-1) var(--sp-2)" onclick="event.stopPropagation();SRC_EXPAND=\'' + att(p.id) + '\';srcRerender()">查看详情</button>'
     + '</div>';
 }
 
@@ -675,12 +799,12 @@ function srcAcctList(p) {
     const isOpen = a.id === openId;
     // 点行展开：显示这个账号当前的真实登录身份（来自 profile）+ 快捷操作
     const detail = isOpen
-      ? '<div class="note" style="margin:4px 0 6px">'
+      ? '<div class="note" style="margin:var(--sp-1) 0 var(--sp-2)">'
         + '<div>账号 ID：<span class="mono">' + esc(a.id) + '</span></div>'
         + '<div>完整名称：<span class="mono">' + esc(a.name || '（未命名）') + '</span></div>'
         + '<div>当前进度：' + (a.needs_relogin ? '凭据本机解不开，需要重登' : !a.enabled ? '已停用，不参与路由' : '正常参与路由') + '</div>'
         + (h.label ? '<div>最近结论：' + esc(h.label) + (typeof h.age_secs === 'number' ? '（' + Math.round(h.age_secs / 60) + ' 分钟前）' : '') + '</div>' : '')
-        + '<div class="row" style="gap:6px;margin-top:6px">'
+        + '<div class="row" style="gap:6px;margin-top:var(--sp-2)">'
         + '<button class="btn sm" onclick="acVerify(\'' + att(a.id) + '\',this)">检查</button>'
         + '<button class="btn sm" onclick="acBalance(\'' + att(a.id) + '\',this)">查积分</button>'
         + '<button class="btn sm" onclick="acToggle(\'' + att(a.id) + '\',' + (a.enabled ? 'false' : 'true') + ')">' + (a.enabled ? '停用' : '启用') + '</button>'
@@ -688,9 +812,9 @@ function srcAcctList(p) {
         + '<button class="btn sm" onclick="acDelete(\'' + att(a.id) + '\')">删除</button>'
         + '</div></div>'
       : '';
-    return '<div class="acct-row" style="border-top:1px dashed var(--line2);padding:5px 0;cursor:pointer" '
+    return '<div class="acct-row acct-sep" '
       + 'onclick="acctOpen(\'' + att(a.id) + '\')" title="点击查看这个账号的登录信息">'
-      + '<div class="row n" style="gap:8px;font-size:12px;align-items:center">'
+      + '<div class="row n acct-line">'
       + '<span class="mono" style="min-width:110px" title="' + att(a.name) + '">'
       + (isOpen ? '▾ ' : '▸ ') + esc(maskName(a.name)) + '</span>'
       + '<span style="min-width:56px">' + st + '</span>'
@@ -699,7 +823,7 @@ function srcAcctList(p) {
       + '</div>' + detail + '</div>';
   }).join('');
   const total = typeof p.credit_total === 'number' ? p.credit_total : null;
-  const head = '<div class="faint" style="font-size:11.5px;margin-bottom:2px">'
+  const head = '<div class="faint fs-xs">'
     + '共 ' + list.length + ' 个账号'
     + (total !== null ? ' · 积分合计 <b>' + esc(fmtCredit(total)) + '</b>' : ' · 积分未查询')
     + '（点账号展开登录信息与操作）</div>';
@@ -720,66 +844,241 @@ function profileLine(p) {
     return esc(x.name || "") + (x.email ? (x.name ? " · " : "") + esc(x.email) : "");
   }).join("　");
   var plan = ps[0].plan ? " " + pill("mut", String(ps[0].plan)) : "";
-  return '<div class="faint" style="font-size:11.5px;margin:-2px 0 6px">登录用户：' + txt + plan + "</div>";
+  return '<div class="faint" style="font-size:var(--fs-xs);margin:-2px 0 6px">登录用户：' + txt + plan + "</div>";
 }
 
-function srcCard(p) {
-  // 徽章按「实际登录方式」显示（参考项目一手核对），不按 toml auth 字段一刀切
-  const AUTH_LABEL = {
-    minimax: '设备码', codearts: '跳转/AK-SK',
-    lobster: 'OAuth', 'web-lobster': 'OAuth',
-    'wb-gateway': '账号登录', 'wb-gateway-intl': '账号登录', cline: '设备码',
-    'apk-qoder': '设备码', 'web-qoder': '设备码',
-    'apk-trae': '跳转回调', 'web-trae': '跳转回调',
-    'apk-loomy': '微信扫码', 'web-deepseek': '粘贴Token', 'web-qwen': '粘贴Token+Cookie', 'mimo': '粘贴Cookie', 'sub-kiro': '粘贴Kiro凭据', 'apk-coze': '粘贴PAT',
-    'apk-metaso': '免密/Cookie',
-    'apk-doubao': '扫码', 'apk-yuanbao': 'Cookie', 'apk-kuku': '扫码',
-    'apk-raccoon': '微信扫码', 'apk-wps': 'Cookie', 'apk-nano': 'Cookie',
-    'sub-antigravity': '跳转登录/Token', 'apk-antigravity': '粘贴Token',
-    'sub-devin': '跳转登录', 'sub-meta': '设备码',
-    'sub-codex': '跳转登录', 'sub-claude': '跳转登录', 'sub-grok': '设备码',
-    'sub-kimi': '设备码', 'sub-kimi-ai': '设备码',
-  };
-  // p.auth 的取值来自后端 AuthKind（snake_case）：anon / api_key / o_auth_device / qr_scan /
-  // cookie / client_file。旧表里写了并不存在的 'token'，又漏了 device/scan/file 三种，
-  // 结果那些卡片在徽章上直接显示英文枚举值。
-  const authTxt = AUTH_LABEL[p.id] || {
+// ── 接入源详情栏（主从布局的右半） ───────────────────────────────────────
+//
+// 结构按「用户来这里最想干什么」排：
+//   ① 登录    —— 最核心。扫码/设备码/粘贴框就地完成，不再开抽屉
+//   ② 账号    —— 已登录的号、健康、积分
+//   ③ 模型    —— 开关清单
+//
+// 登录表单直接复用 srcDrawer 的内容（那部分逻辑成熟，扫码轮询/保存/验活都
+// 挂在这些 id 上：#authBox / #keyInput）。这里只提供外壳，不重复实现。
+function srcDetail(p) {
+  const disabled = p.enabled === false;
+  const configured = p.custom ? !!p.key_mask : p.anon ? true : p.accounts_n > 0;
+  const lm = Array.isArray(p.login_methods) ? p.login_methods : [];
+  const qr = lm.includes('qr');
+  // 登录外壳：交给 srcLoginBody（即 srcDrawer 的 bodyOnly 模式）生成 ——
+  // 它认得 14 种登录形态，不必在详情栏重写一遍，两处也不会漂移。
+  const loginBody = srcLoginBody(p);
+
+  // 账号行
+  const accts = Array.isArray(p.accounts) ? p.accounts : [];
+  const acctRows = accts.length
+    ? accts.map((a) => `<div class="sd-kv">
+        <span>${esc(a.name || a.id || '账号')}</span>
+        <span>${typeof a.credit === 'number' ? Math.round(a.credit).toLocaleString() + ' 积分' : '<span class="faint">积分未查</span>'}</span>
+      </div>`).join('')
+    : `<div class="faint fs-sm py-1">还没有账号${p.anon ? '（这个是免密车道，无需账号）' : ''}</div>`;
+
+  // 模型清单
+  const models = Array.isArray(p.models) ? p.models : [];
+  const disabledModels = new Set(window.__DISABLED_MODELS || []);
+  const modelRows = models.length
+    ? models.slice(0, 40).map((m) => {
+        const on = !disabledModels.has(bareModel(m));
+        return `<div class="sd-mrow">
+          <span class="mono">${esc(m)}</span>
+          <button class="sw ${on ? 'on' : ''}" onclick="toggleModel('${att(m)}', ${on ? 'false' : 'true'})"
+            aria-label="${on ? '停用' : '启用'} ${att(m)}" aria-pressed="${on}"></button>
+        </div>`;
+      }).join('')
+    : '<div class="faint fs-sm">这个平台没有声明模型清单（live 拉取）</div>';
+
+  return `
+  <div class="sd-hd">
+    <div class="ttl">
+      <h2>${esc(p.name)}</h2>
+      <div class="mt">
+        ${disabled ? pill('mut', '已停用') : configured ? pill('ok', p.anon ? '免凭据' : accountLabel(p)) : pill('mut', '未接入')}
+        ${qr ? pill('ok', '可扫码') : ''}
+        ${pill('mut', authLabelOf(p))}
+        <span class="mono">${esc(p.id)}</span>
+        <span>· ${models.length} 个模型</span>
+        ${p.region === 'cn' ? '<span>· 国内</span>' : p.region === 'intl' ? '<span>· 国际</span>' : ''}
+      </div>
+    </div>
+    <div class="acts">
+      <button class="btn sm" onclick="togglePlatform('${att(p.id)}', ${p.enabled ? 'false' : 'true'})"
+        title="停用后不出现在 /v1/models，也不参与路由">${p.enabled ? '停用' : '启用'}</button>
+      ${(() => { const u = safeUrl(p.login_url); return u
+        ? `<a class="btn sm" href="${esc(u)}" target="_blank" rel="noopener noreferrer">注册页</a>`
+        : ''; })()}
+    </div>
+  </div>
+
+  <div class="sd-sec">
+    <div class="sd-sec-h">登录</div>
+    <div class="sd-sec-b">${loginBody}</div>
+  </div>
+
+  <div class="sd-sec">
+    <div class="sd-sec-h">账号</div>
+    <div class="sd-sec-b">${acctRows}</div>
+  </div>
+
+  <div class="sd-sec">
+    <div class="sd-sec-h">模型 · 已启用 ${models.length - models.filter((m) => disabledModels.has(bareModel(m))).length}/${models.length}</div>
+    <div class="sd-sec-b"><div class="sd-models">${modelRows}</div></div>
+  </div>`;
+}
+
+/// 裸模型名（去掉 @平台 后缀），与后端 aigw_store::bare_model 同口径。
+function bareModel(m) {
+  const s = String(m || '');
+  const i = s.lastIndexOf('@');
+  return i > 0 ? s.slice(0, i) : s;
+}
+
+// ── 凭据来源（Credential Source）──────────────────────────────────────
+// `auth = "api_key"` 只说明「凭据是一个字符串」，**不说明它从哪来**。
+// 184 个 api_key 平台里其实混着三种完全不同的东西，提示语必须分开：
+//
+//   openapi  商业开放平台。有控制台、能自己签发 Key。→「去官网申请」
+//   sub      订阅套餐。Key 是订阅账号换出来的 OAuth token，没有申请入口。
+//            →「登录订阅账号后取 token」
+//   client   客户端反代。上游只认官方客户端的登录态，连 API Key 这个概念都没有。
+//            →「装官方客户端 → 登录 → 从客户端取凭据」
+//
+// 之前这三类共用一句 `填官方 API Key…去官网申请`，导致 Accio / AutoClaw 这类
+// 根本没有「申请入口」的平台，给用户指了一条不存在的路（用户实测反馈）。
+//
+// 判定优先级：id 精确表 > upstream_kind > sub- 前缀 > 默认 openapi。
+// upstream_kind 比 auth 可靠 —— 它由 providers/*.toml 显式声明，是后端的真实适配器。
+const CRED_CLIENT = {
+  // 「装客户端 → 登录 → 取登录态」的平台。why 写清楚凭据长什么样、从哪抄。
+  // 注意：apk-accio 虽然也属于客户端反代，但它已接上真正的 PKCE 跳转登录
+  // （LOGIN_UI.pkce），走不到这一段文案 —— 这里保留条目只为 credSourceOf 能认出
+  // 它是 client 类（徽章/分组仍按客户端算），文案本身不会再显示。
+  'apk-accio': {
+    what: '桌面端 accessToken', how: '点上面的「打开授权页」完成 OAuth 登录，面板自动换取 token',
+    fmt: '无需手动粘贴',
+    why: '上游 ADK 网关只认桌面客户端同源的 OAuth token，没有可申请的 API Key。',
+  },
+  // 大陆站与 apk-accio 同一套实现、同一个网关，只有登录域不同（accio-ai.com）。
+  // 两站账号不通用，所以 why 里必须点明。
+  'apk-accio-cn': {
+    what: '桌面端 accessToken（大陆站）', how: '点上面的「打开授权页」用大陆站账号完成 OAuth 登录',
+    fmt: '无需手动粘贴',
+    why: '阿里 Phoenix 大陆站（accio-ai.com）与北京站同源实现，凭据是桌面客户端同源的 OAuth token；两站账号不通用。',
+  },
+  'apk-autoclaw': {
+    what: '客户端 accessToken', how: '登录 AutoClaw 客户端后取出 accessToken',
+    fmt: '直接粘 accessToken 字符串',
+    why: '上游把凭据放在 X-Authorization 头（不是 Authorization），且只接受客户端登录态换来的 token。',
+  },
+  'apk-autoclaw-intl': {
+    what: '客户端 accessToken', how: '登录 AutoClaw 国际版客户端后取出 accessToken',
+    fmt: '直接粘 accessToken 字符串',
+    why: '与国内版同源：上游只接受客户端登录态换来的 token。',
+  },
+  'apk-orcaterm': {
+    what: 'oauth_access_token（JWT）', how: '登录腾讯遨驰终端桌面端，从 data.bin 取 oauth_access_token',
+    fmt: '粘 eyJ… 开头的 JWT',
+    why: '上游只认桌面客户端签发的 OAuth JWT，没有 API Key 可申请。',
+  },
+  'apk-qwenwork': {
+    what: '登录态 JWT', how: '登录 qwenwork.cn 后从 Cookie / Local Storage 找 eyJ 开头的 token',
+    fmt: '粘 JWT 本体（不要加 Bearer 前缀）',
+    why: '面板按 Bearer 发送，但这个 JWT 来自网页登录态，不是控制台签发的 Key。',
+  },
+  'sub-copilot': {
+    what: 'Copilot access token', how: 'GitHub 账号授权 Copilot 后换取 access token',
+    fmt: '粘 access token 字符串',
+    why: 'Copilot 订阅额度不对第三方签发 API Key；企业版把 base_url 改成自己的 GHES 域名。',
+  },
+  'sub-factory': {
+    what: 'WorkOS OAuth access token', how: '经 WorkOS 登录 Factory 后取 access token',
+    fmt: '粘 access token 字符串',
+    why: 'Factory Droid 走订阅登录，没有自助签发 Key 的入口。',
+  },
+  'sub-zed': {
+    what: 'Zed 账号 access token', how: '登录 Zed 后取账号 access token',
+    fmt: '粘 access token 字符串',
+    why: '模型由 Zed 侧托管，凭据是订阅登录态而不是 API Key。',
+  },
+  'sub-zcode': {
+    what: '订阅登录态 access_token', how: '登录 zcode.z.ai 后取 access_token',
+    fmt: '粘 access_token 字符串',
+    why: '这是 ZCode 编码套餐通道（订阅额度），与 api-zhipu 的开放平台 Key 是两回事：想用开放平台 Key 请选 api-zhipu。',
+  },
+  'sub-zcode-intl': {
+    what: '订阅登录态 access_token', how: '登录 zcode.z.ai 后取 access_token',
+    fmt: '粘 access_token 字符串',
+    why: 'ZCode 国际版订阅通道；想用开放平台 Key 请选 api-zai。',
+  },
+};
+// upstream_kind → 归类。没列出的 kind 视为 openapi（标准 OpenAI 兼容端点）。
+const CRED_BY_KIND = {
+  accio: 'client', autoclaw: 'client', orcaterm: 'client', cloudcode: 'client',
+  // 下面这些是各家客户端/网页协议，凭据同样不是「申请来的 Key」
+  qoder: 'client', trae: 'client', coze: 'client', devin: 'client', kiro: 'client',
+  joycode: 'client', 'deepseek-web': 'client', 'qwen-web': 'client',
+  doubao: 'client', yuanbao: 'client', kuku: 'client', metaso: 'client', mimo: 'client',
+  commandcode: 'client', monkeycode: 'client', chatglm: 'client', opencode: 'client',
+};
+
+/// 判定一个平台「凭据从哪来」。返回 'openapi' | 'sub' | 'client'。
+function credSourceOf(p) {
+  if (CRED_CLIENT[p.id]) return 'client';
+  const k = CRED_BY_KIND[p.upstream_kind];
+  if (k) return k;
+  if (String(p.id || '').startsWith('sub-')) return 'sub';
+  return 'openapi';
+}
+
+/// 平台 id → 用户能读懂的实际登录方式。
+///
+/// 为什么不用 p.auth 一刀切：toml 的 auth 是「凭据形态」（cookie / api_key /
+/// o_auth_device…），不是「用户怎么拿到它」。豆包的 auth 是 qr_scan、智谱的
+/// 是 cookie，但两者对用户都是「微信扫码」。
+/// 这张表是参考项目逐个核对过的，新增平台没登记就会落到下面的 AuthKind 推导。
+const AUTH_LABEL = {
+  minimax: '设备码', codearts: '跳转/AK-SK',
+  lobster: 'OAuth', 'web-lobster': 'OAuth',
+  'wb-gateway': '账号登录', 'wb-gateway-intl': '账号登录', cline: '设备码',
+  'apk-qoder': '设备码', 'web-qoder': '设备码',
+  'apk-trae': '跳转回调', 'web-trae': '跳转回调',
+  'apk-loomy': '微信扫码', 'web-deepseek': '粘贴Token', 'web-qwen': '粘贴Token+Cookie', 'mimo': '粘贴Cookie', 'sub-kiro': '粘贴Kiro凭据', 'apk-coze': '粘贴PAT',
+  'apk-metaso': '微信扫码',
+  'web-glm': '微信扫码',
+  'apk-doubao': '扫码', 'apk-yuanbao': 'Cookie', 'apk-kuku': '扫码',
+  'apk-raccoon': '微信扫码', 'apk-wps': 'Cookie', 'apk-nano': 'Cookie',
+  'sub-antigravity': '跳转登录/Token', 'apk-antigravity': '粘贴Token',
+  'sub-devin': '跳转登录', 'sub-meta': '设备码',
+  'sub-codex': '跳转登录', 'sub-claude': '跳转登录', 'sub-grok': '设备码',
+  'sub-kimi': '设备码', 'sub-kimi-ai': '设备码',
+  // ★ 客户端反代 / 订阅通道：凭据不是「申请来的 Key」，徽章也不能写「填 Key」。
+  //   徽章是用户第一眼看到的东西，它和下面的说明必须说同一件事。
+  'apk-accio': '跳转登录', 'apk-accio-cn': '跳转登录', 'apk-autoclaw': '客户端Token', 'apk-autoclaw-intl': '客户端Token',
+  'apk-orcaterm': '客户端JWT', 'apk-qwenwork': '登录态JWT',
+  'sub-copilot': 'OAuth Token', 'sub-factory': 'OAuth Token', 'sub-zed': 'OAuth Token',
+  'sub-zcode': '订阅Token', 'sub-zcode-intl': '订阅Token',
+};
+
+/// 把 p.auth（AuthKind 枚举）翻成人话，给 AUTH_LABEL 没登记的平台兜底。
+///
+/// 兜底顺序有讲究：先问「凭据从哪来」（credSourceOf），再退回 auth 枚举。
+/// 只按 auth 兜底会把所有 api_key 平台都写成「填 Key」—— 而客户端反代平台
+/// （Accio / AutoClaw / OrcaTerm 等）的凭据根本不是 Key，用户按「填 Key」去找
+/// 只会找不到。auth 表达的是凭据形态，不是获取方式。
+function authLabelOf(p) {
+  const hit = AUTH_LABEL[p.id];
+  if (hit) return hit;
+  const src = credSourceOf(p);
+  if (src === 'client') return p.upstream_kind && p.upstream_kind !== 'openai' ? '客户端凭据' : '客户端Token';
+  if (src === 'sub') return '订阅Token';
+  return {
     api_key: '填 Key', cookie: 'Cookie', anon: '免密',
     o_auth_device: '设备码', qr_scan: '扫码登录', client_file: '客户端文件',
   }[p.auth] || p.auth;
-  // 自定义 API：已配置 = 有 key 掩码；免密车道（anon）恒可用；其余 = 有账号
-  const configured = p.custom ? (p.key_mask ? true : false) : p.anon ? true : p.accounts_n > 0;
-  // 面板上被停用（flags.json）与「没接入」是两种状态，必须分开显示：
-  // anon-zen 这类「有账号但已被停用」的卡片，旧版显示「1 账号·已配置」却一个模型都不出，
-  // 用户分不清是自己关的、还是坏了。
-  const disabled = p.enabled === false;
-  // usable = 后端判定「真能转发」（已启用 + 有凭据）。未接入平台的模型已被
-  // /v1/models 过滤，卡片要讲清楚，否则用户会以为模型丢了。
-  const usable = p.usable !== false;
-  return `<div class="srccard glass ${p.enabled ? '' : 'off'}" data-id="${esc(p.id)}">
-    <div class="srcname">${esc(p.name)}<span class="faint mono" style="font-size:10.5px"> ${esc(p.id)}</span></div>
-    <div class="srcmeta">
-      ${p.custom ? pill('ok', '自定义') : p.id.startsWith('sub-') ? pill('mut', '订阅') : p.id.startsWith('free-') ? pill('mut', '公益') : pill('mut', authTxt)}
-      ${p.region === 'cn' ? pill('mut', '国内') : p.region === 'intl' ? pill('mut', '国际') : ''}
-      ${qrPill(p)}
-      ${disabled ? pill('mut', '已停用') : configured ? pill('ok', p.custom ? '已配置' : p.anon ? '免凭据' : accountLabel(p)) : pill('mut', '未接入')}      ${unusablePill(p, disabled, usable, configured)}
-      ${p.chat_supported === false && usable ? pill('mut', '仅验活·不可对话') : ''}
-      ${recentHealthPill(p)}
-      ${modelCountPill(p)}
-    </div>
-    ${profileLine(p)}
-    ${srcAcctBlock(p)}
-    ${lastErrNote(p)}
-    <div class="row" style="gap:6px">
-      <button class="btn sm ${configured ? '' : 'pri'}" onclick="event.stopPropagation();SRC_EXPAND='${att(p.id)}';render()">
-        ${configured ? (p.custom ? '编辑' : '管理 / 重接') : '接入'}
-      </button>
-      <button class="btn sm" title="停用后不出现在 /v1/models，也不参与路由"
-        onclick="event.stopPropagation();togglePlatform('${att(p.id)}', ${p.enabled ? 'false' : 'true'})">${p.enabled ? '停用' : '启用'}</button>
-      ${loginBtn(p)}
-    </div>
-  </div>`;
 }
+
+// （旧卡片墙的 srcCard 已随主从布局移除；徽章映射保留为 AUTH_LABEL / authLabelOf）
+
 
 // 平台启用/停用：写 data/flags.json（不改 providers/*.toml），即时生效
 async function togglePlatform(id, enabled) {
@@ -857,17 +1156,17 @@ function modelRowsHtml(p, all, filter, showAll) {
     var on = (window.__DISABLED_MODELS || []).indexOf(bare) < 0;
     var rate = p.rates && p.rates[m] ? p.rates[m] : "";
     return '<div class="mrow">' +
-      '<span class="mono" style="font-size:12px">' + esc(m) + '</span>' +
+      '<span class="mono fs-sm">' + esc(m) + '</span>' +
       (rate ? '<span class="pill mut" title="积分倍率：这一条请求按 ×' + esc(rate) + ' 扣积分池额度">×' + esc(rate) + '</span>' : '') +
       '<button class="btn sm" onclick="toggleModel(\'' + att(m) + '\', ' + (on ? "false" : "true") + ')">' + (on ? "停用" : "启用") + '</button>' +
       '</div>';
   }).join('');
   if (list.length > cap) {
-    out += '<div class="faint" style="font-size:12px;padding:6px 0">还有 ' + (list.length - cap) + ' 个未显示' +
+    out += '<div class="faint fs-sm py-1">还有 ' + (list.length - cap) + ' 个未显示' +
       (q ? '（当前筛选）' : '') + 
       ' — <a href="#" onclick="showAllModels(\'' + att(p.id) + '\', event)">显示全部 ' + list.length + ' 个</a></div>';
   }
-  if (!list.length) out = '<div class="faint" style="font-size:12px">没有匹配「' + esc(q) + '」的模型</div>';
+  if (!list.length) out = '<div class="faint fs-sm">没有匹配「' + esc(q) + '」的模型</div>';
   return out;
 }
 
@@ -913,7 +1212,7 @@ function srcModelsBlock(p) {
   // 并给一键恢复跟随上游（服务端 sync_models 不带清单 = 重拉上游并解除固定）。
   const pinnedNote = (p.custom && p.models_policy !== 'live')
     ? `<div class="note">清单已固定：/v1/models 只发布这 ${ms.length} 个模型，不随上游变化。
-        <button class="btn sm" style="margin-left:6px" onclick="unpinCustomModels('${att(p.id)}')">恢复跟随上游</button></div>`
+        <button class="btn sm ml-2" onclick="unpinCustomModels('${att(p.id)}')">恢复跟随上游</button></div>`
     : '';
   const note = `<div class="note">模型 ${onN}/${ms.length} 启用（停用后不出现在 /v1/models，路由也会拒绝）${rateLegend}</div>`;
   const big = ms.length > MODEL_PAGE;
@@ -921,7 +1220,7 @@ function srcModelsBlock(p) {
   const list = modelRowsHtml(p, ms, st.filter, big ? st.all : true);
   const search = big
     ? `<input class="q mono" placeholder="筛选模型（共 ${ms.length} 个，输入关键字即时过滤）" value="${esc(st.filter)}"
-        oninput="setModelFilter('${att(p.id)}', this.value)" style="margin:4px 0 6px">`
+        oninput="setModelFilter('${att(p.id)}', this.value)" style="margin:var(--sp-1) 0 var(--sp-2)">`
     : '';
   return `${pinnedNote}${note}${search}<div class="mlist" id="ml-${esc(p.id)}">${list}</div>`;
 }
@@ -1005,7 +1304,7 @@ async function smsVerify(id) {
 // 直接把完整原因、该改什么、以及 /v1/models?platform= 的证据链接摊开。
 function unusableBanner(p) {
   if (p.enabled === false) {
-    return '<div class="note" style="border-color:#5a4a2a">这个平台是<b>停用</b>的：开启后才会发布模型、参与路由。</div>';
+    return '<div class="note warnnote">这个平台是<b>停用</b>的：开启后才会发布模型、参与路由。</div>';
   }
   // 后端说它能转发（usable=true）就没什么可报的；否则一定有原因，最次是「没有可用凭据」。
   // 注意不能用 unusableShortReason(p) 的空值当「没问题」—— 它只覆盖协议/占位符/仅验活
@@ -1021,14 +1320,17 @@ function unusableBanner(p) {
   const fix = FIX[why] || ('这个平台的协议不是 openai，转发层只做 OpenAI 透传（当前 format = '
     + (p.format || '?') + '）：改 format，或改用一个 OpenAI 兼容的地址。');
   const href = '/v1/models?platform=' + encodeURIComponent(p.id);
-  return '<div class="note" style="border-color:#5a4a2a">这个平台现在<b>不发布模型</b>：' + esc(why) + '。<br>'
+  return '<div class="note warnnote">这个平台现在<b>不发布模型</b>：' + esc(why) + '。<br>'
     + esc(fix) + '<br><a href="' + att(href) + '" target="_blank" rel="noopener">看看它在 /v1/models 里的样子 →</a></div>';
 }
 // 分组判定的例外表：前缀规则（api- / free-）覆盖不到的少数平台。
 // 与 LOGIN_UI 一样，把「代码里散落的 id 判断」收成一处。
 const GROUP_OVERRIDE = {
   official: ['apk-coze', 'kimi-code', 'codex'],
-  free: ['anon-zen', 'kilo', 'pollinations'],
+  // 免密免 Key 车道一律进「公益站 · 免费车道」：它们没有账号也没有凭据，
+  // 归到「客户端接入」会让人以为需要先登录。anon-ovh 与 anon-zen 同族，
+  // 只是 id 前缀不是 free-（前缀推断对它不成立，必须在这里点名）。
+  free: ['anon-zen', 'anon-ovh', 'kilo', 'pollinations'],
 };
 
 // 「哪些平台走哪种登录界面」的**唯一一张表**。
@@ -1048,7 +1350,12 @@ const LOGIN_UI = {
   kimi: ['sub-kimi', 'sub-kimi-ai', 'sub-grok'],
   cline: ['cline'],
   meta: ['sub-meta'],
-  pkce: ['sub-codex', 'sub-claude', 'sub-antigravity', 'sub-devin'],
+  // Accio 走同一条 PKCE 授权码链路（后端 accio_start/accio_exchange，本地 51123 回调），
+  // 所以直接复用 pkce 族的界面，不另开分支。
+  // ★ 两个地区都必须登记：国际站 apk-accio / 大陆站 apk-accio-cn。
+  //   漏掉的那个会掉回「粘贴 token」界面 —— 而它的凭据本来就是 OAuth token，
+  //   用户按「粘贴」去找会找不到入口。域名由后端按 id 后缀选（-cn → accio-ai.com）。
+  pkce: ['sub-codex', 'sub-claude', 'sub-antigravity', 'sub-devin', 'apk-accio', 'apk-accio-cn'],
   qoder: ['apk-qoder', 'web-qoder'],
   trae: ['apk-trae', 'web-trae'],
   codearts: ['codearts'],
@@ -1062,7 +1369,7 @@ const LOGIN_UI = {
   pasteCoze: ['apk-coze'],
   pasteAntigravity: ['apk-antigravity'],
   // 拖拽式扫码（后端 relay 里有出码+轮询实现）
-  qrPaste: ['apk-raccoon', 'apk-doubao', 'apk-kuku', 'apk-loomy'],
+  qrPaste: ['apk-raccoon', 'apk-doubao', 'apk-kuku', 'apk-loomy', 'apk-metaso', 'web-glm'],
 };
 
 // 平台 id → 界面族（同一个 id 只可能属于一族；重复登记按先出现的算）
@@ -1072,7 +1379,9 @@ const LOGIN_UI_OF = (() => {
   return m;
 })();
 
-function srcDrawer(p) {
+/// @param {boolean} [bodyOnly] 只返回登录体（供主从布局的详情栏直接用），
+///        不套抽屉外壳、不带账号与模型区块。
+function srcDrawer(p, bodyOnly) {
   const ui = LOGIN_UI_OF[p.id] || '';
   const isWb = ui === 'wb';
   const isMinimax = ui === 'minimax';
@@ -1168,8 +1477,13 @@ function srcDrawer(p) {
       ? 'Antigravity 跳转登录（Google 账号 + 本地 51121 回调）'
       : p.id === 'sub-devin'
       ? 'Devin 跳转登录（headless PKCE，官方 CLI 无回调端口；服务器部署直接把地址栏 URL 粘回来）'
+      : p.id === 'apk-accio' || p.id === 'apk-accio-cn'
+      // 站点必须写在文案里：两个站的账号不通用，登错站的表现是「登录成功但没模型」，
+      // 用户不会想到是域名选错了。域名由后端按 id 后缀决定（-cn → accio-ai.com）。
+      ? `Accio 跳转登录（${p.id.endsWith('-cn') ? '大陆站 accio-ai.com' : '国际站 accio.com'}，阿里 Phoenix 账号 + PKCE + 本地 51123 回调；与桌面客户端同一条 OAuth 链路。⚠ 两个站账号不通用，请用对应站点的账号登录）`
       : p.id === 'sub-codex' ? 'Codex 跳转登录（PKCE + 本地 1455 回调）' : 'Claude Code 跳转登录（PKCE + 本地 54545 回调）';
     body = `<div class="note">${hint}：点「打开授权页」在浏览器完成登录（跳转登录，非扫码）。面板会自动捕获回调并换取 token —— 授权完成后你可以直接关掉浏览器那个页面回到这里，**不用再点任何按钮**；若部署在服务器，把浏览器跳转后地址栏的完整 URL 粘贴到下方输入框。</div>
+      ${p.id === 'apk-accio' || p.id === 'apk-accio-cn' ? `<div class="note warnnote">⚠ <b>登录能成功，但对话可能仍不可用</b>：Accio 的推理网关（<span class="mono">/api/adk/llm/generateContent</span>）2026-10-26 实测会对非官方客户端返回<b>阿里云滑块验证页</b>（响应体含 <span class="mono">rgv587_flag=sm</span>），而不是 API 响应。试过带/不带 Origin、Referer 两组请求头，结果相同。<br>这意味着 OAuth 登录链路是通的、账号能进池，但真正发消息时大概率拿到一页 HTML。平台规格里 <span class="mono">enabled = false</span> 也是这个原因 —— 需要你先在右侧「启用」，且能否对话取决于官方是否放开该校验。</div>` : ''}
       <div class="row">
         <button class="btn pri" onclick="authStart('${att(p.id)}')">打开授权页</button>
         <button class="btn" onclick="authPoll('${att(p.id)}')">立即查询一次</button>
@@ -1265,7 +1579,7 @@ function srcDrawer(p) {
       </div>
       <div id="authBox"></div>
       <details class="src-paste">
-        <summary class="faint" style="cursor:pointer">也可以不用扫码：手动粘贴 access_token（登录 xiaohuanxiong.com 后，F12 → Network 任选一条请求，复制请求头 Authorization: Bearer 后面那串）</summary>
+        <summary class="faint pointer">也可以不用扫码：手动粘贴 access_token（登录 xiaohuanxiong.com 后，F12 → Network 任选一条请求，复制请求头 Authorization: Bearer 后面那串）</summary>
         <div class="row">
           <input class="q mono" id="keyInput" placeholder="粘贴 access_token…">
           <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
@@ -1284,19 +1598,54 @@ function srcDrawer(p) {
         <br>③ 找到 <span class="mono">oauth_access_token</span>，复制它那串值（<span class="mono">eyJ…</span> 开头的 JWT）粘到下面。</div>
       <div class="note">账号 uin 会从 JWT 的 payload 自动解析，不用另外填。模型走 <span class="mono">TokenHub/</span> 前缀，裸名请求会自动归一。</div>
       <div class="note oknote">✔ 粘一次就够了，<b>不用定时重取</b>：这枚 JWT 本身约 2 小时时效，但上游有续期接口，面板会在临期 10 分钟内自动换新，401 时还会再强制续期一次并重试 —— 结果写回账号池，重启也保留。</div>
-      <div class="note" style="border-color:#5a4a2a">只有续期本身被上游拒（<span class="mono">INVALID_REQUEST：无法获取会话标识</span>，通常是桌面端改了登录态或号被封）时，才需要回 data.bin 重新复制一次。</div>
+      <div class="note warnnote">只有续期本身被上游拒（<span class="mono">INVALID_REQUEST：无法获取会话标识</span>，通常是桌面端改了登录态或号被封）时，才需要回 data.bin 重新复制一次。</div>
       <div class="row">
         <input class="q mono" id="keyInput" placeholder="粘贴 oauth_access_token 的 JWT（eyJ… 开头）…">
         <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
       </div>
       <div id="authBox"></div>`;
   } else if (isKey) {
-    body = `<div class="note">${p.id.startsWith('sub-') ? '订阅平台：' : '填官方 API Key：'}把 Key 粘贴到下面，保存即入库（自动作为 Bearer 头转发）。${loginUrl ? `<br>还没有 Key？<a href="${esc(loginUrl)}" target="_blank" rel="noopener">去官网申请/登录 →</a>` : ''}</div>
-      <div class="row">
-        <input class="q mono" id="keyInput" placeholder="粘贴 API Key / token 或 Cookie…">
-        <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
-      </div>
-      <div id="authBox"></div>`;
+    // 凭据来源决定文案。三种平台的上游压根不是一回事，不能共用一句
+    // 「填官方 API Key…去官网申请」—— 客户端反代平台根本没有申请入口。
+    const src = credSourceOf(p);
+    const cc = CRED_CLIENT[p.id];
+    const link = loginUrl ? `<a href="${esc(loginUrl)}" target="_blank" rel="noopener">${esc(loginUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''))} →</a>` : '';
+    if (src === 'client' && cc) {
+      body = `<div class="note">这个平台是<b>客户端反代</b>：需要 ${esc(cc.what)}，不是 API Key。</div>
+        <div class="note">${esc(cc.why)}<br>
+        <b>怎么拿：</b>${esc(cc.how)}。${link ? `（<a href="${esc(loginUrl)}" target="_blank" rel="noopener">打开官网</a>）` : ''}<br>
+        <b>粘什么：</b>${esc(cc.fmt)}</div>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="粘贴${esc(cc.what)}…">
+          <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+        </div>
+        <div id="authBox"></div>`;
+    } else if (src === 'client') {
+      // kind 命中但没有定制文案：给通用但正确的指引，不再谎称可以「申请 Key」
+      const kindTxt = p.upstream_kind && p.upstream_kind !== 'openai' ? `（协议 ${esc(p.upstream_kind)}）` : '';
+      body = `<div class="note">这个平台走<b>客户端/网页协议</b>${kindTxt}：凭据来自官方客户端的登录态，通常没有自助签发的 API Key。</div>
+        <div class="note">一般做法：登录官方客户端或网页版 → 从本地配置 / Local Storage / 开发者工具里取出登录 token${loginUrl ? `（<a href="${esc(loginUrl)}" target="_blank" rel="noopener">打开官网</a>）` : ''}。</div>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="粘贴该平台的登录 token…">
+          <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+        </div>
+        <div id="authBox"></div>`;
+    } else if (src === 'sub') {
+      body = `<div class="note"><b>订阅通道</b>：凭据是你订阅账号的 OAuth access token，不是控制台的 API Key —— 订阅套餐一般不提供自助签发。</div>
+        <div class="note">怎么拿：登录订阅账号${loginUrl ? `（${link}）` : ''}完成授权，然后取出 access token 粘到下面。需要的是平台开放平台 Key 的话，请改用对应的 <span class="mono">api-*</span> 平台。</div>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="粘贴订阅账号的 access token…">
+          <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+        </div>
+        <div id="authBox"></div>`;
+    } else {
+      body = `<div class="note">填<b>官方 API Key</b>：把 Key 粘贴到下面，保存即入库（自动作为 Bearer 头转发）。${loginUrl ? `<br>还没有 Key？${link.replace(' →', ' 申请/登录 →')}` : ''}</div>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="粘贴 API Key / token 或 Cookie…">
+          <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+        </div>
+        <div id="authBox"></div>`;
+    }
   } else if (ui === 'qrPaste' && p.id === 'apk-doubao') {
     // ★ 可达性：豆包 auth=qr_scan（不是 api_key/cookie），所以上面的 isKey 分支不会截走；
     //   这条分支与 kuku/loomy 都是「有扫码实现」的平台，靠 toml 的 auth=qr_scan 标记能力。
@@ -1308,7 +1657,7 @@ function srcDrawer(p) {
       </div>
       <div id="authBox"></div>
       <details class="src-paste">
-        <summary class="faint" style="cursor:pointer">也可以不用扫码：手动粘贴 Cookie（登录 www.doubao.com 后 F12 → Application → Cookies 复制整段，含 sessionid=…）</summary>
+        <summary class="faint pointer">也可以不用扫码：手动粘贴 Cookie（登录 www.doubao.com 后 F12 → Application → Cookies 复制整段，含 sessionid=…）</summary>
         <div class="row">
           <input class="q mono" id="keyInput" placeholder="粘贴整段 Cookie（含 sessionid=…）…">
           <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
@@ -1323,7 +1672,7 @@ function srcDrawer(p) {
       </div>
       <div id="authBox"></div>
       <details class="src-paste">
-        <summary class="faint" style="cursor:pointer">也可以不用扫码：手动粘贴 Cookie（登录 kuku.baidu.com 后 F12 → Application → Cookies 复制整段，必须含 BDUSS=…; STOKEN=…）</summary>
+        <summary class="faint pointer">也可以不用扫码：手动粘贴 Cookie（登录 kuku.baidu.com 后 F12 → Application → Cookies 复制整段，必须含 BDUSS=…; STOKEN=…）</summary>
         <div class="row">
           <input class="q mono" id="keyInput" placeholder="粘贴整段 Cookie（含 BDUSS=…; STOKEN=…）…">
           <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
@@ -1339,9 +1688,41 @@ function srcDrawer(p) {
       </div>
       <div id="authBox"></div>
       <details class="src-paste">
-        <summary class="faint" style="cursor:pointer">也可以不用扫码：手动粘贴 session（loomy 客户端/网页登录后，请求头 Authorization 里的 32 位字符串）</summary>
+        <summary class="faint pointer">也可以不用扫码：手动粘贴 session（loomy 客户端/网页登录后，请求头 Authorization 里的 32 位字符串）</summary>
         <div class="row">
           <input class="q mono" id="keyInput" placeholder="粘贴 32 位 session…">
+          <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+        </div>
+      </details>`;
+  } else if (ui === 'qrPaste' && p.id === 'apk-metaso') {
+    // 秘塔微信扫码登录：open.weixin qrconnect → 长轮询 wx_code → metaso /login 回调下发 uid/sid
+    // 一手来源 metaso.cn chunk 41209 的 WxQrCode 组件
+    body = `<div class="note">秘塔 AI 搜索<b>微信扫码登录</b>（纯 HTTP，免粘贴 uid-sid）：点「开始登录」生成二维码，用<b>微信</b>扫一扫并在手机上确认，面板自动换取 uid + sid 入账号池。<br>登录后额度约 <b>500 次/天</b>，远高于匿名的 13 次/窗口。</div>
+      <div class="row">
+        <button class="btn pri" onclick="authStart('${att(p.id)}')">开始登录</button>
+        <button class="btn" onclick="authPoll('${att(p.id)}')">查询扫码状态</button>
+      </div>
+      <div id="authBox"></div>
+      <details class="src-paste">
+        <summary class="faint pointer">也可以不用扫码：手动粘贴 uid-sid（登录 metaso.cn 后 F12 → Application → Cookies 取 uid 与 sid，用「-」拼起来）</summary>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="uid-sid（例：64f0a1b2c3d4e5f6-9a8b7c6d5e4f3a2b）…">
+          <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+        </div>
+      </details>`;
+  } else if (ui === 'qrPaste' && p.id === 'web-glm') {
+    // 智谱清言微信扫码登录：open.weixin qrconnect → 长轮询 wx_code → wechat_qr_login 换 refresh_token
+    // 一手来源 chatglm.cn main.*.js 的 WxLogin 调用
+    body = `<div class="note">智谱清言<b>微信扫码登录</b>（纯 HTTP，免粘贴 refresh_token）：点「开始登录」生成二维码，用<b>微信</b>扫一扫并在手机上确认，面板自动换取 refresh_token 入账号池。<br>refresh_token 有效期约 180 天，过期自动用 access_token（30 分钟）刷新，无需反复扫码。<br>若该微信号没注册过智谱清言，微信侧确认后会提示先去官网用手机号注册并绑定微信。</div>
+      <div class="row">
+        <button class="btn pri" onclick="authStart('${att(p.id)}')">开始登录</button>
+        <button class="btn" onclick="authPoll('${att(p.id)}')">查询扫码状态</button>
+      </div>
+      <div id="authBox"></div>
+      <details class="src-paste">
+        <summary class="faint pointer">也可以不用扫码：手动粘贴 refresh_token（登录 chatglm.cn 后 F12 → Application → Cookies 复制 chatglm_refresh_token 的值）</summary>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="粘贴 chatglm_refresh_token…">
           <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
         </div>
       </details>`;
@@ -1400,22 +1781,33 @@ function srcDrawer(p) {
         <div id="authBox"></div>`;
     }
   }
+  // 主从布局的详情栏只要登录体：提前返回，不套抽屉外壳也不带账号/模型区块
+  // （那两块由 srcDetail 按自己的分段结构渲染，避免重复）。
+  if (bodyOnly) return body;
   return modalShell(
     `${esc(p.name)}<span class="faint mono"> ${esc(p.id)}</span>`,
     `
-    <div class="modal-bd">
-      ${Array.isArray(p.accounts) && p.accounts.length ? `<div class="srcsec"><div class="srcsec-h">已登录账号</div>${srcAcctList(p)}</div>` : ''}
-      ${unusableBanner(p)}
-      <div class="srcsec"><div class="srcsec-h">模型清单${p.models_n ? '（' + p.models_n + ' 个）' : ''}
-        <button class="btn sm" style="margin-left:8px" onclick="srcRefreshModels('${att(p.id)}', this)"
-          title="用本平台已登录账号的凭据去上游问一遍，立刻刷新清单（不必等缓存过期）">刷新模型</button>
-      </div>${srcModelsBlock(p)}</div>
-      ${body}
-    </div>
+    ${Array.isArray(p.accounts) && p.accounts.length ? `<div class="srcsec"><div class="srcsec-h">已登录账号</div>${srcAcctList(p)}</div>` : ''}
+    ${unusableBanner(p)}
+    <div class="srcsec"><div class="srcsec-h">模型清单${p.models_n ? '（' + p.models_n + ' 个）' : ''}
+      <button class="btn sm ml-2" onclick="srcRefreshModels('${att(p.id)}', this)"
+        title="用本平台已登录账号的凭据去上游问一遍，立刻刷新清单（不必等缓存过期）">刷新模型</button>
+    </div>${srcModelsBlock(p)}</div>
+    ${body}
 `,
     // 抽屉形态：点遮罩或 ✕ 都要清掉 SRC_EXPAND 再重渲染（直接 remove 会留下展开态）
-    { drawer: true, id: 'srcDrawer', onMask: 'SRC_EXPAND=null;render()', close: 'SRC_EXPAND=null;render()' },
+    { drawer: true, id: 'srcDrawer', onMask: 'SRC_EXPAND=null;srcRerender()', close: 'SRC_EXPAND=null;srcRerender()' },
   );
+}
+
+/// 只取「登录体」（不带抽屉外壳、不带账号/模型区块）。
+///
+/// 主从布局的详情栏要把登录直接铺开，而账号与模型由 srcDetail 自己分段渲染
+/// （它需要更强的结构控制）。所以把 srcDrawer 里生成的 `body` 单独暴露出来 ——
+/// 里面 14 种登录形态（扫码/设备码/跳转/PKCE/粘贴…）的实现一行都不用重写，
+/// 避免「两种布局各维护一份登录逻辑」的漂移。
+function srcLoginBody(p) {
+  return srcDrawer(p, true);
 }
 
 // ── 小浣熊二维码编码器 ──
@@ -1975,18 +2367,31 @@ async function authStart(platform) {
     const qrMark = qrSvg || `<img class="qr" src="${esc(r.qr_image)}" alt="二维码" style="width:200px;height:200px">`;
     box.innerHTML = `<div class="note">${esc(r.message || '请扫码')}</div>
       <div class="qrwrap">${qrMark}</div>
-      <div class="faint" style="text-align:center">${platform === 'apk-doubao' ? '用豆包 / 抖音 App 扫码，在手机上确认登录' : platform === 'apk-kuku' ? '用百度 App / 百度网盘 App 扫一扫，在手机上确认登录' : platform === 'apk-loomy' ? '用微信扫一扫，在手机上确认登录' : platform === 'apk-raccoon' ? '用微信扫一扫（进入「商汤小浣熊」小程序），在手机上确认登录' : '扫码并在手机上确认登录'}（二维码有有效期，失效后重新点「开始登录」）</div>
+      <div class="faint" style="text-align:center">${platform === 'apk-doubao' ? '用豆包 / 抖音 App 扫码，在手机上确认登录' : platform === 'apk-kuku' ? '用百度 App / 百度网盘 App 扫一扫，在手机上确认登录' : platform === 'apk-loomy' ? '用微信扫一扫，在手机上确认登录' : platform === 'apk-raccoon' ? '用微信扫一扫（进入「商汤小浣熊」小程序），在手机上确认登录' : (platform === 'apk-metaso' || platform === 'web-glm') ? '用微信扫一扫，在手机上确认登录' : '扫码并在手机上确认登录'}（二维码有有效期，失效后重新点「开始登录」）</div>
       <div id="pollBox"></div>`;
     srcQrStop();
     SRC_QR_TRIES = 0;
     SRC_POLL_N = 0;
     srcQrSchedule(platform, 1200);   // 给用户 1.2s 先看清二维码，再开始轮询
   } else if (r.login_url) {
-    // ★ 跳转授权（PKCE / Trae / CodeArts）：以前这里只给一个「点这里查询」按钮，
+    // ★ 跳转授权（PKCE / Trae / CodeArts / 设备码）：以前这里只给一个「点这里查询」按钮，
     //   于是用户浏览器授权成功后回到面板必须再手点一次才会去取码换 token —— 而回调
     //   其实早已进了后端队列（auth_login.rs 的 push_callback），白白让人以为「没自动获取」。
     //   现在与扫码一样起自调度轮询：授权完成 → 下一次 poll 取到 code → 直接入库。
+    //
+    // ★ 必须**显式渲染一个可点的授权页链接**，不能只靠上面那次 window.open：
+    //   弹窗被浏览器拦掉（非用户手势触发的 open 很常见）、或者用户手一抖关掉了那个
+    //   标签，就再也没有任何入口 —— 而他手里只剩一句已经把 URL 夹在中间的长文案，
+    //   还得自己从文字里挑出来复制。链接 + 设备码单独成行，两种情况都能救回来。
+    const codeLine = r.user_code
+      ? `<div class="usercode">设备码：<b>${esc(r.user_code)}</b>（在授权页里输入）</div>`
+      : '';
     box.innerHTML = `<div class="note">${esc(r.message || '已打开授权页，等待你在浏览器里完成授权…')}</div>
+      ${codeLine}
+      <div class="row">
+        <a class="btn pri" href="${esc(lu)}" target="_blank" rel="noopener noreferrer">打开授权页 →</a>
+        <button class="btn" data-url="${esc(lu)}" onclick="copyAffLink(this)">复制授权链接</button>
+      </div>
       ${r.callback_warning ? `<div class="note errnote">${esc(r.callback_warning)}</div>` : ''}
       <div id="pollBox"></div>`;
     srcQrStop();
@@ -1994,6 +2399,8 @@ async function authStart(platform) {
     SRC_POLL_N = 0;
     srcQrSchedule(platform, 1500);   // 留出浏览器跳转 + 登录的时间，再开始问
   } else {
+    // 既没有二维码也没有跳转链接：设备码 / 纯手工粘贴类。
+    // 有 user_code 就把设备码和「去哪输」分开给，别让用户在一句话里找。
     box.innerHTML = `<div class="note">${esc(r.message || '已生成授权会话')}</div>
       ${r.user_code ? `<div class="usercode">输入设备码：<b>${esc(r.user_code)}</b></div>` : ''}
       <div class="row"><button class="btn" onclick="authPoll('${att(platform)}')">授权完成后，点这里查询</button></div>
@@ -2004,18 +2411,13 @@ async function authStart(platform) {
 // 扫码轮询：**自调度**（每次 poll 回来再排下一次），不再用 setInterval。
 // 原因：库库 unicast 是 ~30s 长轮询，固定 2s 的 setInterval 会在一个请求还没回来时
 // 继续叠加新请求 —— 实测 15s 以上的 poll 能叠出十几个并发连接，既浪费又把提示刷成乱码。
-let SRC_QR_TIMER = null;       // 下一次 poll 的 setTimeout 句柄
-let SRC_QR_ACTIVE = false;     // 是否处于自动轮询（终态/过期后关掉）
-let SRC_QR_TRIES = 0;          // 连续自动重开二维码次数（防死循环）
-let SRC_POLL_INFLIGHT = false; // 在途请求闩，双保险
-let SRC_SESSION = null;
+// （SRC_QR_* / SRC_SESSION / SRC_POLL_N 的声明在文件前部，见 SRC_LOGIN_NOTICE 附近。）
 function srcQrStop() {
   if (SRC_QR_TIMER) clearTimeout(SRC_QR_TIMER);
   SRC_QR_TIMER = null;
   SRC_QR_ACTIVE = false;
   SRC_POLL_INFLIGHT = false;
 }
-let SRC_POLL_N = 0;             // 已轮询次数（跳转授权有上限，扫码没有）
 const SRC_POLL_MAX_REDIRECT = 150;  // 3 秒一次 ≈ 7.5 分钟；够走完登录 + 二次验证
 function srcQrSchedule(platform, ms) {
   if (SRC_QR_TIMER) clearTimeout(SRC_QR_TIMER);
@@ -2079,7 +2481,7 @@ async function authPoll(platform) {
   const waiting = msg.indexOf('等待授权中') >= 0;
   pb.innerHTML = `<div class="note ${scanned || waiting ? '' : 'oknote'}">${esc(msg)}</div>
     ${SRC_QR_ACTIVE
-      ? `<div class="faint" style="text-align:center;margin-top:6px">${waiting
+      ? `<div class="faint" style="text-align:center;margin-top:var(--sp-2)">${waiting
           ? '等待浏览器完成授权…授权完成后会自动入库，不用回来点任何按钮'
           : '自动轮询中…（百度/豆包是长轮询，最长 ~30 秒才回一次，停在「等待扫码」不报错就是正常）'}</div>`
       : `<div class="row"><button class="btn" onclick="authPoll('${att(platform)}')">再查一次</button></div>`}`;
@@ -2113,11 +2515,44 @@ async function authSave(platform, allowEmpty) {
   const b = $('#authBox');
   if (!b) return;
   if (r.ok) {
+    // ★ 成功反馈必须**活过下一次 route()**。
+    //
+    //   旧实现是：写一句「✓ 已保存」→ 800ms 后 render() → route() 把整个视图重建，
+    //   抽屉连带 authBox 一起被换成新的（空的），于是那句成功提示一闪就没。
+    //   实测症状：点「保存凭据」后 authBox 全空，用户不知道到底存没存进去，
+    //   只好再点一次 —— 又存一遍。
+    //
+    //   现在拆成两件独立的事：
+    //   ① 先把结果写进 SRC_LOGIN_NOTICE（模块级），由抽屉渲染时自己贴回去 ——
+    //      重渲染多少次它都在，用户关掉抽屉才清；
+    //   ② 仍然刷新平台行（账号数、验活状态要更新），但不再指望 authBox 承载它。
+    SRC_LOGIN_NOTICE = { platform, ok: true, text: r.message || '凭据已保存' };
     b.innerHTML = `<div class="note oknote">✓ ${esc(r.message || '凭据已保存')}</div>`;
-    setTimeout(() => render(), 800);
+    // 验活没过时把原因摊开：verified=false 但 ok=true 是「存进去了但用不了」，
+    // 不给原因用户会以为已经可用。
+    if (r.verified === false && r.last_error) {
+      b.innerHTML += `<div class="note errnote">验活未通过：${esc(String(r.last_error.text || r.message || '').slice(0, 300))}</div>`;
+    }
+    setTimeout(() => { render(); srcRestoreLoginNotice(); }, 800);
   } else {
     b.innerHTML = `<div class="note errnote">${esc(r.message || '保存失败')}</div>`;
   }
+}
+
+/// 重渲染之后把上次的操作结果贴回抽屉顶部（如果抽屉还开着、还是同一个平台）。
+///
+/// 只在「这是一次新鲜的重渲染」时贴：抽屉刚被 route() 重建，authBox 天然是空的。
+/// 旧写法用「authBox 非空就不覆盖」判断，结果把提示自己也挡掉了 —— 重渲染后
+/// authBox 里可能还留着上一轮写的「保存中…」，于是那条真正的结果永远贴不出来。
+function srcRestoreLoginNotice() {
+  const n = SRC_LOGIN_NOTICE;
+  if (!n) return;
+  if (SRC_EXPAND !== n.platform) return;
+  // 该平台正有扫码/授权轮询在写 authBox，别拿旧的一次性提示盖掉实时状态。
+  if (SRC_QR_ACTIVE || SRC_SESSION) return;
+  const box = $('#authBox');
+  if (!box) return;
+  box.innerHTML = `<div class="note ${n.ok ? 'oknote' : 'errnote'}">${n.ok ? '✓ ' : ''}${esc(n.text)}</div>`;
 }
 // 免密平台连通性测试。
 // ★ 旧实现只 fetch /v1/models 数「owned_by 命中条数」就报「连通正常」：
@@ -2235,6 +2670,170 @@ function srcRerender() {
   if (el) viewSources(el);
 }
 
+// ── 接入源列表：虚拟滚动 ─────────────────────────────────────────────────
+//
+// 205 个平台全渲染会让主线程阻塞（实测 1206 DOM 节点、卡片墙 16 屏）。
+// 这里只渲染视口内可见的行（约 20 行 + 上下各 6 行缓冲），滚动时用
+// translateY 把窗口挪过去，DOM 常年保持在 ~150 个节点。
+//
+// 行高固定（平台行 32px / 分组标题 26px），所以偏移可以直接算，不需要测量。
+function srcRowH(item) {
+  return item.kind === 'grp' ? SRC_GRP_H : SRC_ROW_H;
+}
+
+/// 计算每一行距顶部的偏移，返回 [offsets, totalHeight]。
+/// 行数变化时才重算一次；滚动过程中直接用缓存。
+function srcOffsets() {
+  const offs = new Array(SRC_FLAT.length);
+  let y = 0;
+  for (let i = 0; i < SRC_FLAT.length; i++) {
+    offs[i] = y;
+    y += srcRowH(SRC_FLAT[i]);
+  }
+  return [offs, y];
+}
+
+let SRC_OFFS = null;   // 缓存：随 SRC_FLAT 一起失效
+
+/// 只渲染可见窗口。滚动时调用（节流见 srcOnListScroll）。
+function srcRenderListWindow() {
+  const vp = document.getElementById('srcListVp');
+  const inner = document.getElementById('srcListInner');
+  if (!vp || !inner) return;
+
+  if (!SRC_FLAT.length) {
+    inner.style.height = '0px';
+    inner.innerHTML = '<div class="empty" style="position:static">没有匹配的平台</div>';
+    return;
+  }
+
+  const [offs, total] = srcOffsets();
+  SRC_OFFS = offs;
+  inner.style.height = total + 'px';
+
+  const scrollTop = vp.scrollTop;
+  const vpH = vp.clientHeight || 420;
+
+  // 二分找可见区间的起点（行数上千时比线性扫快，且完全确定）
+  let lo = 0, hi = SRC_FLAT.length - 1, first = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (offs[mid] + srcRowH(SRC_FLAT[mid]) >= scrollTop) { first = mid; hi = mid - 1; }
+    else lo = mid + 1;
+  }
+  let last = first;
+  while (last < SRC_FLAT.length && offs[last] < scrollTop + vpH) last++;
+  first = Math.max(0, first - SRC_LIST_OVER);
+  last = Math.min(SRC_FLAT.length, last + SRC_LIST_OVER);
+
+  const parts = [];
+  for (let i = first; i < last; i++) {
+    const it = SRC_FLAT[i];
+    parts.push(`<div style="position:absolute;left:0;right:0;top:${offs[i]}px;height:${srcRowH(it)}px">${
+      it.kind === 'grp' ? srcGroupRow(it) : srcListRow(it.p)
+    }</div>`);
+  }
+  inner.innerHTML = parts.join('');
+}
+
+let SRC_SCROLL_RAF = 0;
+function srcOnListScroll() {
+  if (SRC_SCROLL_RAF) return;
+  SRC_SCROLL_RAF = requestAnimationFrame(() => {
+    SRC_SCROLL_RAF = 0;
+    srcRenderListWindow();
+  });
+}
+
+/// 分组标题行（可点折叠）。
+function srcGroupRow(it) {
+  return `<button class="src-row grp" onclick="srcToggleGroup('${att(it.g)}')">
+    <span>${it.open ? '▾' : '▸'}</span>
+    <span class="nm">${esc(GROUP_META[it.g].t)}</span>
+    <span class="bd">${it.onN}/${it.total}</span>
+  </button>`;
+}
+
+/// 平台行：状态点 + 名称 + 徽章数。整行可点，点了在右侧详情展示。
+function srcListRow(p) {
+  const on = SRC_SEL === p.id || (!SRC_SEL && SRC_EXPAND === p.id);
+  // 状态点：有问题(黄/红) > 已接入(绿) > 未接入(灰)
+  let dot = '';
+  if (p.recent && p.recent.failed > 0) {
+    const rate = p.recent.failed / (p.recent.requests || 1);
+    dot = rate >= 0.5 ? 'err' : 'warn';
+  } else if (p.anon || p.accounts_n > 0) {
+    dot = 'ok';
+  }
+  const lm = Array.isArray(p.login_methods) ? p.login_methods : [];
+  const qr = lm.includes('qr');
+  return `<button class="src-row ${on ? 'on' : ''}" onclick="srcSelect('${att(p.id)}')" title="${att(p.name)} · ${att(p.id)}">
+    <span class="dot ${dot}"></span>
+    <span class="nm">${esc(p.name)}</span>
+    ${qr ? '<span class="bd" title="支持扫码登录">⌗</span>' : ''}
+    ${p.accounts_n ? `<span class="bd">${p.accounts_n}</span>` : ''}
+  </button>`;
+}
+
+function srcToggleGroup(g) {
+  SRC_OPEN[g] = !(SRC_OPEN[g] ?? GROUP_META[g].open);
+  SRC_OFFS = null;
+  srcRerender();
+}
+
+/// 选中一个平台：更新左列表高亮 + 右详情，不重渲染整个页面。
+///
+/// 为什么不直接 srcRerender()：那会重新拉 /api/platforms + /api/accounts，
+/// 200+ 平台每次点一下都重拉一遍纯属浪费，而且会打断正在进行的扫码轮询。
+function srcSelect(id) {
+  const prev = SRC_SEL;
+  SRC_SEL = id;
+  SRC_EXPAND = id;
+  // ★ 换平台必须掐掉上一轮的自动轮询。
+  //   SRC_QR_TIMER / SRC_SESSION 是全局单例，而详情栏重建后 #authBox 这个 id
+  //   依然存在（新详情也有一个），于是 authPoll 里「抽屉没了就停」的判断永远
+  //   不成立 —— 上一个平台的轮询会继续跑，把它的等待文案写进新平台的 authBox。
+  //   实测症状：切到 Loomy，详情里写的是「等待扫码：请用微信扫一扫（打开商汤
+  //   小浣熊小程序）」，即上一个平台的话。
+  if (prev !== id) {
+    srcQrStop();
+    SRC_SESSION = null;
+    SRC_POLL_N = 0;
+    SRC_QR_TRIES = 0;
+    SRC_LOGIN_NOTICE = null;
+  }
+  // 左列表：只改高亮，不重建（重建会丢滚动位置）
+  document.querySelectorAll('.src-row').forEach((r) => r.classList.remove('on'));
+  const vp = document.getElementById('srcListVp');
+  if (vp) {
+    // 按 id 找对应按钮：行是虚拟渲染的，只可能有 0 或 1 个匹配
+    const btn = Array.from(vp.querySelectorAll('.src-row:not(.grp)')).find(
+      (b) => b.getAttribute('onclick') === `srcSelect('${id}')`
+    );
+    if (btn) btn.classList.add('on');
+  }
+  // 右详情：整块替换（详情栏本来就小，重建成本可忽略）
+  const col = document.querySelector('.src-detail-col');
+  const p = (window.__PL_ROWS || []).find((x) => x.id === id);
+  if (col && p) col.innerHTML = srcDetail(p);
+}
+
+// 搜索框专用：只在停止输入后重绘一次。
+//
+// 为什么不能直接用 srcRerender：viewSources 每次都要重新拉 /api/platforms +
+// /api/accounts，然后把 200+ 张卡片整体 innerHTML 重建。逐字符触发时，输入
+// 5 个字就是 5 轮全量重建，主线程被占满、输入框自己都会卡住（实测面板直接
+// 假死在「接入源」页）。防抖到 180ms 后只跑最后一轮。
+let SRC_Q_TIMER = null;
+function srcQueryChanged(v) {
+  SRC_Q = v;
+  if (SRC_Q_TIMER) clearTimeout(SRC_Q_TIMER);
+  SRC_Q_TIMER = setTimeout(() => {
+    SRC_Q_TIMER = null;
+    srcRerender();
+  }, 180);
+}
+
 // ★ 2026-10-28（用户要求）：接入源页「⋯ 管理操作」菜单。
 // 点击外部自动收起；菜单项复用的是既有的账号运维能力（不新增后端路径）。
 function srcMgrToggle() {
@@ -2303,7 +2902,7 @@ async function srcMgr(kind) {
           const r2 = await post('/api/checkin', { action: 'growth', platform: 'wb-gateway', growth_action: 'buddy_open', count: Math.min(Number(q.affordable), 5) }).catch(() => null);
           const rr = ((((r2 && r2.accounts) || [])[0] || {}).result) || {};
           out.push(rr.ok ? '✓ 已开盒（结果见下方原始数据）' : '✗ 开盒失败：' + esc(String(rr.message || '')));
-          if (rr.data) out.push('<pre class="mono" style="font-size:11px;max-height:160px;overflow:auto">' + esc(JSON.stringify(rr.data, null, 1).slice(0, 800)) + '</pre>');
+          if (rr.data) out.push('<pre class="mono fs-xs scroll-y-sm">' + esc(JSON.stringify(rr.data, null, 1).slice(0, 800)) + '</pre>');
         } else {
           out.push('<span class="faint">能量不足，攒够 ' + esc(String(q.cost_per_open ?? '?')) + ' 再来</span>');
         }
@@ -2314,7 +2913,7 @@ async function srcMgr(kind) {
         // 兑换/抽奖的明细逐条列出
         (res.redeemed || []).forEach((x) => out.push('· 档位 ' + esc(String(x.tier)) + '：' + (x.ok ? '✓' : '✗ ' + esc(String(x.message || '')))));
         (res.draws || []).forEach((x, i) => out.push('· 第 ' + (i + 1) + ' 抽：' + (x.ok ? (x.already ? '已处理（去重）' : '✓') : '✗ ' + esc(String(x.message || '')))));
-        if (res.data) out.push('<pre class="mono" style="font-size:11px;max-height:160px;overflow:auto">' + esc(JSON.stringify(res.data, null, 1).slice(0, 800)) + '</pre>');
+        if (res.data) out.push('<pre class="mono fs-xs scroll-y-sm">' + esc(JSON.stringify(res.data, null, 1).slice(0, 800)) + '</pre>');
       }
     } catch (e) {
       out.push('✗ ' + esc(String(e)));
@@ -2378,8 +2977,8 @@ function skippedNote(h) {
     .join('<br>');
   const head = h.warning || (h.skipped_specs.length + ' 个平台 spec 非法已被跳过');
   return '<div class="note warn">⚠ ' + esc(head)
-    + '<div class="faint mono" style="font-size:11.5px;margin-top:6px">' + rows + '</div>'
-    + '<div class="faint" style="font-size:11.5px;margin-top:6px">这些平台不会出现在「接入源」与 /v1/models 里；修好 providers/ 下对应的 .toml 后重启即可。</div></div>';
+    + '<div class="faint mono" style="font-size:var(--fs-xs);margin-top:var(--sp-2)">' + rows + '</div>'
+    + '<div class="faint" style="font-size:var(--fs-xs);margin-top:var(--sp-2)">这些平台不会出现在「接入源」与 /v1/models 里；修好 providers/ 下对应的 .toml 后重启即可。</div></div>';
 }
 async function viewOverview(el) {
   const [h, pl, ac, us, pool] = await Promise.all([
@@ -2393,14 +2992,14 @@ async function viewOverview(el) {
   const rate = realReq ? Math.round((us.success / realReq) * 100) : 100;
   el.innerHTML = `
     <div class="grid g4">
-      <div class="card glass kpi"><div class="lb">平台</div><div class="vl">${enabled}/${pl.total}</div>
+      <div class="card kpi"><div class="lb">平台</div><div class="vl">${enabled}/${pl.total}</div>
         <div class="ex">启用 / 声明式 spec + 自定义</div>
         <div class="bar"><i style="width:${pl.total ? (enabled / pl.total) * 100 : 0}%"></i></div></div>
-      <div class="card glass kpi"><div class="lb">账号</div><div class="vl">${ac.total}</div>
+      <div class="card kpi"><div class="lb">账号</div><div class="vl">${ac.total}</div>
         <div class="ex">已导入（secret 后台专用）</div></div>
-      <div class="card glass kpi"><div class="lb">累计调用</div><div class="vl">${nfmt(us.requests)}</div>
+      <div class="card kpi"><div class="lb">累计调用</div><div class="vl">${nfmt(us.requests)}</div>
         <div class="ex">成功 ${nfmt(us.success)} · 失败 ${nfmt(us.failed)}${us.cancelled ? ` · 取消 ${nfmt(us.cancelled)}` : ''}</div></div>
-      <div class="card glass kpi"><div class="lb">成功率</div><div class="vl">${rate}%</div>
+      <div class="card kpi"><div class="lb">成功率</div><div class="vl">${rate}%</div>
         <div class="ex">tokens ${nfmt(us.tokensIn)} in / ${nfmt(us.tokensOut)} out</div></div>
     </div>
     ${(() => {
@@ -2418,13 +3017,13 @@ async function viewOverview(el) {
         + (total > top.length ? ' 等' : '')
         + ' —— 这些请求会立刻 429 或换号，到「账号」页可看完整明细。</div>';
     })()}
-    <section class="card glass"><h3>运行状态</h3>
+    <section class="card"><h3>运行状态</h3>
       ${skippedNote(h)}
       <div class="mini-grid">
-        <div class="mini glass"><b>${esc(h.service)} v${esc(h.version)}</b>
+        <div class="mini"><b>${esc(h.service)} v${esc(h.version)}</b>
           <span class="pill ok">${esc(h.milestone)}</span></div>
-        <div class="mini glass"><b>存储</b><span class="pill ${us.db ? 'ok' : 'warn'}">${us.db ? 'SQLite WAL' : 'JSON 降级'}</span></div>
-        <div class="mini glass"><b>端点</b><code>/v1/chat/completions</code> · <code>/v1/messages</code> · <code>/v1/responses</code><br><span class="faint">模型路由：清单匹配 或 <code>模型id@平台</code></span></div>
+        <div class="mini"><b>存储</b><span class="pill ${us.db ? 'ok' : 'warn'}">${us.db ? 'SQLite WAL' : 'JSON 降级'}</span></div>
+        <div class="mini"><b>端点</b><code>/v1/chat/completions</code> · <code>/v1/messages</code> · <code>/v1/responses</code><br><span class="faint">模型路由：清单匹配 或 <code>模型id@平台</code></span></div>
       </div>
     </section>`;
 }
@@ -2489,24 +3088,24 @@ function poolCard(p) {
     + (cooling.length > 8 ? cooling.length - 8 : 0)
     + (waf.length > 8 ? waf.length - 8 : 0);
   var idle = (!nIn && !cooling.length && !waf.length && !stickyN);
-  var h = '<section class="card glass" style="margin-top:14px">'
+  var h = '<section class="card mt-3">'
     + '<h3 style="display:flex;align-items:center;gap:8px">号池与限速'
-    + '<button class="btn sm gh" style="margin-left:auto" onclick="render()" title="重新拉取号池状态">刷新</button></h3>'
+    + '<button class="btn sm gh ml-auto" onclick="srcRerender()" title="重新拉取号池状态">刷新</button></h3>'
     + '<div class="mini-grid">';
-  h += '<div class="mini glass"><b>在途请求 ' + nIn + ' / 上限 ' + esc(String(p.max_inflight == null ? '—' : p.max_inflight)) + '</b>'
+  h += '<div class="mini"><b>在途请求 ' + nIn + ' / 上限 ' + esc(String(p.max_inflight == null ? '—' : p.max_inflight)) + '</b>'
     + '<span class="faint">同一 (平台,账号,模型) 的并发租约，满了直接 429「provider busy」</span></div>';
-  h += '<div class="mini glass"><b>冷却中 ' + cooling.length + ' 个</b>'
+  h += '<div class="mini"><b>冷却中 ' + cooling.length + ' 个</b>'
     + '<span class="faint">429 / 额度不足后按指数退避停用的「账号-模型」</span></div>';
-  h += '<div class="mini glass"><b>WAF 限速 ' + waf.length + ' 个</b>'
+  h += '<div class="mini"><b>WAF 限速 ' + waf.length + ' 个</b>'
     + '<span class="faint">整账号被上游风控拦下时按账号停用</span></div>';
-  h += '<div class="mini glass"><b>会话粘性 ' + stickyN + (stickyMax ? ' / ' + stickyMax : '') + ' 条</b>'
+  h += '<div class="mini"><b>会话粘性 ' + stickyN + (stickyMax ? ' / ' + stickyMax : '') + ' 条</b>'
     + '<span class="faint">同一 conversation_id 钉住同一账号（TTL ' + esc(String(st.ttl_s == null ? '—' : st.ttl_s)) + ' 秒）</span></div>';
   h += '</div>';
   if (rows.length) {
-    h += '<table style="margin-top:10px"><thead><tr><th style="width:70px">原因</th><th>账号</th><th>模型</th><th>剩余</th><th>备注</th><th style="width:88px">操作</th></tr></thead><tbody>'
+    h += '<table class="mt-3"><thead><tr><th style="width:70px">原因</th><th>账号</th><th>模型</th><th>剩余</th><th>备注</th><th style="width:88px">操作</th></tr></thead><tbody>'
       + rows.join('') + '</tbody></table>';
   }
-  if (hidden > 0) h += '<div class="faint" style="margin-top:6px">还有 ' + hidden + ' 条未显示（每类只列前 8 条）</div>';
+  if (hidden > 0) h += '<div class="faint mt-2">还有 ' + hidden + ' 条未显示（每类只列前 8 条）</div>';
   if (idle) h += '<div class="empty">号池空闲：没有在途请求、没有账号处于冷却或限速，也没有活跃的会话粘性绑定</div>';
   h += '</section>';
   return h;
@@ -2530,31 +3129,31 @@ async function viewAccounts(el) {
   // 免密车道（anon）不需要账号：池里出现的行都是历史遗留占位（name=匿名公共池 / secret=public），
   // 单列出来提示可删，别让用户以为那是一份要维护的凭据。
   const anonRows = ac.rows.filter((a) => a.anon);
-  el.innerHTML = `<section class="card glass">
+  el.innerHTML = `<section class="card">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
       <b>账号凭据</b>
       ${wbN > 0 ? `<button class="btn sm" onclick="wbCheckin()">每日签到（${wbN} 账号）</button>` : ''}
       ${wbN > 0 ? `<button class="btn sm ${ac.daily_checkin ? 'pri' : 'gh'}" onclick="wbAutoToggle(${ac.daily_checkin ? 'false' : 'true'}, this)" title="开启后后台每 12 小时自动领取一次；默认关，开关存 flags.json，重启保持。当天已领过时上游回「今日已领取」，无副作用">自动签到：${ac.daily_checkin ? '开 ✔' : '关'}</button>` : ''}
       ${wbN > 0 ? `<button class="btn sm" onclick="wbGrowth()" title="一键完成成长任务（17 项）：事件链上报 + 领奖，全新账号约 +1950 积分">⚡ 成长任务</button>` : ''}
       ${wbN > 0 ? `<button class="btn sm ${ac.daily_growth ? 'pri' : 'gh'}" onclick="wbGrowthToggle(${ac.daily_growth ? 'false' : 'true'}, this)" title="开启后后台每 12 小时自动跑一轮成长任务；默认关">自动成长：${ac.daily_growth ? '开 ✔' : '关'}</button>` : ''}
-      <span class="faint" style="margin-left:auto">健康列来自最近一次真实请求 / 「检查」验活的结果（重启后清空）· Buddy 加油站每日 100 积分仅 wb 族账号可签到</span>
+      <span class="faint ml-auto">健康列来自最近一次真实请求 / 「检查」验活的结果（重启后清空）· Buddy 加油站每日 100 积分仅 wb 族账号可签到</span>
     </div>
     ${checkinTaskLine(ac.checkin_task)}
     ${creditSummary(ac.rows)}
     ${ac.rows.some((a) => a.platform_known === false) ? `<div class="note">有 ${ac.rows.filter((a) => a.platform_known === false).length} 个账号所属的平台已经不在 providers/ 里了（标记「平台已移除」）：这些号转不出去，留着只会混淆，可以直接删除。</div>` : ''}
     ${ac.rows.length ? `<table><thead><tr><th>账号名</th><th>平台</th><th>凭据类型</th><th>凭据</th><th>状态</th><th>健康</th><th style="width:250px">操作</th></tr></thead>
     <tbody>${ac.rows.map((a) => `<tr>
-      <td><b>${esc(a.name || a.id)}</b>${a.profile && (a.profile.name || a.profile.email) ? `<br><span class="faint" style="font-size:12px">${a.profile.name ? esc(a.profile.name) : ''}${a.profile.email ? (a.profile.name ? ' · ' : '') + esc(a.profile.email) : ''}</span>` : ''}<br><span class="faint mono">${esc(a.id)}</span></td>
-      <td>${a.platform_known === false ? `<span class="faint mono">${esc(a.platform)}</span><br>${pill('warn', '平台已移除')}` : `${esc(platShort(a.platform_name || a.platform))}<br><span class="faint mono" style="font-size:11px">${esc(a.platform)}</span>`}</td><td>${pill('mut', esc(a.kind || '—'))}</td>
+      <td><b>${esc(a.name || a.id)}</b>${a.profile && (a.profile.name || a.profile.email) ? `<br><span class="faint fs-sm">${a.profile.name ? esc(a.profile.name) : ''}${a.profile.email ? (a.profile.name ? ' · ' : '') + esc(a.profile.email) : ''}</span>` : ''}<br><span class="faint mono">${esc(a.id)}</span></td>
+      <td>${a.platform_known === false ? `<span class="faint mono">${esc(a.platform)}</span><br>${pill('warn', '平台已移除')}` : `${esc(platShort(a.platform_name || a.platform))}<br><span class="faint mono fs-xs">${esc(a.platform)}</span>`}</td><td>${pill('mut', esc(a.kind || '—'))}</td>
       <td class="faint">${a.anon ? '无需凭据' : a.needs_relogin ? '本机解不开（换过 Windows 用户/机器）' : a.secret_len ? `${a.secret_len} 字符（掩码）` : '空'}</td>
       <td>${a.enabled ? pill('ok', '启用') : pill('mut', '停用')}</td>
       <td>${a.anon ? pill('mut', '免密车道') + healthPill(a.health) + blockPills(a) : healthPill(a.health) + blockPills(a) + creditPill(a) + tokenPill(a) + (a.profile && a.profile.plan ? ' ' + pill('mut', a.profile.plan) : '')}</td>
       <td>
         ${a.anon
-          ? `<span class="faint" style="font-size:11.5px">免密车道不需要账号，此行是历史占位数据；「状态」列显示的是这条车道当前的封锁/冷却</span>
+          ? `<span class="faint fs-xs">免密车道不需要账号，此行是历史占位数据；「状态」列显示的是这条车道当前的封锁/冷却</span>
              <button class="btn sm" onclick="acDelete('${att(a.id)}')">删除占位行</button>`
           : a.needs_relogin
-          ? `<span class="faint" style="font-size:11.5px">重新登录一次（或「手动粘贴」）即可恢复</span>
+          ? `<span class="faint fs-xs">重新登录一次（或「手动粘贴」）即可恢复</span>
              <button class="btn sm" onclick="acDelete('${att(a.id)}')">删除</button>`
           : `<button class="btn sm" onclick="acVerify('${att(a.id)}', this)" title="立刻用该凭据发一次验活请求">检查</button>
              ${a.balance_supported ? `<button class="btn sm" onclick="acBalance('${att(a.id)}', this)" title="查询积分余额（该平台有计费端点）">积分</button>` : ''}
@@ -2745,17 +3344,17 @@ async function acBalance(id, btn) {
     const used = Math.max(0, (x.total || 0) - (x.left || 0));
     const exp = x.expire_at ? " · 到期 " + fmtT(x.expire_at) : "";
     const near = x.expire_at && (x.expire_at * 1000 - Date.now()) <= 48 * 3600000;
-    return "<div class=\"mrow\"><span class=\"mono\" style=\"font-size:12px\">" + esc(x.name || "未名份额")
+    return "<div class=\"mrow\"><span class=\"mono\" style=\"font-size:var(--fs-sm)\">" + esc(x.name || "未名份额")
       + "</span><span class=\"faint\">已用 " + fmtN(used) + " / " + fmtN(x.total) + " · 剩 " + fmtN(x.left)
-      + (near ? "<b style=\"color:#e5a23c\">" + exp + "</b>" : exp) + "</span></div>";
+      + (near ? "<b class=\"c-warn\">" + exp + "</b>" : exp) + "</span></div>";
   };
   let body = "<div class=\"note\">总剩余 <b>" + fmtN(r.credit) + " 分</b>"
     + (typeof r.energy === "number" && r.energy > 0 ? " · 能量 " + fmtN(r.energy) : "")
     + (typeof r.growth_score === "number" && r.growth_score > 0 ? " · 成长值 " + fmtN(r.growth_score) : "")
     + (r.expire_at ? " · 最早到期 " + fmtT(r.expire_at) : "") + "</div>";
   if (alive.length) body += "<label>份额明细（" + alive.length + " 份可用）</label><div class=\"mlist\">" + alive.map(row).join("") + "</div>";
-  if (dead.length) body += "<details style=\"margin-top:8px\"><summary class=\"faint\" style=\"cursor:pointer;font-size:12px\">已用完 / 无余额的份额（" + dead.length + "）</summary><div class=\"mlist\">" + dead.map(row).join("") + "</div></details>";
-  if (!packs.length) body += "<div class=\"faint small\" style=\"margin-top:6px\">上游未返回份额明细（该账号可能只有汇总余额字段）</div>";
+  if (dead.length) body += "<details style=\"margin-top:var(--sp-2)\"><summary class=\"faint\" style=\"cursor:pointer;font-size:var(--fs-sm)\">已用完 / 无余额的份额（" + dead.length + "）</summary><div class=\"mlist\">" + dead.map(row).join("") + "</div></details>";
+  if (!packs.length) body += "<div class=\"faint small\" style=\"margin-top:var(--sp-2)\">上游未返回份额明细（该账号可能只有汇总余额字段）</div>";
   const mk = modalShell("积分明细", body + "<div class=\"modal-foot\"><button class=\"btn\" onclick=\"this.closest('.modal-mask').remove()\">关闭</button></div>");
   document.body.insertAdjacentHTML("beforeend", mk);
 }
@@ -2782,7 +3381,7 @@ async function acLimit(id) {
   qs.push('<option value="43200">12 小时</option>');
   qs.push('<option value="86400">24 小时</option>');
   qs.push('</select>');
-  qs.push('<div class="faint small" style="margin-top:6px">用途：免费额度账号用量太猛容易被上游风控——限制器到量就在选号时跳过该号，窗口翻页自动回来。它防的是<b>用量</b>，与低余额优先 / 快到期加权互不冲突。</div>');
+  qs.push('<div class="faint small mt-2">用途：免费额度账号用量太猛容易被上游风控——限制器到量就在选号时跳过该号，窗口翻页自动回来。它防的是<b>用量</b>，与低余额优先 / 快到期加权互不冲突。</div>');
   qs.push('<div class="modal-foot">');
   qs.push('<button class="btn pri" onclick="acLimitSave(&quot;' + esc(id) + '&quot;)">保存</button>');
   if (cur) qs.push('<button class="btn" onclick="acLimitClear(&quot;' + esc(id) + '&quot;)">清除限制</button>');
@@ -2860,7 +3459,7 @@ async function wbGrowth() {
     return `<div class="note ${d.ok ? 'oknote' : 'errnote'}">
       <b>${esc(a.account)}</b> — 任务 ${d.total_tasks || 0} 项，待做 ${d.pending || 0}，领取 ${d.claimed || 0} 项，
       本次 <b>+${d.credit || 0} 积分</b>${d.energy ? ' +' + d.energy + ' 能量' : ''}
-      <div class="faint" style="margin-top:6px;font-size:11.5px">${steps || esc(d.message || '')}</div>
+      <div class="faint" style="margin-top:var(--sp-2);font-size:var(--fs-xs)">${steps || esc(d.message || '')}</div>
     </div>`;
   }).join('') : '<div class="note">没有 wb 族账号</div>';
   setTimeout(() => render(), 1200);
@@ -2879,7 +3478,7 @@ function fmtCheckinAuto(r) {
   if (!r || r.daily === undefined) return '';
   const t = r.task || {};
   const last = t.last_ok || t.last_err || '';
-  return `<div class="faint" style="margin-top:6px">每日自动签到：${r.daily ? '已开启（每 12 小时一次，账号页可关）' : '未开启（账号页「自动签到」按钮可开）'}${last ? ' · 上次：' + esc(last) : ''}</div>`;
+  return `<div class="faint mt-2">每日自动签到：${r.daily ? '已开启（每 12 小时一次，账号页可关）' : '未开启（账号页「自动签到」按钮可开）'}${last ? ' · 上次：' + esc(last) : ''}</div>`;
 }
 
 // wb 每日签到：GET=/api/checkin 查状态，POST=/api/checkin 领取。
@@ -2887,12 +3486,12 @@ async function wbCheckin() {
   const mk = modalShell('每日签到（wb 加油站 + Lobster）',
     `
       <div class="faint">查各账号签到状态并一键领取：wb 族走 Buddy 加油站（+100/天），Lobster 走 client-activities（+100/天，幂等已签跳过）。</div>
-      <div class="modal-foot" style="margin-top:14px">
+      <div class="modal-foot mt-3">
         <button class="btn" onclick="wbCheckinRun('status', this)">仅查状态</button>
         <button class="btn pri" onclick="wbCheckinRun('claim', this)">全部领取</button>
         <button class="btn" onclick="this.closest('.modal-mask').remove()">取消</button>
       </div>
-      <div id="wbCheckinOut" style="margin-top:12px"></div>`);
+      <div id="wbCheckinOut" class="mt-3"></div>`);
   document.body.insertAdjacentHTML('beforeend', mk);
 }
 
@@ -2938,7 +3537,7 @@ function fmtCheckin(r) {
       } else if (d.ok === true) txt = `✅ 成功 +${esc(d.credit)} 积分，连续 ${esc(d.streak_days)} 天`;
       else txt = esc(JSON.stringify(d).slice(0, 150));
       return `<tr><td>${esc(x.platform)}</td><td class="mono">${esc(x.account)}</td><td>${x.action === 'claim' ? '领取' : '查状态'}</td><td>${txt}</td></tr>`;
-    }).join('') + `</tbody></table><div class="faint" style="margin-top:8px">共 ${r.count} 个账号</div>` + fmtCheckinAuto(r);
+    }).join('') + `</tbody></table><div class="faint mt-2">共 ${r.count} 个账号</div>` + fmtCheckinAuto(r);
 }
 
 // ── M4 可视化（对齐 sub2api TokenUsageTrend/donut + dsh Σtoken 口径）──
@@ -2961,7 +3560,7 @@ function donutSVG(items, size = 250, stroke = 30) {
   return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" style="max-width:260px">${segs.join('')}
     <text x="50%" y="47%" text-anchor="middle" class="donut-total">${nfmt(total)}</text>
     <text x="50%" y="58%" text-anchor="middle" class="donut-cap">输出 tokens</text></svg>
-    <div class="faint" style="margin-top:8px">${top}</div>`;
+    <div class="faint mt-2">${top}</div>`;
 }
 
 function trendSVG(recent, w = 780, h = 190) {
@@ -3050,33 +3649,33 @@ const RUNTIME_LABELS = {
   select_ceiling: '选号阈值（%）',
 };
 async function viewRuntime(el) {
-  el.innerHTML = '<div class="card glass empty">加载运行配置…</div>';
+  el.innerHTML = '<div class="card empty">加载运行配置…</div>';
   let r = null;
   try { r = await api('/api/runtime'); } catch (_) { r = null; }
-  if (!r || !r.ok) { el.innerHTML = '<div class="card glass"><div class="note errnote">读取运行配置失败</div></div>'; return; }
+  if (!r || !r.ok) { el.innerHTML = '<div class="card"><div class="note errnote">读取运行配置失败</div></div>'; return; }
   const c = r.cfg || {};
   const fields = c.fields || [];
   const upd = c.updated_at ? new Date(c.updated_at * 1000).toLocaleString() : '从未修改（使用默认值）';
-  el.innerHTML = `<section class="card glass">
-    <div class="card-t"><b>运行配置</b><span class="faint small" style="margin-left:8px">改完立即生效 · 无需重启 · 正在飞的请求不受影响</span></div>
+  el.innerHTML = `<section class="card">
+    <div class="card-t"><b>运行配置</b><span class="faint small ml-2">改完立即生效 · 无需重启 · 正在飞的请求不受影响</span></div>
     <div class="faint small" style="margin-bottom:12px">上次修改：${esc(upd)}。值存 <span class="mono">data/runtime.json</span>，重启保持。</div>
     ${fields.map((f) => {
       const v = c[f.name] ?? f.default;
-      return `<div class="row" style="align-items:flex-start;margin-bottom:10px">
+      return `<div class="row" style="align-items:flex-start;margin-bottom:var(--sp-3)">
         <label style="min-width:150px;padding-top:6px"><b>${esc(RUNTIME_LABELS[f.name] || f.name)}</b><br>
-          <span class="faint mono" style="font-size:11px">${esc(f.name)}</span></label>
+          <span class="faint mono fs-xs">${esc(f.name)}</span></label>
         <div class="grow">
           <input class="q mono" id="rt_${esc(f.name)}" type="number" min="${f.min}" max="${f.max}" value="${v}" style="width:120px">
-          <span class="faint" style="font-size:11.5px;margin-left:6px">范围 ${f.min}–${f.max}，默认 ${f.default}</span>
-          <div class="faint" style="font-size:11.5px;margin-top:3px">${esc(RUNTIME_HINTS[f.name] || '')}</div>
+          <span class="faint" style="font-size:var(--fs-xs);margin-left:var(--sp-2)">范围 ${f.min}–${f.max}，默认 ${f.default}</span>
+          <div class="faint fs-xs mt-1">${esc(RUNTIME_HINTS[f.name] || '')}</div>
         </div>
       </div>`;
     }).join('')}
-    <div class="row" style="margin-top:14px">
+    <div class="row mt-3">
       <button class="btn pri" onclick="runtimeSave()">保存并立即生效</button>
       <button class="btn gh" onclick="route()">刷新</button>
     </div>
-    <div id="rtMsg" style="margin-top:10px"></div>
+    <div id="rtMsg" class="mt-3"></div>
   </section>
   ${await sysPromptCard()}`;
 }
@@ -3091,24 +3690,24 @@ async function sysPromptCard() {
     c = (r && r.cfg) || {};
   } catch (_) {}
   const pos = c.position || 'append';
-  return `<section class="card glass" style="margin-top:14px">
+  return `<section class="card mt-3">
     <div class="card-t"><b>系统提示词注入</b>
-      <span class="faint small" style="margin-left:8px">给所有请求加一句自己的约束（如「用中文回答」）</span></div>
+      <span class="faint small ml-2">给所有请求加一句自己的约束（如「用中文回答」）</span></div>
     <div class="faint small" style="margin-bottom:12px">
       请求本来没有系统提示词 → 直接注入这句；请求已自带 → 默认不动（保护客户端自己的提示词）。
       注入位置 <span class="mono">append</span> 放后面可保住客户端的 prompt 缓存，<span class="mono">prepend</span> 放前面会让上游每轮重读全部提示词。
       存 <span class="mono">data/sysprompt.json</span>，改完立即生效。
     </div>
     <label>提示词内容（留空 = 关闭注入）</label>
-    <textarea id="spText" rows="3" style="width:100%;padding:8px;border:1px solid var(--line2);border-radius:8px;font-family:inherit;font-size:13px"
+    <textarea id="spText" rows="3" class="q"
       placeholder="例如：回答请使用简体中文，不要输出道歉或客套话。">${esc(c.system_prompt || '')}</textarea>
-    <div class="row" style="margin-top:10px;gap:14px;align-items:center">
+    <div class="row" style="margin-top:var(--sp-3);gap:14px;align-items:center">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-        <input type="checkbox" id="spOverride" ${c.override ? 'checked' : ''} style="width:auto">
+        <input type="checkbox" id="spOverride" ${c.override ? 'checked' : ''} class="w-auto">
         <span>覆盖叠加（请求已有提示词时也加上）</span></label>
       <label style="display:flex;align-items:center;gap:6px">
         <span class="faint">位置</span>
-        <select id="spPos" class="q" style="width:auto">
+        <select id="spPos" class="q w-auto">
           <option value="append" ${pos === 'append' ? 'selected' : ''}>append（追加，保住缓存）</option>
           <option value="prepend" ${pos === 'prepend' ? 'selected' : ''}>prepend（前置）</option>
         </select></label>
@@ -3116,11 +3715,11 @@ async function sysPromptCard() {
         <span class="faint">模型前缀（留空=全部）</span>
         <input id="spModels" class="q mono" style="width:180px" value="${esc((c.models || []).join(','))}" placeholder="glm,deepseek"></label>
     </div>
-    <div class="row" style="margin-top:12px">
+    <div class="row mt-3">
       <button class="btn pri" onclick="sysPromptSave()">保存并立即生效</button>
       <button class="btn gh" onclick="sysPromptClear()">清空（关闭注入）</button>
     </div>
-    <div id="spMsg" style="margin-top:10px"></div>
+    <div id="spMsg" class="mt-3"></div>
   </section>`;
 }
 async function sysPromptSave() {
@@ -3173,8 +3772,8 @@ async function runtimeSave() {
 async function viewLogs(el) {
   const cur = Object.assign({ n: 300, lv: '', g: '' }, window.__LOGQ || {});
   el.innerHTML = `
-  <section class="card glass">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+  <section class="card">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:var(--sp-3)">
       <b>运行日志</b>
       <select class="q" id="lgN" onchange="logSet('n', this.value)">
         ${[100, 300, 800, 2000].map((n) => '<option value="' + n + '"' + (cur.n === n ? ' selected' : '') + '>' + n + ' 行</option>').join('')}
@@ -3185,10 +3784,10 @@ async function viewLogs(el) {
         <option value="ERROR"${cur.lv === 'ERROR' ? ' selected' : ''}>只看 ERROR</option>
       </select>
       <input class="q" style="max-width:260px" id="lgG" placeholder="关键词过滤（模型名 / 失败原因）" value="${esc(cur.g)}" onkeydown="if(event.key==='Enter')logSet('g',this.value)">
-      <button class="btn sm" onclick="render()">刷新</button>
-      <span class="faint" style="margin-left:auto;font-size:12px">每请求一行 aigw::req（完成/失败）；明细在「用量」页</span>
+      <button class="btn sm" onclick="srcRerender()">刷新</button>
+      <span class="faint" style="margin-left:auto;font-size:var(--fs-sm)">每请求一行 aigw::req（完成/失败）；明细在「用量」页</span>
     </div>
-    <div id="lgBody" class="mono" style="font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;max-height:68vh;overflow:auto">加载中…</div>
+    <div id="lgBody" class="mono" style="font-size:var(--fs-xs);line-height:1.55;white-space:pre-wrap;word-break:break-all;max-height:68vh;overflow:auto">加载中…</div>
   </section>`;
   const qs = '/api/logs?lines=' + encodeURIComponent(cur.n || 300)
     + (cur.lv ? '&level=' + encodeURIComponent(cur.lv) : '')
@@ -3201,10 +3800,10 @@ async function viewLogs(el) {
   const ls = r.lines || [];
   if (!ls.length) { box.innerHTML = '<div class="faint">没有匹配的日志行（换个关键词或级别）</div>'; return; }
   box.innerHTML = ls.map((l) => {
-    const cls = l.includes(' ERROR ') ? ' style="color:#f06a6a"' : (l.includes(' WARN ') ? ' style="color:#e5a23c"' : '');
+    const cls = l.includes(' ERROR ') ? ' class="c-err"' : (l.includes(' WARN ') ? ' class="c-warn"' : '');
     return '<div' + cls + '>' + esc(l) + '</div>';
   }).join('')
-    + '<div class="faint" style="margin-top:6px">── 共 ' + ls.length + ' 行 · 日志文件约 '
+    + '<div class="faint mt-2">── 共 ' + ls.length + ' 行 · 日志文件约 '
     + Math.round((r.file_size || 0) / 1024) + ' KiB（尾部 256 KiB 窗口内查找）──</div>';
   box.scrollTop = box.scrollHeight;
 }
@@ -3213,6 +3812,30 @@ function logSet(k, v) {
   cur[k] = k === 'n' ? (+v || 300) : v;
   window.__LOGQ = cur;
   render();
+}
+
+// ── 延迟渲染的表格 ───────────────────────────────────────────────────────
+//
+// 用途：用量页的几张归因表（平台/模型/账号）各占 150-250 个 DOM 节点，
+// 而它们是「排查时才看」的内容。收起状态下只放一个空容器，数据先存在这里，
+// 用户真正点开 summary 时才建表。
+//
+// 为什么不能只靠 <details>：写进 HTML 的内容浏览器照样解析建节点，details
+// 只是不渲染 —— 实测收起状态下那三张表仍占 574 个节点，等于没省下来。
+const LAZY_TABLES = {};
+
+/// <details> 展开时把数据填成表格；已填过就跳过（ontoggle 会来回触发）。
+function lazyFill(det) {
+  if (!det.open) return;
+  const key = det.getAttribute('data-lazy');
+  const cfg = LAZY_TABLES[key];
+  const body = det.querySelector('.lazy-body');
+  if (!cfg || !body || body.dataset.filled === '1') return;
+  body.dataset.filled = '1';
+  body.innerHTML = `<table class="mt-2"><thead><tr><th>${esc(cfg.keyLabel)}</th><th>调用</th><th>成功/失败</th><th>tokens in/out</th></tr></thead><tbody>${
+    cfg.rows.map((d) => `<tr><td title="${esc(d.key || '')}">${esc(d.key || '（未记录）')}</td><td>${nfmt(d.requests)}</td>
+      <td>${nfmt(d.success)} / <span class="muted">${nfmt(d.failed)}</span>${d.cancelled ? ` / <span class="muted">取消 ${nfmt(d.cancelled)}</span>` : ''}</td>
+      <td class="mono">${nfmt(d.tokensIn)} / ${nfmt(d.tokensOut)}</td></tr>`).join('')}</tbody></table>${cfg.more || ''}`;
 }
 
 async function viewUsage(el) {
@@ -3233,12 +3856,12 @@ async function viewUsage(el) {
   if (hist.has_more) {
     moreNote = usageLimit >= USAGE_PAGE_MAX
       ? `<div class="note">已达单页上限 ${USAGE_PAGE_MAX} 条：用上面的时间窗缩小范围，或翻下面的平台归因表。</div>`
-      : `<div class="row" style="margin-top:10px;gap:8px;align-items:center">
+      : `<div class="row" style="margin-top:var(--sp-3);gap:8px;align-items:center">
           <span class="faint small">还有 ${nfmt(matchedN - shownN)} 条更早的未显示</span>
           <button class="btn sm" onclick="setUsageLimit(${Math.min(USAGE_PAGE_MAX, usageLimit * 2)})">再多显示 ${Math.min(USAGE_PAGE_MAX, usageLimit * 2) - shownN} 条</button>
         </div>`;
   } else if (matchedN > shownN) {
-    moreNote = `<div class="faint small" style="margin-top:8px">列表按时间倒序显示前 ${nfmt(shownN)} 条；共 ${nfmt(matchedN)} 条。</div>`;
+    moreNote = `<div class="faint small mt-2">列表按时间倒序显示前 ${nfmt(shownN)} 条；共 ${nfmt(matchedN)} 条。</div>`;
   }
   const trendTitle = '输出 tokens 趋势（最近 ' + nfmt(shownN) + ' 条）';
   const rows = (hist.recent || [])
@@ -3255,55 +3878,69 @@ async function viewUsage(el) {
     if (!rows.length) return `<div class="empty">${emptyTxt}</div>`;
     const more = g.total > rows.length
       ? (rows.length < USAGE_GROUP_MAX && g.total > rows.length
-        ? `<div class="faint small" style="margin-top:8px">共 ${nfmt(g.total)} 个，只列请求数最多的 ${rows.length} 个 · <a href="#" onclick="event.preventDefault();setUsageGroupLimit(${Math.min(USAGE_GROUP_MAX, g.total)})">看全部 ${nfmt(Math.min(USAGE_GROUP_MAX, g.total))} 个</a></div>`
-        : `<div class="faint small" style="margin-top:8px">共 ${nfmt(g.total)} 个，已列 ${rows.length} 个（列表上限 ${USAGE_GROUP_MAX}）</div>`)
+        ? `<div class="faint small mt-2">共 ${nfmt(g.total)} 个，只列请求数最多的 ${rows.length} 个 · <a href="#" onclick="event.preventDefault();setUsageGroupLimit(${Math.min(USAGE_GROUP_MAX, g.total)})">看全部 ${nfmt(Math.min(USAGE_GROUP_MAX, g.total))} 个</a></div>`
+        : `<div class="faint small mt-2">共 ${nfmt(g.total)} 个，已列 ${rows.length} 个（列表上限 ${USAGE_GROUP_MAX}）</div>`)
       : '';
-    return `<table><thead><tr><th>${keyLabel}</th><th>调用</th><th>成功/失败</th><th>tokens in/out</th></tr></thead><tbody>${
-      rows.map((d) => `<tr><td title="${esc(d.key || '')}">${esc(d.key || '（未记录）')}</td><td>${nfmt(d.requests)}</td>
-        <td>${nfmt(d.success)} / <span class="muted">${nfmt(d.failed)}</span>${d.cancelled ? ` / <span class="muted">取消 ${nfmt(d.cancelled)}</span>` : ''}</td>
-        <td class="mono">${nfmt(d.tokensIn)} / ${nfmt(d.tokensOut)}</td></tr>`).join('')}</tbody></table>${more}`;
+    // ★ 真正的延迟渲染：收起时**根本不生成表格**，只留一个空容器。
+    //
+    //   只用 <details> 是不够的 —— 表格 DOM 还是被建出来了（实测收起状态下
+    //   三张表仍占 574 个节点），只是浏览器不显示而已。这里把行数据先存进
+    //   LAZY_TABLES，等用户点开 summary 时才调 lazyFill() 建表。
+    //   首屏 DOM 因此从 1172 降到约 600。
+    const key = 'usage-grp-' + keyLabel;
+    LAZY_TABLES[key] = { rows, keyLabel, more };
+    return `<details data-lazy="${att(key)}" ontoggle="lazyFill(this)">
+      <summary class="card-t pointer">展开明细（${rows.length} 项${g.total > rows.length ? ' / 共 ' + nfmt(g.total) : ''}）</summary>
+      <div class="lazy-body"></div></details>`;
   };
   const winBtns = USAGE_WINS.map(([k, lb]) =>
     `<button class="btn sm ${usageWin === k ? 'pri' : ''}" onclick="setUsageWin('${k}')">${lb}</button>`).join('');
   // 窗口内 0 条时要说明「是这段时间真的没有请求」，而不是让人以为台账丢了。
-  const winNote = us.requests ? '' : '<div class="note" style="margin-bottom:10px">该时间窗内没有请求：台账本身是全量累计的，切到「全部」看历史。</div>';
-  const winRow = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px">
+  const winNote = us.requests ? '' : '<div class="note mb-3">该时间窗内没有请求：台账本身是全量累计的，切到「全部」看历史。</div>';
+  const winRow = `<div class="row" style="margin-bottom:var(--sp-3);align-items:center;gap:8px">
     <span class="faint small">时间窗</span>${winBtns}
-    <span class="faint small" style="margin-left:auto">当前：${usageWinLabel()}${usageWin === 'all' ? '（累计）' : '（按请求时间过滤）'}</span>
+    <span class="faint small ml-auto">当前：${usageWinLabel()}${usageWin === 'all' ? '（累计）' : '（按请求时间过滤）'}</span>
   </div>${winNote}`;
   el.innerHTML = `
     ${winRow}
     <div class="grid g4">
-      <div class="card glass kpi"><div class="lb">请求数</div><div class="vl">${nfmt(us.requests)}</div></div>
-      <div class="card glass kpi"><div class="lb">成功</div><div class="vl" style="background:none;-webkit-text-fill-color:currentColor;color:var(--ok)">${nfmt(us.success)}</div></div>
-      <div class="card glass kpi"><div class="lb">失败</div><div class="vl" style="background:none;-webkit-text-fill-color:currentColor;color:var(--err)">${nfmt(us.failed)}</div>${us.cancelled ? `<div class="ex">另有 ${nfmt(us.cancelled)} 次客户端取消（不计入失败与成功率）</div>` : ''}</div>
-      <div class="card glass kpi"><div class="lb">成功率</div><div class="vl">${rate}%</div></div>
+      <div class="card kpi"><div class="lb">请求数</div><div class="vl">${nfmt(us.requests)}</div></div>
+      <div class="card kpi"><div class="lb">成功</div><div class="vl v-ok">${nfmt(us.success)}</div></div>
+      <div class="card kpi"><div class="lb">失败</div><div class="vl v-err">${nfmt(us.failed)}</div>${us.cancelled ? `<div class="ex">另有 ${nfmt(us.cancelled)} 次客户端取消（不计入失败与成功率）</div>` : ''}</div>
+      <div class="card kpi"><div class="lb">成功率</div><div class="vl">${rate}%</div></div>
     </div>
-    ${(us.ttfb && us.ttfb.samples) || (us.latency && us.latency.samples) ? `<div class="grid g2" style="margin-top:12px">
-      ${us.ttfb && us.ttfb.samples ? `<div class="card glass kpi"><div class="lb">首字节 TTFB</div>
-        <div class="vl">${us.ttfb.p50}<span style="font-size:14px">ms</span></div>
+    ${(us.ttfb && us.ttfb.samples) || (us.latency && us.latency.samples) ? `<div class="grid g2 mt-3">
+      ${us.ttfb && us.ttfb.samples ? `<div class="card kpi"><div class="lb">首字节 TTFB</div>
+        <div class="vl">${us.ttfb.p50}<span class="fs-base">ms</span></div>
         <div class="ex">P95 ${us.ttfb.p95}ms · 平均 ${us.ttfb.avg}ms · ${nfmt(us.ttfb.samples)} 次流式样本</div></div>` : ''}
-      ${us.latency && us.latency.samples ? `<div class="card glass kpi"><div class="lb">整轮耗时</div>
-        <div class="vl">${us.latency.p50}<span style="font-size:14px">ms</span></div>
+      ${us.latency && us.latency.samples ? `<div class="card kpi"><div class="lb">整轮耗时</div>
+        <div class="vl">${us.latency.p50}<span class="fs-base">ms</span></div>
         <div class="ex">P95 ${us.latency.p95}ms · 平均 ${us.latency.avg}ms · ${nfmt(us.latency.samples)} 次样本</div></div>` : ''}
     </div>` : ''}
     <div class="grid g2">
-      <section class="card glass"><h3>输出 tokens 分布（donut）</h3>${donut}</section>
-      <section class="card glass"><h3>${trendTitle}</h3>${trend}</section>
+      <section class="card"><h3>输出 tokens 分布（donut）</h3>${donut}</section>
+      <section class="card"><h3>${trendTitle}</h3>${trend}</section>
     </div>
-    <section class="card glass"><h3>平台输出榜</h3>${bars}</section>
-    <section class="card glass"><h3>平台归因</h3>
-      ${plats.length ? `<table><thead><tr><th>平台</th><th>调用</th><th>成功/失败</th><th>tokens in/out</th></tr></thead>
-      <tbody>${plats.map(([p, d]) => `<tr><td>${esc(p)}</td><td>${d.requests}</td>
-        <td>${d.success} / <span class="muted">${d.failed}</span>${d.cancelled ? ` / <span class="muted">取消 ${d.cancelled}</span>` : ''}</td>
-        <td class="mono">${nfmt(d.tokensIn)} / ${nfmt(d.tokensOut)}</td></tr>`).join('')}</tbody></table>`
-      : '<div class="empty">暂无调用</div>'}
+    <section class="card"><h3>平台输出榜</h3>${bars}</section>
+    <section class="card"><h3>平台归因</h3>
+      ${(() => {
+        if (!plats.length) return '<div class="empty">暂无调用</div>';
+        const key = 'usage-plat';
+        LAZY_TABLES[key] = {
+          keyLabel: '平台',
+          rows: plats.map(([p, d]) => ({ key: p, requests: d.requests, success: d.success, failed: d.failed, cancelled: d.cancelled, tokensIn: d.tokensIn, tokensOut: d.tokensOut })),
+          more: '',
+        };
+        return `<details data-lazy="${key}" ontoggle="lazyFill(this)">
+          <summary class="card-t pointer">展开明细（${plats.length} 个平台）</summary>
+          <div class="lazy-body"></div></details>`;
+      })()}
     </section>
     <div class="grid g2">
-      <section class="card glass"><h3>模型用量榜</h3>${groupTable(us.byModel, '模型', '该时间窗内没有模型调用')}</section>
-      <section class="card glass"><h3>账号归因</h3>${groupTable(us.byAccount, '账号', '该时间窗内没有账号调用（旧台账没有账号字段）')}</section>
+      <section class="card"><h3>模型用量榜</h3>${groupTable(us.byModel, '模型', '该时间窗内没有模型调用')}</section>
+      <section class="card"><h3>账号归因</h3>${groupTable(us.byAccount, '账号', '该时间窗内没有账号调用（旧台账没有账号字段）')}</section>
     </div>
-    <section class="card glass"><h3>最近请求（显示 ${nfmt(hist.shown || 0)} / 共 ${nfmt(hist.matched || 0)} 条）</h3>
+    <section class="card"><h3>最近请求（显示 ${nfmt(hist.shown || 0)} / 共 ${nfmt(hist.matched || 0)} 条）</h3>
       ${rows ? `<table><thead><tr><th>时间</th><th>平台</th><th>模型</th><th>tokens</th><th>耗时</th><th>结果</th></tr></thead>
       <tbody>${rows}</tbody></table>` : '<div class="empty">暂无历史</div>'}
       ${moreNote}
@@ -3322,11 +3959,11 @@ let KEYS_CACHE = [];
 function keysCard() {
   const rows = KEYS_CACHE || [];
   const body = rows.length
-    ? `<table style="margin-top:10px"><thead><tr><th>名字</th><th>能调的模型</th><th>备注</th><th>状态</th><th style="width:210px">操作</th></tr></thead><tbody>`
+    ? `<table class="mt-3"><thead><tr><th>名字</th><th>能调的模型</th><th>备注</th><th>状态</th><th style="width:210px">操作</th></tr></thead><tbody>`
       + rows.map((k) => '<tr>'
-          + '<td><b>' + esc(k.name) + '</b><br><span class="faint mono" style="font-size:11px">' + esc(k.id) + '</span></td>'
+          + '<td><b>' + esc(k.name) + '</b><br><span class="faint mono fs-xs">' + esc(k.id) + '</span></td>'
           + '<td>' + ((k.allow_models || []).length
-            ? (k.allow_models || []).map((m) => '<code class="mono" style="font-size:11px">' + esc(m) + '</code>').join(' ')
+            ? (k.allow_models || []).map((m) => '<code class="mono fs-xs">' + esc(m) + '</code>').join(' ')
             : '<span class="faint">不限制（全部模型）</span>') + '</td>'
           + '<td class="faint">' + esc(k.note || '—') + '</td>'
           + '<td>' + (k.key_broken ? pill('err', '密文解不开') : k.enabled ? pill('ok', '启用') : pill('mut', '停用')) + '</td>'
@@ -3337,10 +3974,10 @@ function keysCard() {
             + '<button class="btn sm" onclick="keyDelete(\'' + att(k.id) + '\')">删除</button>'
           + '</td></tr>').join('')
       + `</tbody></table>`
-    : '<div class="empty" style="margin-top:10px">还没有访问密钥：不建也能正常用（走面板令牌 / 本机回环免鉴权）</div>';
-  return `<section class="card glass">
-    <div class="card-t"><b>访问密钥</b><span class="faint small" style="margin-left:8px">借出去的 key 只能调用指定模型</span></div>
-    <div class="faint small" style="margin-bottom:10px">面板令牌是「能不能进面板」的全通票；访问密钥是「这把 key 能调哪些模型、能调多快」，可建多把。用法：<code class="mono">Authorization: Bearer &lt;访问密钥&gt;</code> 调 <code class="mono">/v1/*</code>。白名单留空 = 不限制；写 <code class="mono">模型名</code> 则带平台后缀也放行，写 <code class="mono">模型@平台</code> 只认那一个组合。每把 key 另有独立速率上限（见顶部「网关信息」里的限流一行），某一把刷爆不会拖慢另外几把和面板。</div>
+    : '<div class="empty mt-3">还没有访问密钥：不建也能正常用（走面板令牌 / 本机回环免鉴权）</div>';
+  return `<section class="card">
+    <div class="card-t"><b>访问密钥</b><span class="faint small ml-2">借出去的 key 只能调用指定模型</span></div>
+    <div class="faint small mb-3">面板令牌是「能不能进面板」的全通票；访问密钥是「这把 key 能调哪些模型、能调多快」，可建多把。用法：<code class="mono">Authorization: Bearer &lt;访问密钥&gt;</code> 调 <code class="mono">/v1/*</code>。白名单留空 = 不限制；写 <code class="mono">模型名</code> 则带平台后缀也放行，写 <code class="mono">模型@平台</code> 只认那一个组合。每把 key 另有独立速率上限（见顶部「网关信息」里的限流一行），某一把刷爆不会拖慢另外几把和面板。</div>
     <div class="row"><button class="btn pri" onclick="keyCreate()">＋ 新建访问密钥</button>
       <button class="btn gh" onclick="keysRefresh()">刷新</button></div>
     ${body}
@@ -3366,20 +4003,20 @@ function comboStrategyTxt(s) {
 function combosCard() {
   const rows = COMBOS_CACHE || [];
   const body = rows.length
-    ? '<table style="margin-top:10px"><thead><tr><th>链</th><th>候选（按顺序）</th><th>策略</th><th>现在能回退几次</th><th>状态</th><th style="width:170px">操作</th></tr></thead><tbody>'
+    ? '<table class="mt-3"><thead><tr><th>链</th><th>候选（按顺序）</th><th>策略</th><th>现在能回退几次</th><th>状态</th><th style="width:170px">操作</th></tr></thead><tbody>'
       + rows.map((c) => {
           const eff = c.effective || [];
           const dead = c.unavailable || [];
           const cand = (c.models || []).map((m) => {
             const bad = dead.indexOf(m) >= 0;
-            return '<code class="mono" style="font-size:11px' + (bad ? ';opacity:.45;text-decoration:line-through' : '') + '" title="' + att(bad ? '这个候选现在调不通（模型不在 /v1/models 里：平台没凭据/停用/下线）' : '可用') + '">' + esc(m) + '</code>';
+            return '<code class="mono" style="font-size:var(--fs-xs)' + (bad ? ';opacity:.45;text-decoration:line-through' : '') + '" title="' + att(bad ? '这个候选现在调不通（模型不在 /v1/models 里：平台没凭据/停用/下线）' : '可用') + '">' + esc(m) + '</code>';
           }).join(' → ');
           const effCell = eff.length
             ? '<b>' + eff.length + '</b> <span class="faint small">/ ' + (c.models || []).length + '</span>'
-              + (dead.length ? '<br><span class="pill warn small" style="margin-top:4px">' + dead.length + ' 个调不通</span>' : '')
+              + (dead.length ? '<br><span class="pill warn small mt-1">' + dead.length + ' 个调不通</span>' : '')
             : '<span class="pill err small">全部调不通</span>';
           return '<tr>'
-            + '<td><b>' + esc(c.name) + '</b><br><span class="faint mono" style="font-size:11px">' + esc(c.id) + '</span></td>'
+            + '<td><b>' + esc(c.name) + '</b><br><span class="faint mono fs-xs">' + esc(c.id) + '</span></td>'
             + '<td>' + cand + '</td>'
             + '<td>' + esc(comboStrategyTxt(c.strategy)) + (c.strategy === 'round-robin' ? ' <span class="faint small">粘 ' + (c.sticky_limit || 1) + ' 轮</span>' : '') + '</td>'
             + '<td>' + effCell + '</td>'
@@ -3391,10 +4028,10 @@ function combosCard() {
             + '</td></tr>';
         }).join('')
       + '</tbody></table>'
-    : '<div class="empty" style="margin-top:10px">还没有模型链。建一条之后，客户端填 <code class="mono">combo:&lt;名字&gt;</code> 当模型名即可</div>';
-  return '<section class="card glass">'
-    + '<div class="card-t"><b>模型链</b><span class="faint small" style="margin-left:8px">一个模型名 = 一条有序候选链，前一个挂了自动换下一个</span></div>'
-    + '<div class="faint small" style="margin-bottom:10px">额度墙、地域拒绝、凭据过期、上游 5xx —— 这些对客户端都是「这轮挂了」，但本机明明还有别的平台能答。模型链把这次失败变成你看不见的一次重试：按顺序走候选，第一个产出内容的赢。用法：任意 OpenAI 客户端把模型名填成 <code class="mono">combo:&lt;链名&gt;</code>。'
+    : '<div class="empty mt-3">还没有模型链。建一条之后，客户端填 <code class="mono">combo:&lt;名字&gt;</code> 当模型名即可</div>';
+  return '<section class="card">'
+    + '<div class="card-t"><b>模型链</b><span class="faint small ml-2">一个模型名 = 一条有序候选链，前一个挂了自动换下一个</span></div>'
+    + '<div class="faint small mb-3">额度墙、地域拒绝、凭据过期、上游 5xx —— 这些对客户端都是「这轮挂了」，但本机明明还有别的平台能答。模型链把这次失败变成你看不见的一次重试：按顺序走候选，第一个产出内容的赢。用法：任意 OpenAI 客户端把模型名填成 <code class="mono">combo:&lt;链名&gt;</code>。'
 + '<br>策略：<b>回退</b> = 永远从链头开始（链是质量阶梯时选它）；<b>轮转</b> = 每轮换个起点（一组等价模型分摊负载时选它）。'
 + '<br>⚠ 「现在能回退几次」只数当前真能调的候选：写了 3 个但两个平台没凭据，实际只有 1 层保险 —— 划掉的那些就是来不及救你的。</div>'
 + '<div class="row"><button class="btn pri" onclick="comboCreate()">＋ 新建模型链</button>'
@@ -3538,7 +4175,7 @@ async function keyDelete(id) {
 }
 
 async function viewAbout(el) {
-  el.innerHTML = `<div class="card glass empty">加载中…</div>`;
+  el.innerHTML = `<div class="card empty">加载中…</div>`;
   let up = { ok: false };
   try { up = await api('/api/update-check'); } catch (_) { up = { ok: false, note: '更新检查失败' }; }
   let hh = null;
@@ -3550,15 +4187,15 @@ async function viewAbout(el) {
   const fpLedger = db ? (fmtBytes(db.bytes) + ' · ' + db.events + ' 条事件') : '—';
   const fpLogs = lg ? (fmtBytes(lg.bytes) + ' · ' + lg.files + ' 个文件') : '—';
   const fpArch = ar ? (fmtBytes(ar.bytes) + ' · ' + ar.files + ' 个文件') : '—';
-  const fpWarn = (db && db.backend !== 'sqlite') ? '<div class="note errnote" style="margin-top:8px">台账降级为 JSON 模式（SQLite 打不开）：建议检查数据目录权限后重启</div>' : '';
+  const fpWarn = (db && db.backend !== 'sqlite') ? '<div class="note errnote mt-2">台账降级为 JSON 模式（SQLite 打不开）：建议检查数据目录权限后重启</div>' : '';
   // 落盘失败：面板平时一律回「已保存」（各 Store 只 warn 不抛错），重启后配置会回退。
   // 这条是唯一能让人看见「刚才那下其实没写进磁盘」的地方，所以在「关于」页顶端显眼位置。
   const pe = (hh && hh.persist_error) || null;
-  const persistWarn = pe ? ('<div class="card glass" style="border-color:#a33">'
-    + '<div class="card-t"><b style="color:#c33">上次写盘失败</b></div>'
+  const persistWarn = pe ? ('<div class="card card-err">'
+    + '<div class="card-t"><b class="c-err">上次写盘失败</b></div>'
     + '<div class="small">文件 <code class="mono">' + esc(pe.file || '?') + '</code>（' + esc(fmtAgo(pe.s_ago || 0)) + '）</div>'
-    + '<div class="small faint" style="margin-top:6px">' + esc(pe.error || '') + '</div>'
-    + '<div class="small" style="margin-top:6px">这次改动<b>没有</b>写进磁盘，重启后会回退到旧状态。'
+    + '<div class="small faint mt-2">' + esc(pe.error || '') + '</div>'
+    + '<div class="small mt-2">这次改动<b>没有</b>写进磁盘，重启后会回退到旧状态。'
     + '多半是磁盘满、数据目录只读或文件被别的程序占用；处理后再改一次即可，成功后这条会自己消失。</div>'
     + '</div>') : '';
   const L = up.local || {};
@@ -3569,38 +4206,38 @@ async function viewAbout(el) {
     : '远端不可达（离线）';
   el.innerHTML = `
   ${persistWarn}
-  <section class="card glass">
+  <section class="card">
     <div class="card-t"><b>aigw v2</b> 免费 AI 额度 → 本地 OpenAI 兼容端点（一包多程）</div>
     <div class="kv">
       <div><span>本地版本</span><b>${esc(localV)}</b></div>
       <div><span>远端最新 commit</span><b>${esc(remoteTxt)}</b></div>
       <div><span>数据目录</span><code class="mono">${esc(L.data_dir || '—')}</code></div>
     </div>
-    <div class="row" style="margin-top:12px">
+    <div class="row mt-3">
       <button class="btn" onclick="checkUpdate()">⟳ 检查更新</button>
       <button class="btn pri" onclick="backupNow()">⬇ 备份数据</button>
       <button class="btn" onclick="restorePick()">⬆ 恢复备份</button>
     </div>
     <div id="upBox"></div>
-    <div class="faint small" style="margin-top:8px">${esc(up.note || '')}</div>
+    <div class="faint small mt-2">${esc(up.note || '')}</div>
   </section>
 
   ${combosCard()}
 
   ${keysCard()}
 
-  <section class="card glass">
-    <div class="card-t"><b>数据占用</b><span class="faint small" style="margin-left:8px">全部在本机数据目录，不上传</span></div>
+  <section class="card">
+    <div class="card-t"><b>数据占用</b><span class="faint small ml-2">全部在本机数据目录，不上传</span></div>
     <div class="kv">
       <div><span>用量台账（SQLite）</span><b>${esc(fpLedger)}</b></div>
       <div><span>运行日志</span><b>${esc(fpLogs)}</b></div>
       <div><span>备份留档</span><b>${esc(fpArch)}</b></div>
     </div>
-    <div class="faint small" style="margin-top:8px">自动上限：台账保留 90 天 / 最多 5000 条；日志 4MB×5 滚动；留档每族最多 6 份。超出会自动清理，无需手动维护。</div>
+    <div class="faint small mt-2">自动上限：台账保留 90 天 / 最多 5000 条；日志 4MB×5 滚动；留档每族最多 6 份。超出会自动清理，无需手动维护。</div>
     ${fpWarn}
   </section>
 
-  <section class="card glass">
+  <section class="card">
     <div class="card-t"><b>使用说明</b></div>
     <ol class="docs">
       <li><b>接入源</b>：按分组接入——开放平台 API（填 Key）、订阅反代（OAuth 跳转/设备码）、客户端反代（网页凭据）、公益站（聚合中转）、自定义 API（自填协议/URL/Key 自动同步模型）。</li>
@@ -3612,7 +4249,7 @@ async function viewAbout(el) {
     </ol>
   </section>
 
-  <section class="card glass">
+  <section class="card">
     <div class="card-t"><b>免责声明</b></div>
     <div class="docs">
       <p>1. 本面板仅用于<u>个人学习与技术研究</u>，聚合接入的各平台额度/账号均为各平台官方授权的个人使用权；请遵守各平台服务条款，勿用于商业售卖、批量滥用或任何违法违规用途。</p>
@@ -3623,7 +4260,7 @@ async function viewAbout(el) {
     </div>
   </section>
 
-  <section class="card glass">
+  <section class="card">
     <div class="card-t"><b>在线更新</b></div>
     <div class="docs small">
       <p>本地为 Rust 工程（aigw2 workspace）。更新流程：<code class="mono">git pull</code> → <code class="mono">cargo build</code> → 用新 <code class="mono">aigw.exe</code> 与 <code class="mono">providers/</code> 覆盖部署目录 <code class="mono">%LOCALAPPDATA%\\aigw2</code> → 重启计划任务 Aigw2Service。更新前建议先「⬇ 备份数据」。</p>
@@ -3720,11 +4357,11 @@ async function route() {
   renderHdBtns(VIEWS[v] ? v : 'overview');
   document.querySelectorAll('.navbtn').forEach((b) => b.classList.toggle('on', b.dataset.v === (VIEWS[v] ? v : 'overview')));
   const el = $('#view');
-  el.innerHTML = '<div class="card glass empty">加载中…</div>';
+  el.innerHTML = '<div class="card empty">加载中…</div>';
   try {
     await conf.f(el);
   } catch (e) {
-    el.innerHTML = `<div class="card glass empty">加载失败：${esc(e.message)}</div>`;
+    el.innerHTML = `<div class="card empty">加载失败：${esc(e.message)}</div>`;
   }
 }
 function render() { route(); }

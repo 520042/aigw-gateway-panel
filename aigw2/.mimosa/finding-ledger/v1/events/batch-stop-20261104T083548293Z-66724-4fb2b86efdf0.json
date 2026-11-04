@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261104T083548293Z-66724-4fb2b86efdf0",
+  "runId": "20261104T083548293Z-66724-4fb2b86efdf0",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "8038d310008f981c2ba59fdb53d37f263b59511f",
+  "diffHash": "edaab51e95a7722811aa3f45e251c10d164e870f63c1f0bdd02d7840d3255181",
+  "rulesVersion": "unavailable",
+  "sessionHash": "0673cb48e4dc37ec095cf49a4fecbdedd267603b398519f9676775ea74bc86cf",
+  "reportRef": ".mimosa/reports/task-review-sess_c068d962-b284-44a6-afd1-00d813f2d50f-20261104T083548293Z-66724-4fb2b86efdf0.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "crates/aigw-relay/src/sanitize.rs",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-11-04T08:35:48.702Z"
+}

@@ -1,0 +1,26 @@
+# AutoClaw（智谱 autoglm）—— 标准 OpenAI 协议，但有两道上游闸门
+# 一手来源：_refs/Agent2API 的 providers/autoclaw/*（adapter.rs / prompt.rs）
+id = "apk-autoclaw"
+name = "AutoClaw（智谱国内版）"
+enabled = true
+region = "cn"
+
+# ★ 认证头是 X-Authorization（不是 Authorization）—— 发错稳定 401
+auth = "api_key"
+base_url = "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw"
+format = "openai"
+upstream_kind = "autoclaw"
+# 标准 OpenAI 路径；声明它是为了让体检能探到这个源（none 策略源靠 chat_path 才被覆盖）。
+chat_path = "/chat/completions"
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://autoclaw.zhipuai.cn"
+
+notes = """粘贴 AutoClaw 的 accessToken 即可。
+
+★ 上游 2026-09-22 起对 system 提示做了白名单闸：必须以身份句开头并带 Tooling 段，
+  且不能出现外来 harness 的身份句（You are ZCode / You are Claude Code 等）。
+  网关会自动前置身份前缀并改写这些句子 —— 否则上游回 406（空响应体、不给原因）。
+
+★ max_tokens 的小正整数（30~8192）也会 406，网关已统一归一到 10000。"""

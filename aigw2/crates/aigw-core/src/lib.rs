@@ -8,8 +8,43 @@
 //!    按 body 形状归一到这里（dsh-our-free-model 的判流思路），
 //!    再按目标方言转出。M1 落地流式状态机。
 
+pub mod paths;
+
 use serde::{Deserialize, Serialize};
 
+// ---- 跨 crate 共用的零碎工具 ----
+//
+// 放在 core 是因为它是唯一一个**所有 crate 都依赖、且自身零依赖**的 crate
+// （依赖图：core ← store/registry/relay/pool ← server）。工具放这里，谁来用都不必
+// 引入新依赖边；反过来若放在 server，store 想用就得到处开洞。
+
+/// 常量时间字符串比较（令牌/密钥校验用）。
+///
+/// ★ 为什么不用 `==`：str 的相等判断一遇到不同字节就返回，比较耗时随「前多少个
+///   字符相同」变化。密钥是从网络来的，能测响应时间的攻击者可以一个字节一个字节
+///   地把 key 试出来。这里全程走完再判结果。
+///
+/// 注意：长度不等时直接返回 false 是安全的（长度本身不是秘密，且这一步不参与
+/// 后续逐字节比较的耗时分布）。
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// serde 默认：该字段缺省时为 true。
+///
+/// 各 Store 与 registry 的 `enabled` 字段共用（缺省启用是刻意的：手写 toml 时
+/// 漏写 enabled 应该得到一个能用的条目，而不是一个静默失效的条目）。
+pub fn default_true() -> bool {
+    true
+}
 /// 上游/请求失败的业务分类。
 ///
 /// 归因原则（写进代码前先写在这里）：
@@ -217,5 +252,28 @@ mod tests {
         assert!(serde_json::to_string(&StreamChunk::Text { delta: "x".into() })
             .unwrap()
             .contains("\"type\":\"text\""));
+    }
+
+    #[test]
+    fn ct_eq_only_matches_identical_strings() {
+        assert!(ct_eq("sk-abc", "sk-abc"));
+        assert!(!ct_eq("sk-abc", "sk-abd"));
+        assert!(!ct_eq("sk-abc", "sk-ab"));
+        assert!(!ct_eq("", "a"));
+        assert!(ct_eq("", ""));
+        assert!(!ct_eq("xbc", "abc"));
+        assert!(!ct_eq("abc", "abx"));
+    }
+
+    #[test]
+    fn ct_eq_is_symmetric() {
+        for (a, b) in [("a", "a"), ("a", "b"), ("", "a"), ("ab", "abc")] {
+            assert_eq!(ct_eq(a, b), ct_eq(b, a));
+        }
+    }
+
+    #[test]
+    fn default_true_is_true() {
+        assert!(default_true());
     }
 }

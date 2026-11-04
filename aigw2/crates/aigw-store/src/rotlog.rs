@@ -180,6 +180,48 @@ impl<'a> MakeWriter<'a> for Tee {
     }
 }
 
+
+/// 读当前日志的**末尾若干行**（按时间顺序），供面板「日志」页。
+///
+/// ★ 只读尾部 256 KiB 窗口：日志文件上限 4 MiB，整读会让一次页面刷新
+///   复制整个文件；尾窗口对「看最近发生了什么」完全够用。
+pub fn tail(data_dir: &std::path::Path, max_lines: usize) -> (Vec<String>, u64) {
+    let path = log_dir(data_dir).join(BASE);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return (Vec::new(), 0);
+    };
+    let size = meta.len();
+    const WINDOW: u64 = 256 * 1024;
+    let start = size.saturating_sub(WINDOW);
+    let mut bytes = vec![0u8; (size - start) as usize];
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut f) = std::fs::File::open(&path) else {
+            return (Vec::new(), size);
+        };
+        if f.seek(SeekFrom::Start(start)).is_err() || f.read_exact(&mut bytes).is_err() {
+            return (Vec::new(), size);
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut out: Vec<String> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        // 窗口起点可能切开一行；半行特征是缺时戳头（tracing 行必带 'T'）。
+        // 只可能发生在第一行。
+        if i == 0 && start > 0 && !line.contains('T') {
+            continue;
+        }
+        let l = line.strip_prefix('\u{feff}').unwrap_or(line).to_string();
+        if !l.is_empty() {
+            out.push(l);
+        }
+    }
+    if out.len() > max_lines {
+        out = out.split_off(out.len() - max_lines);
+    }
+    (out, size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,7 +320,29 @@ mod tests {
         );
     }
 
+    /// tail：拿末尾 N 行、按时间顺序；max_lines 截断取**最新**而非最旧。
     #[test]
+    fn tail_returns_latest_lines_in_order() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = log_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = String::new();
+        for i in 1..=50 {
+            s += &format!("2026-01-01T00:00:00.000Z  INFO aigw::req: 行 {i}\n");
+        }
+        std::fs::write(dir.join(BASE), &s).unwrap();
+        let (lines, size) = tail(tmp.path(), 10);
+        assert_eq!(lines.len(), 10);
+        assert!(lines[0].ends_with("行 41"), "首行应是第 41 条: {:?}", lines[0]);
+        assert!(lines[9].ends_with("行 50"));
+        assert!(size > 0);
+        // 文件不存在 → 空而不炸
+        let (l2, _) = tail(std::path::Path::new("Z:/definitely-not-here-9x7"), 5);
+        assert!(l2.is_empty());
+    }
+
+
+#[test]
     fn write_errors_do_not_fail_the_caller() {
         let tmp = tempfile::tempdir().unwrap();
         let tee = Tee::with_limits(log_dir(tmp.path()), 1024, 2).unwrap().silent();

@@ -37,6 +37,9 @@ models = [
 models_policy = "static"
 chat_path = "/v2/chat/completions"
 signer = "wb"
+# ★ 上游同一个端点（copilot.tencent.com）服务国内站，靠 X-Domain 头判定站点。
+#   验活与积分查询都要带它，否则国际版账号会被判成「未授权」。
+domain = "www.workbuddy.cn"
 stream_dialect = "sse_delta"
 
 biz_err = ["登录", "失效", "授权"]

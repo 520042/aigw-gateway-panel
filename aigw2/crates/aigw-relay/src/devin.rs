@@ -25,15 +25,13 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::RelayError;
+use crate::common::{er, nanos_hex};
 
 const DEVIN_BASE: &str = "https://api.devin.ai/v1";
 const DEVIN_UA: &str = "aigw-panel/1.0";
 const DEVIN_POLL_SECS: u64 = 3;
 const DEVIN_DEADLINE_SECS: u64 = 300;
 
-fn er(status: u16, body: String, class: ErrorClass) -> RelayError {
-    RelayError { status, body, class }
-}
 
 pub fn trunc(s: &str, n: usize) -> String {
     let mut out = String::new();
@@ -53,13 +51,6 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn nanos_hex() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}")
-}
 
 fn pick_one(v: &Value, keys: &[&str]) -> Option<String> {
     for k in keys {

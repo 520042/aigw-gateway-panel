@@ -25,12 +25,8 @@ pub struct FreeSite {
     #[serde(default)]
     pub desc: String,
     /// 是否启用。
-    #[serde(default = "default_true")]
+    #[serde(default = "aigw_core::default_true")]
     pub enabled: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 pub struct FreeStore {

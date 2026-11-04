@@ -1,0 +1,45 @@
+# OVHcloud AI Endpoints —— 免 Key 匿名免费车道
+# 一手来源：GitHub 反代项目普查（2026-10-30）
+#   · trefeon/pi-freeflow  README：免费池含「8 from OVHcloud AI Endpoints」，与 OpenCode/Kilo/Cline 并列
+#   · kaiser-data/free-llm-proxy-router：同为「官方免费档、无卡、自动补额」类目录
+# 上游契约（2026-10-30 直接实测，非二手转述）：
+#   GET  {base}/v1/models           → 200，22 个模型，带 pricing 字段（全部按 token 计价）
+#   POST {base}/v1/chat/completions → 200，**不带任何 Authorization 头**即可出流
+#   POST 同一路径带 `Authorization: Bearer <任意值>` → 403 authentication failed
+#   （★ 关键差异：这条车道是「无头」而不是「空 key」。多带一个 Bearer 反而被拒，所以
+#     auth = "anon" 是唯一正确形态；不要为了「保险」加占位 key。）
+# 计费性质：端点带 pricing 但匿名可调 —— 属 OVH 的公开试用入口（Kepler 平台），
+#   不是绕过计费的盗用通道；额度由上游按 IP 控制，429 属正常限速。
+id = "anon-ovh"
+name = "OVHcloud AI Endpoints（免 Key 匿名）"
+enabled = true
+region = "intl"
+
+auth = "anon"
+base_url = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
+chat_path = "/chat/completions"
+format = "openai"
+models_path = "/models"
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+# 静态兜底：2026-10-30 实测 GET /models 的 22 个条目里，这里只留**能对话**的子集。
+# 刻意剔除的四类（都在上游清单里，但不是 chat 车道）：
+#   · Embedding：bge-m3 / bge-multilingual-gemma2 / Qwen3-Embedding-8B
+#   · 语音识别：whisper-large-v3 / whisper-large-v3-turbo
+#   · 语音合成：nvr-tts-en-us / nvr-tts-de-de / nvr-tts-es-es / nvr-tts-it-it
+#   · 图像生成：stable-diffusion-xl-base-v10
+#   · 内容审核：Qwen3Guard-Gen-0.6B / Qwen3Guard-Gen-8B（会拒答普通对话）
+models = [
+  "gpt-oss-120b",
+  "gpt-oss-20b",
+  "Qwen3.5-397B-A17B",
+  "Qwen3.8-27B",
+  "Qwen3.5-9B",
+  "Mistral-Small-3.2-24B-Instruct-2506",
+  "Mistral-Nemo-Instruct-2407",
+  "Meta-Llama-3_3-70B-Instruct",
+  "Qwen2.5-VL-72B-Instruct",
+]
+
+notes = "免 Key 免注册免账号（2026-10-30 实测：无 Authorization 头 POST 直接 200 并出 SSE 流）。带任何 Bearer 反而 403 —— 这条车道无头才是正确形态。模型 22 个，对话可用约 9 个（含 gpt-oss-120b、Qwen3.5-397B-A17B、Llama-3.3-70B、Qwen2.5-VL-72B 视觉）；其余是 embedding / whisper / TTS / SDXL / Qwen3Guard 审核模型，已从清单剔除。gpt-oss 系会把思考放在 delta.reasoning 字段。匿名额度按上游 IP 策略控制，429 属正常限速，冷却即可。"

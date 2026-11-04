@@ -2,7 +2,7 @@
 # 一手来源：旧版 catalog platforms/minimax
 id = "minimax"
 name = "MiniMax Code（网页版·设备码）"
-enabled = true
+enabled = false
 region = "cn"
 
 auth = "api_key"
@@ -22,3 +22,9 @@ stream_dialect = "sse_delta"
 login_url = "https://account.minimax.cn"
 
 notes = "点「接入」→ 打开验证页输入码完成授权，面板自动拿 token；支持每日签到领积分"
+
+# ★ 已停用（反代端点失效，2026-10-26 体检确认）
+# 实测 agent.minimax.cn/v1/models 与 /v1/chat/completions 都返回 404（Next.js 错误页），
+# 该网页版反代通道已不在。官方 API 通道仍然可用且已有独立条目：请用 api-minimax
+# （国内 api.minimax.chat）或 api-minimax-global（海外 api.minimax.io），两者实测 401 = 端点活着。
+# 若 MiniMax 之后恢复/改了网页版地址，改 base_url 并把 enabled 改回 true。

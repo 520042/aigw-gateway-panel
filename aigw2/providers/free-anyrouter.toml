@@ -2,7 +2,7 @@
 # 一手来源：旧版 catalog_sites（官方区/公益 relay）
 id = "free-anyrouter"
 name = "AnyRouter（公益）"
-enabled = true
+enabled = false
 region = "global"
 
 auth = "api_key"
@@ -15,4 +15,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://anyrouter.top/register?aff=pG9m"
 
-notes = "2026-10-22 探测：/api/pricing 连接失败（域名不可达），站点可能已下线或需要代理；无模型清单可填。"
+notes = "2026-10-28 复核：/v1/models 经代理 raw TLS 实测回 401 正常 JSON（端点活着），但 reqwest 连接层被拒（is_connect）——Cloudflare TLS 指纹过滤，网关 HTTP 客户端连不上。 ⇒ 停用（用户接入也永远超时，留着只会制造假故障）。若日后换 TLS 栈或上游放开再重启。\n旧记录：2026-10-22 探测：/api/pricing 连接失败（域名不可达），站点可能已下线或需要代理；无模型清单可填。"

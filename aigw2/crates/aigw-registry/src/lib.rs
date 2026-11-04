@@ -640,7 +640,14 @@ User-Agent = "opencode/1.18.31"
     fn qr_scan_platforms_have_a_matching_relay_implementation() {
         // relay 的 LoginEngine::start 里真正实现了扫码轮询的平台 id。
         // 改动这里必须同时改 aigw-relay/src/auth_login.rs 的分派分支。
-        const IMPLEMENTED: &[&str] = &["apk-doubao", "apk-kuku", "apk-loomy", "apk-raccoon"];
+        const IMPLEMENTED: &[&str] = &[
+            "apk-doubao",
+            "apk-kuku",
+            "apk-loomy",
+            "apk-metaso",
+            "apk-raccoon",
+            "web-glm",
+        ];
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")

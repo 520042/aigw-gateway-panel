@@ -1,0 +1,29 @@
+# OfficeAce（华为云果办 / OfficeClaw）—— OpenAI 兼容，Basic 鉴权
+# 一手来源：_refs/Agent2API 的 providers/officeace/*（chat.rs / signer.rs / signer_vectors.json）
+id = "api-officeace"
+name = "OfficeAce（华为云果办）"
+enabled = true
+region = "cn"
+
+# ★ 凭据约定为 `key:secret`（从部署后台拿到的那一对），signer=officeace 会把它
+#   编成 `Authorization: Basic base64(key:secret)`。用 Bearer 上游只回 401。
+auth = "api_key"
+signer = "officeace"
+
+# ★ base_url 是**用户自己的**模型网关地址（形如
+#   https://modelgw-xxxx.<region>.huaweicloud-agentarts.com），必须先在设置里填。
+#   未配置时平台处「地址未配置」状态（请求时报错点名要配什么）。
+base_url = "@officeace_base_url"
+format = "openai"
+models_policy = "none"
+stream_dialect = "sse_delta"
+
+login_url = "https://console.huaweicloud.com"
+
+notes = """在华为云部署 OfficeAce 后，从网关控制台拿到 `modelgw-xxxx.<region>.huaweicloud-agentarts.com`
+地址与 `key:secret` 一对，分别填进设置与账号页。
+
+★ 端点是 {base}/v2/chat/completions（标准 OpenAI 协议）。
+
+★ 上游**恒流式**，非流式请求由网关自己聚合；且它把 max_tokens 当「推理+正文」
+  的总预算 —— 给小了会 HTTP 200 但正文空串，所以网关会给它追加一段推理预算。"""

@@ -56,12 +56,8 @@ pub struct CustomApi {
     #[serde(default)]
     pub models_pinned: bool,
     /// 是否启用。
-    #[serde(default = "default_true")]
+    #[serde(default = "aigw_core::default_true")]
     pub enabled: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 pub struct CustomStore {
@@ -466,9 +462,9 @@ mod tests {
         assert!(!old[0].models_pinned, "老数据缺字段必须默认不固定");
     }
 
-    #[cfg(windows)]
     #[test]
     fn keys_are_encrypted_on_disk_and_plaintext_in_memory() {
+        crate::secret::test_key_env();
         // 目标：custom.json 里不能出现明文 Key（以前 api_key 是直接明文落盘的）。
         let dir = tempfile::tempdir().unwrap();
         let st = CustomStore::open(dir.path());
@@ -476,7 +472,8 @@ mod tests {
 
         let raw = std::fs::read_to_string(dir.path().join("custom.json")).unwrap();
         assert!(!raw.contains("sk-plain-secret-123456"), "磁盘上不能有明文 Key：{raw}");
-        assert!(raw.contains(crate::secret::PREFIX), "应当是 dpapi: 密文：{raw}");
+        // ★ 认全部已加密前缀（dpapi: 或 aigw1:），而不是只认 DPAPI。
+        assert!(crate::secret::is_encrypted_text(&raw), "应当是已加密密文：{raw}");
 
         // 重新装载：内存里必须恢复明文（否则转发会带着密文去 401）。
         let st2 = CustomStore::open(dir.path());

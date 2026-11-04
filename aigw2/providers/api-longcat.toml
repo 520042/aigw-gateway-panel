@@ -6,7 +6,13 @@ enabled = true
 region = "cn"
 
 auth = "api_key"
-base_url = "https://longcat.chat/v1"
+# ★ 2026-10-26 修正：此前写的是 https://longcat.chat/v1 —— 该地址的 /v1/models
+#   返回**网站首页 HTML**、chat 也拿不到 API 响应，于是这个源的清单与转发全废，
+#   而面板只显示「近24h 失败」，看不出是地址写错了（与 api-zhipu 同一类问题）。
+#   实测正确端点是 https://api.longcat.chat/openai/v1 ：
+#     GET  /models            → 401 {"error":{"code":"invalid_api_key",...}}（缺 Key，端点活着）
+#     POST /chat/completions  → 400 {"error":{"code":"invalid_json",...}}（同上）
+base_url = "https://api.longcat.chat/openai/v1"
 format = "openai"
 
 # 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
@@ -19,3 +25,5 @@ stream_dialect = "sse_delta"
 login_url = "https://longcat.chat/platform"
 
 notes = "LongCat-2.5-Preview 资源包 + 活动赠送额度。"
+
+# ★ 2026-10-26 实测：/v1/models 返回 200 但 body 是 HTML 首页（不是 JSON），live 清单拉不到。静态清单仍然可用。

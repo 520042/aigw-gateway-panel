@@ -2,7 +2,7 @@
 # 一手来源：旧版 catalog_sites（官方区/公益 relay）
 id = "free-naixi"
 name = "奶昔 New API（公益）"
-enabled = true
+enabled = false
 region = "global"
 
 auth = "api_key"
@@ -16,3 +16,7 @@ stream_dialect = "sse_delta"
 login_url = "https://newapi.naixi.net/login"
 
 notes = "2026-10-22 探测：/api/pricing 连接失败（域名不可达）；无模型清单可填。"
+
+# ★ 已停用（域名失效，2026-10-26 核实）
+# DNS 查询 newapi.naixi.net 返回 **ENOTFOUND**（域名不存在），不是网络慢也不是需要代理：
+# 同一时刻 ai.berf1.cn / anyrouter.top 都能正常解析。上游恢复后把 enabled 改回 true。

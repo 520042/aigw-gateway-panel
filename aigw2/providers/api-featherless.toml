@@ -26,3 +26,5 @@ stream_dialect = "sse_delta"
 login_url = "https://featherless.ai/account/api-keys"
 
 notes = "FCC asks for tool_use + available_on_current_plan rows; pagination is numbered."
+
+# ★ 2026-10-26 实测：/v1/models 会返回约 7MB 的 Brotli 清单（它把社区模型全列出来），超过本面板 4MiB 的清单上限，因此 live 清单会被判失败并回落静态表。属上游形态问题，不是端点失效。

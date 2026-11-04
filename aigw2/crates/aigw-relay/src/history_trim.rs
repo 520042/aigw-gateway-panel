@@ -17,7 +17,7 @@
 //! 四步里只有「工具结果截断」会真的丢字，而它**只作用于历史**；
 //! 其余三步只删「本来就重复了两遍」的东西。
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 pub const DEFAULT_MAX_TOOL_LEN: usize = 2000;
 pub const MIN_MAX_TOOL_LEN: usize = 256;

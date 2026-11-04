@@ -3,3 +3,17 @@
 *.log
 
 /data
+
+# 本地验证脚本（bun 跑的端到端/界面回归，随本机环境而变，不入库）
+/_e2e.js
+/_harness.js
+/_logincheck.js
+/_acciocheck.js
+
+# 探针 / 界面回归的截图与输出（只在本机有意义）
+/_shot_*.png
+/_smoke_run.ps1
+/_perm_probe.txt
+/_test_out*.txt
+/_run.out
+/_run.err

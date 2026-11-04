@@ -306,12 +306,20 @@ impl AnthState {
         } else {
             (self.out_text.chars().count() as i64 / 2).max(1)
         };
+        // ★ input_tokens 也要在 message_delta 里给一次。
+        //
+        //   Anthropic 的约定是：message_start 先给一个占位（我们那时还没拿到上游
+        //   usage，所以是 0），**最终值在 message_delta 的 usage 里**（累计语义）。
+        //   旧实现只发 output_tokens，于是客户端从 message_start 读到的
+        //   input_tokens=0 就一直是 0 —— 客户端显示「输入 0 token」，
+        //   而实际这次请求可能吃了几千 token 的上下文。
+        let in_tokens = self.parser.prompt_tokens.max(0);
         self.event(
             "message_delta",
             &json!({
                 "type": "message_delta",
                 "delta": {"stop_reason": sr},
-                "usage": {"output_tokens": out_tokens}
+                "usage": {"input_tokens": in_tokens, "output_tokens": out_tokens}
             }),
         );
     }
@@ -506,6 +514,11 @@ impl RespState {
             "status": "in_progress",
             "model": self.model,
             "output": [],
+            // ★ store: false 也要在**流式**里给（非流式 openai_to_responses 早就有了）。
+            //   本网关是无状态转发、不保存 response；缺这个字段会让客户端按自己的默认
+            //   理解，一旦理解成 true，它就有理由只回传一个 id 当上下文。
+            //   （与非流式同一理由，别再走「只改一条路」的老路。）
+            "store": false,
         });
         self.event("response.created", json!({"response": resp}));
     }
@@ -698,14 +711,35 @@ impl RespState {
         } else {
             (self.out_text.chars().count() as i64 / 2).max(1)
         };
+        // ★ 与非流式同口径：按上游 finish_reason 决定 status/incomplete_details。
+        //   恒写 "completed" 会让**被长度截断**的流式响应在客户端看来是完整答案
+        //   （Codex 据此决定要不要续写），用户只看到「答到一半停了」。
+        let finish = self
+            .parser
+            .finish_reason
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+        let (status, incomplete) = match finish.as_str() {
+            "length" | "max_tokens" => (json!("incomplete"), json!({"reason": "max_output_tokens"})),
+            "content_filter" => (json!("incomplete"), json!({"reason": "content_filter"})),
+            _ => (json!("completed"), Value::Null),
+        };
         let resp = json!({
             "id": self.resp_id,
             "object": "response",
             "created_at": self.created_at,
-            "status": "completed",
+            "status": status,
+            "incomplete_details": incomplete,
+            // 与非流式同口径：error:null 明确表示「没有错误」（字段缺失会让客户端
+            // 分不清「成功」与「这个字段没实现」）；parallel_tool_calls 是 Codex 这类
+            // 客户端判断能否并行发工具调用的依据。
+            "error": null,
+            "parallel_tool_calls": true,
             "model": self.model,
             "output": output,
             "output_text": text,
+            "store": false,
             "usage": responses_usage(tin, tout),
         });
         self.event("response.completed", json!({"response": resp}));

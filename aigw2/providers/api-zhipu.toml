@@ -6,7 +6,12 @@ enabled = true
 region = "cn"
 
 auth = "api_key"
-base_url = "https://open.bigmodel.cn/v1"
+# ★ 2026-10-26 修正：此前写的是 https://open.bigmodel.cn/v1 —— 该路径下 chat 返回
+#   405（nginx）、models 返回 HTML 首页，于是这个源**转发与拉清单全废**，而面板只显示
+#   「近24h 失败」，看不出是地址写错了。实测 OpenAI 兼容端点是 /api/paas/v4：
+#   POST /api/paas/v4/chat/completions → 401（缺 Key，端点活着）
+#   GET  /api/paas/v4/models           → 401（同上）
+base_url = "https://open.bigmodel.cn/api/paas/v4"
 format = "openai"
 
 # 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）

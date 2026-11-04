@@ -48,13 +48,23 @@ fn display_name_of(platform: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
-/// 「手动粘贴」这条路的账号名：与登录链路同一套可读命名（平台显示名 · 手填凭据）。
-#[allow(dead_code)]
-fn pasted_account_name(platform: &str) -> String {
+/// 账号显示名 = 「平台显示名 · 标签」，例如「WorkBuddy 国内站 · 设备授权」。
+///
+/// ★ 为什么必须走这一个函数：登录成功（自动拿凭据）与手动粘贴（用户自己粘）两条路
+///   都要给账号起名，两处各写一份 match 时，改文案就得改两个地方 —— 而漏了哪一处
+///   只有面板上「一个账号叫 A、另一个叫 B」这种细小差别，没人会注意到。
+///
+/// 旧实现还把名字写成「{平台 id}（设备授权）」这种机器串，账号一多分不清谁是谁。
+fn account_name_of(platform: &str, label: &str) -> String {
     match display_name_of(platform) {
-        Some(n) => format!("{n} · 手填凭据"),
-        None => format!("{platform} · 手填凭据"),
+        Some(n) => format!("{n} · {label}"),
+        None => format!("{platform} · {label}"),
     }
+}
+
+/// 「手动粘贴」这条路的账号名（标签固定为「手填凭据」）。
+fn pasted_account_name(platform: &str) -> String {
+    account_name_of(platform, "手填凭据")
 }
 
 
@@ -148,6 +158,23 @@ const META_TOKEN_URL: &str = "https://auth.meta.com/oidc/device/token/";
 const META_MINT_URL: &str = "https://api.meta.ai/muse-code/key";
 const META_DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const META_UA: &str = "muse-code/1.0.2";
+
+/// Accio（阿里 Phoenix）OAuth：授权码 + PKCE S256，回调走本机 51123。
+///
+/// 一手来源 `_refs/Agent2API/.../providers/accio/oauth.rs`（逆向自桌面端 AuthService）。
+/// 与其它 PKCE 平台的两处差别：
+///   1. 授权页**自己拼**（`{loginBase}/login?...`），不需要先问上游要 —— 所以不像
+///      AutoClaw 那样要先过一次浏览器端风控验证码（AutoClaw 做不到跳转登录正是卡在这）；
+///   2. 换码是 **JSON 驼峰**（`codeVerifier` / `clientId` / `redirectUri`），不是表单编码。
+///
+/// `client_id` 是桌面端常量（`accio-work`，国内/国际两地共用）。
+const ACCIO_CLIENT_ID: &str = "accio-work";
+/// 授权页所在域：国内 www.accio-ai.com / 国际 www.accio.com。两站账号不通用。
+const ACCIO_LOGIN_CN: &str = "https://www.accio-ai.com";
+const ACCIO_LOGIN_INTL: &str = "https://www.accio.com";
+/// 换码与资料接口都在推理网关上（phoenix-gw.alibaba.com）。
+const ACCIO_GATEWAY: &str = "https://phoenix-gw.alibaba.com";
+const ACCIO_REDIRECT: &str = "http://localhost:51123/auth/callback-accio";
 
 // ═════════ 华为云 CodeArts（01 DSH login.ts 一手：ticket 流程，免 DPoP/PKCE） ═════════
 const CODEARTS_LOGIN_BASE: &str = "https://devcloud.cn-north-4.huaweicloud.com/doer/redirect";
@@ -348,6 +375,19 @@ async fn poll_secret(client: &OutClient, sess: &Session) -> Result<String, Strin
             Some(host) => kimi_poll(&auth_http(), host, &device_code).await,
             None => Err("Kimi 平台映射缺失".to_string()),
         }
+    } else if sess.state.starts_with("zcode:") {
+        // zcode:{flow_id}:{poll_token}:{provider}（4 段）
+        let parts: Vec<&str> = sess.state.splitn(4, ':').collect();
+        if parts.len() < 4 {
+            Err("ZCode 会话不完整".to_string())
+        } else {
+            match zcode_poll(parts[1], parts[2], parts[3]).await {
+                Ok(Some(tok)) => Ok(tok),
+                Ok(None) => Err("pending".to_string()),
+                Err(e) => Err(e),
+            }
+        }
+
     } else if sess.state.starts_with("cline:") {
         // cline:{device_code}:{interval} → WorkOS 三态轮询 → register 换皮
         let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
@@ -399,7 +439,8 @@ async fn poll_secret(client: &OutClient, sess: &Session) -> Result<String, Strin
             None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
         }
     } else if sess.state.starts_with("codex:") || sess.state.starts_with("claude:")
-        || sess.state.starts_with("antigravity:") || sess.state.starts_with("devin:") {
+        || sess.state.starts_with("antigravity:") || sess.state.starts_with("devin:")
+        || sess.state.starts_with("accio:") {
         // {prefix}:{verifier}:{state} → 从回调队列取 code → 换 token
         let parts: Vec<&str> = sess.state.splitn(3, ':').collect();
         if parts.len() < 3 {
@@ -413,7 +454,12 @@ async fn poll_secret(client: &OutClient, sess: &Session) -> Result<String, Strin
                     "codex" => codex_exchange(&auth_http(), &code, verifier).await,
                     "claude" => claude_exchange(&auth_http(), &code, verifier, state).await,
                     "antigravity" => antigravity_exchange(&auth_http(), &code, verifier).await,
-                    _ => devin_exchange(&auth_http(), &code, verifier).await,
+                    // ★ 必须显式列出：下面那条 `_` 本意是「剩下的就是 devin」，
+                    //   新加一个 PKCE 平台而忘了写在这里，它的回调会被当成
+                    //   Devin 去换码（报错信息还长得像 Devin 的问题），排查时极难定位。
+                    "accio" => accio_exchange(&auth_http(), &code, verifier, &sess.platform).await,
+                    "devin" => devin_exchange(&auth_http(), &code, verifier).await,
+                    other => Err(format!("未知的 PKCE 登录类型：{other}")),
                 }
             }
             None => Err("等待授权中（在打开的授权页完成登录，面板自动捕获回调；若未自动捕获，请把浏览器地址栏 URL 粘贴到下方输入框后点「提交回调」）".to_string()),
@@ -450,6 +496,14 @@ async fn poll_secret(client: &OutClient, sess: &Session) -> Result<String, Strin
         // raccoonqr:{32 位 hex code} → POST login_with_qrcode_code → access_token（Bearer）
         let code = sess.state.trim_start_matches("raccoonqr:").to_string();
         raccoon_qr_poll(&auth_http(), RACCOON_BASE, &code).await
+    } else if sess.state.starts_with("metasoqr:") {
+        // metasoqr:{base64 state} → 微信长轮询 → code → /login 换 uid-sid
+        let state = sess.state.trim_start_matches("metasoqr:").to_string();
+        metaso_qr_poll(&auth_http(), &state).await
+    } else if sess.state.starts_with("glmqr:") {
+        // glmqr:{base64 state} → 微信长轮询 → code → wechat_qr_login 换 refresh_token
+        let state = sess.state.trim_start_matches("glmqr:").to_string();
+        glm_qr_poll(&auth_http(), &state).await
     } else {
         Err("跳转登录会话：请粘贴 Cookie/凭据后走 save 动作入库（不自动轮询）".to_string())
     };
@@ -526,6 +580,20 @@ async fn start_dispatch(
                     sess.fail(format!("Kimi 设备码申请失败：{e}（可回退手动粘贴 token）"));
                 }
             }
+        } else if let Some(provider) = zcode_provider(platform) {
+            // ZCode 编码套餐（跳转 + 轮询）：sub-zcode 国内站 / sub-zcode-intl 国际站
+            match zcode_start(provider).await {
+                Ok((flow_id, poll_token, auth_url)) => {
+                    sess.state = format!("zcode:{flow_id}:{poll_token}:{provider}");
+                    sess.login_url = auth_url;
+                    sess.message =
+                        "已生成授权链接：打开后完成登录，面板自动取得 token 并入库。".into();
+                }
+                Err(e) => {
+                    sess.fail(format!("ZCode 登录发起失败：{e}（可回退手动粘贴 token）"));
+                }
+            }
+
         } else if platform == "sub-grok" {
             // xAI Grok 设备码（RFC 8628 + OIDC discovery）
             match xai_start(&auth_http()).await {
@@ -588,6 +656,20 @@ async fn start_dispatch(
                 }
                 Err(e) => {
                     sess.fail(format!("Antigravity 授权 URL 生成失败：{e}"));
+                }
+            }
+        } else if platform == "apk-accio" || platform == "apk-accio-intl"
+            || platform == "apk-accio-cn"
+        {
+            // Accio（阿里 Phoenix）：授权码 + PKCE S256，本地 51123 回调（跳转登录，非扫码）
+            match accio_start(platform).await {
+                Ok((url, verifier, state)) => {
+                    sess.state = format!("accio:{verifier}:{state}");
+                    sess.login_url = url.clone();
+                    sess.message = "Accio 跳转登录：点「打开授权页」在浏览器完成登录，面板自动捕获回调换 token 入库；若面板部署在服务器，把浏览器跳转后地址栏的 URL 粘贴到下方输入框。".into();
+                }
+                Err(e) => {
+                    sess.fail(format!("Accio 授权 URL 生成失败：{e}"));
                 }
             }
         } else if platform == "sub-devin" {
@@ -703,11 +785,35 @@ async fn start_dispatch(
             sess.state = format!("raccoonqr:{code}");
             sess.qr_text = qr_text;
             sess.message = "小浣熊（商汤）微信扫码登录：用微信扫一扫二维码（进入「商汤小浣熊」小程序）并在手机上确认，面板自动换取 access_token 并入账号池（约 3 小时有效，过期后重新扫码即可）。".into();
+        } else if platform == "apk-metaso" {
+            // 秘塔微信扫码（metaso.cn chunk 41209 WxQrCode 一手：qrconnect → code → /login 下发 uid/sid）
+            match metaso_qr_start(&auth_http()).await {
+                Ok((state, qr_b64, mime)) => {
+                    sess.state = format!("metasoqr:{state}");
+                    sess.qr_image = format!("data:{mime};base64,{qr_b64}");
+                    sess.message = "秘塔微信扫码登录：用微信扫一扫二维码并在手机上确认，面板自动换取 uid+sid 并入账号池（登录后额度约 500 次/天，远高于匿名的 13 次/窗口）。".into();
+                }
+                Err(e) => {
+                    sess.fail(format!("秘塔微信扫码发起失败：{e}（可回退手动粘贴 uid-sid）"));
+                }
+            }
+        } else if platform == "web-glm" {
+            // 智谱清言微信扫码（chatglm.cn WxLogin 一手：qrconnect → code → wechat_qr_login 换 refresh_token）
+            match glm_qr_start(&auth_http()).await {
+                Ok((state, qr_b64, mime)) => {
+                    sess.state = format!("glmqr:{state}");
+                    sess.qr_image = format!("data:{mime};base64,{qr_b64}");
+                    sess.message = "智谱清言微信扫码登录：用微信扫一扫二维码并在手机上确认，面板自动换取 refresh_token 并入账号池（30 分钟自动刷新 access_token，无需再次扫码）。".into();
+                }
+                Err(e) => {
+                    sess.fail(format!("智谱微信扫码发起失败：{e}（可回退手动粘贴 refresh_token）"));
+                }
+            }
         } else if let Some(spec) = specs.iter().find(|s| s.id == platform && !s.login_url.is_empty()) {
             // 跳转登录：用户自己浏览器打开登录页，登录后手动粘贴 Cookie/凭据入库。
             sess.login_url = spec.login_url.clone();
-            // ★ 别写「面板不支持扫码」：豆包 / 库库 / 小浣熊 / Loomy 四个平台都有真扫码，
-            //   一句话把四个都否定掉，用户就不会去试（这些平台的扫码分支在自己那边）。
+            // ★ 别写「面板不支持扫码」：豆包 / 库库 / 小浣熊 / Loomy / 秘塔 / 智谱 六个平台都有真扫码，
+            //   一句话把这些都否定掉，用户就不会去试（这些平台的扫码分支在自己那边）。
             sess.message = format!(
                 "已为你打开跳转登录页（{}）—— 请在你自己的浏览器完成登录，然后把 Cookie 或凭据粘贴回来（凭据由你掌控）。",
                 spec.login_url
@@ -830,6 +936,13 @@ impl LoginEngine {
                 } else if sess.platform == "apk-raccoon" {
                     // 小浣熊扫码拿到的是 Bearer access_token（上游不认 Cookie），kind 必须 token。
                     ("（微信扫码）".to_string(), "token")
+                } else if sess.platform == "web-glm" {
+                    // 智谱拿的是 refresh_token，但 toml 的 auth=cookie（它靠 Cookie 名转发），
+                    // 账号池里按 cookie 存才能与原「手动粘贴」路径落成同一形态。
+                    ("（微信扫码）".to_string(), "cookie")
+                } else if sess.platform == "apk-metaso" {
+                    // 秘塔扫码拿到 uid-sid，metaso.rs 的 login_cookie() 直接吃这个形态。
+                    ("（微信扫码）".to_string(), "cookie")
                 } else {
                     ("（设备授权）".to_string(), "token")
                 };
@@ -837,10 +950,7 @@ impl LoginEngine {
                 // 旧实现写的是「{平台 id}{（设备授权）}」这种机器串（wb-gateway（设备授权）），
                 // 账号一多就分不清谁是谁；用平台显示名 + 人话标签，面板上不用再猜。
                 let label = label.trim_matches(|c: char| c == '（' || c == '）').to_string();
-                let acc_name = match display_name_of(&sess.platform) {
-                    Some(n) => format!("{n} · {label}"),
-                    None => format!("{} · {label}", sess.platform),
-                };
+                let acc_name = account_name_of(&sess.platform, &label);
                 let (acc, existed) =
                     accounts.add_account_with_domain(&sess.platform, &acc_name, kind, tok, &domain);
                 saved = Some((acc.id, existed));
@@ -864,8 +974,30 @@ impl LoginEngine {
                 *s = sess.clone();
             }
         }
+        Self::poll_response(&sess, saved)
+    }
+    /// poll 的对外形状（抽成纯函数是为了能被契约测试锁住）。
+    ///
+    /// ★ **`platform` 必须在里面**：调用方（server 的 poll 分支）靠它找到 spec，
+    ///   再去拉登录用户信息（wb 族的用户名/邮箱/套餐）。第一版实现漏了这个字段，
+    ///   于是设备授权登录成功后「拉 profile」那段代码**永远不会执行** ——
+    ///   静默失效比报错更难发现，所以这里有测试盯着。
+    /// 测试辅助：只给会话（未拿到凭据的形状）。
+    #[cfg(test)]
+    fn poll_response_for_test(&self, sess: &Session) -> Value {
+        Self::poll_response(sess, None)
+    }
+
+    /// 测试辅助：拿到凭据的形状（带 account_id）。
+    #[cfg(test)]
+    fn poll_response_with_account(&self, sess: &Session, acc: &str) -> Value {
+        Self::poll_response(sess, Some((acc.to_string(), false)))
+    }
+
+    fn poll_response(sess: &Session, saved: Option<(String, bool)>) -> Value {
         let mut out = json!({
             "ok": true,
+            "platform": sess.platform,
             "session": {"id": sess.id, "status": sess.status, "message": sess.message},
         });
         if let Some((acc_id, existed)) = saved {
@@ -874,6 +1006,7 @@ impl LoginEngine {
         }
         out
     }
+
     /// 手动粘贴凭据落账号池（跳转登录平台的 save 闭环）。
     pub fn save(
         &self,
@@ -1202,6 +1335,112 @@ async fn xai_poll(
         return Err("响应无 access_token".into());
     }
     Ok(tok)
+}
+
+// ══════════════════════════════════════════════════════════════
+// Accio（阿里 Phoenix）：PKCE 授权码 + 本地 51123 回调
+// ══════════════════════════════════════════════════════════════
+
+/// 生成 Accio 授权 URL（PKCE S256）。
+///
+/// `provider` 决定用哪个登录域。**两站账号不通用**，选错了会「登录成功但拿不到模型」，
+/// 所以判据必须与 provider 配置里的 `region` 一致：
+///
+/// | provider 形态 | 登录域 | region |
+/// |---|---|---|
+/// | `apk-accio`（无 `-cn` / `-intl` 后缀） | `www.accio.com`（国际） | intl |
+/// | `apk-accio-intl` | `www.accio.com`（国际） | intl |
+/// | `apk-accio-cn` | `www.accio-ai.com`（国内） | cn |
+///
+/// ★ 只有带 `-cn` 后缀才走国内站，其余一律国际站：
+///   现有 `providers/apk-accio.toml` 声明 `region = "intl"`、
+///   `login_url = https://www.accio.com`，两者都指向国际站。
+///   旧实现按「id == apk-accio → 国内域」判断，正好给这个国际站 provider
+///   拼了国内授权页 —— 用户在国际站注册的号会「登录成功但没模型」，而且界面全绿。
+///   参考实现（`_refs/Agent2API/.../accio/endpoints.rs`）也把两个地区做成
+///   两家 provider 共用一份实现，与这里的约定一致。
+///
+/// 参数顺序与桌面端逐字对齐（`return_url` / `state` / `code_challenge` /
+/// `code_challenge_method` / `client_id`）—— 上游登录页按名字取值，顺序无所谓，
+/// 但换码时 `redirect_uri` 必须与这里**逐字相同**，所以两处都用同一个常量。
+async fn accio_start(provider: &str) -> Result<(String, String, String), String> {
+    let (verifier, challenge) = pkce_pair();
+    let state = oauth_state();
+    // 只有显式 `-cn` 后缀才是国内站；`-intl` 与无后缀都按国际站（与 toml 的 region 对齐）。
+    let login_base = if provider.ends_with("-cn") { ACCIO_LOGIN_CN } else { ACCIO_LOGIN_INTL };
+    let url = format!(
+        "{login_base}/login?return_url={}&state={}&code_challenge={}&code_challenge_method=S256&client_id={}",
+        urlencode(ACCIO_REDIRECT),
+        urlencode(&state),
+        urlencode(&challenge),
+        urlencode(ACCIO_CLIENT_ID),
+    );
+    Ok((url, verifier, state))
+}
+
+/// 用授权码换 Accio 凭证（`POST {gw}/api/oauth/token`，JSON 驼峰）。
+///
+/// 返回的 accessToken 是**不透明串**（不是 JWT），后续由 `relay::accio` 放进
+/// 请求体的 `token` 字段 —— 不走 Authorization 头，这是这家最特别的地方。
+/// 另外顺手把 refreshToken 一起存进凭据里：AccessToken 短期有效，靠它续期。
+async fn accio_exchange(
+    http: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+    provider: &str,
+) -> Result<String, String> {
+    let body = serde_json::json!({
+        "code": code,
+        "codeVerifier": verifier,
+        "clientId": ACCIO_CLIENT_ID,
+        "redirectUri": ACCIO_REDIRECT,
+    });
+    let resp = http
+        .post(format!("{ACCIO_GATEWAY}/api/oauth/token"))
+        .timeout(std::time::Duration::from_secs(25))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("换码请求失败：{e}"))?;
+    let status = resp.status().as_u16();
+    let raw = resp.text().await.map_err(|e| format!("读取响应失败：{e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {status}：{}", truncate(&raw, 160)));
+    }
+    let v: Value = serde_json::from_str(&raw)
+        .map_err(|_| format!("响应解析失败：{}", truncate(&raw, 160)))?;
+    // 上游把业务数据包在 data 里（与推理接口同一套信封），解不开就当顶层读。
+    let data = v.get("data").unwrap_or(&v);
+    let access = data
+        .get("accessToken")
+        .or_else(|| data.get("access_token"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if access.is_empty() {
+        return Err(format!(
+            "换码响应无 accessToken：{}",
+            truncate(&raw, 160)
+        ));
+    }
+    // refreshToken 一并带上：有它才能在过期前续期，没有就只能等下次重新登录。
+    let refresh = data
+        .get("refreshToken")
+        .or_else(|| data.get("refresh_token"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim();
+    // 凭据串格式与面板其它「一个 secret 装多样东西」的地方一致：token␁refresh。
+    // accio 适配器只取第一段，多余部分它不关心；带上是为了将来接续期。
+    let _ = provider; // 两站共用同一个换码端点，区域只影响授权页
+    if refresh.is_empty() {
+        Ok(access)
+    } else {
+        Ok(format!("{access}\u{1}{refresh}"))
+    }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1747,12 +1986,296 @@ async fn kimi_poll(
     Ok(tok)
 }
 
-/// 占位引用（ProviderSpec 导入避免 unused；后续 spec 化登录页复用）。
-#[allow(dead_code)]
-fn _touch(_s: &ProviderSpec) {}
+/// ZCode（智谱 / Z.AI 编码套餐客户端）的登录：服务端中介的跳转 + 轮询。
+///
+/// 一手来源：_refs/Agent2API 的 providers/zcode/oauth.rs（它又来自 Acankao/zcode-api）。
+/// 四步：
+///   1. 生成 poll token（32 随机字节 hex）—— init 与 poll 共用它做 Bearer
+///   2. POST {zcode}/api/v1/oauth/cli/init  body {"provider": "bigmodel"|"zai"}
+///      → {flow_id, authorize_url, expires_at, poll_interval_sec}
+///   3. 把 authorize_url 补上中转页参数后交给用户打开（浏览器不回本机，
+///      授权由服务端记下）
+///   4. GET {zcode}/api/v1/oauth/cli/poll/{flow_id} 直到 status=ready → token
+///
+/// ★ 为什么必须补第 3 步的中转页参数：authorize_url 直接打开时浏览器最后会跳到
+///   本机收不到的 zcode:// 协议上，授权结果不会被服务端记下，于是 poll 永远停在
+///   pending。参数名两地不同（国内 redirect、国际 redirect_uri），写错对应那一地的
+///   登录会静默挂到超时 —— 这是本链路最容易出错、症状最不直观的一处。
+///
+/// ★ 未端到端验证到授权完成：本机没有 ZCode 账号，实测只覆盖到 init 返回真实
+///   flow_id + authorize_url 这一步。若第 4 步响应结构与预期不符，用户会看到
+///   「授权待确认」超时，可回退手动粘贴 access_token（sub-zcode 的 auth=api_key）。
+
+/// 中转页参数名：国内版 redirect、国际版 redirect_uri。
+fn zcode_interstitial_param(provider: &str) -> &'static str {
+    if provider == "zai" {
+        "redirect_uri"
+    } else {
+        "redirect"
+    }
+}
+
+/// 平台 id → upstream provider 名（sub-zcode → bigmodel，sub-zcode-intl → zai）。
+pub(crate) fn zcode_provider(platform: &str) -> Option<&'static str> {
+    match platform {
+        "sub-zcode" => Some("bigmodel"),
+        "sub-zcode-intl" => Some("zai"),
+        _ => None,
+    }
+}
+
+/// 32 随机字节的十六进制（init 与 poll 共用的 Bearer token）。
+fn zcode_poll_token() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 发起登录。返回 (flow_id, poll_token, 可直接打开的授权地址)。
+async fn zcode_start(provider: &str) -> Result<(String, String, String), String> {
+    let poll_token = zcode_poll_token();
+    let resp = auth_http()
+        .post("https://zcode.z.ai/api/v1/oauth/cli/init")
+        .header("authorization", format!("Bearer {poll_token}"))
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({ "provider": provider }))
+        .send()
+        .await
+        .map_err(|e| format!("ZCode 登录发起失败：{e}"))?;
+    let status = resp.status().as_u16();
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("ZCode 登录发起：响应不是 JSON（{e}）"))?;
+    // 信封错误码（实测缺 Bearer 时是 3004 invalid_flow）
+    if let Some(code) = v.get("code").and_then(|x| x.as_i64()) {
+        if code != 0 {
+            let msg = v.get("msg").and_then(|x| x.as_str()).unwrap_or("未知原因");
+            return Err(format!("ZCode 登录发起被拒（{code} {msg}）"));
+        }
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("ZCode 登录发起失败：HTTP {status}"));
+    }
+    let data = v
+        .get("data")
+        .ok_or_else(|| "ZCode 登录发起：响应缺少 data".to_string())?;
+    let flow_id = data
+        .get("flow_id")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "ZCode 登录发起：缺少 flow_id".to_string())?
+        .to_string();
+    let authorize_url = data
+        .get("authorize_url")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "ZCode 登录发起：缺少 authorize_url".to_string())?
+        .to_string();
+    Ok((
+        flow_id,
+        poll_token,
+        zcode_interstitial(provider, &authorize_url),
+    ))
+}
+
+/// 把上游给的 authorize_url 补上中转页参数（否则授权结果不会被服务端记下）。
+///
+/// 只替换同名参数（已有就改值、没有就追加），其余查询参数原样保留；
+/// # 片段不参与查询，替换完原样拼回。
+fn zcode_interstitial(provider: &str, authorize_url: &str) -> String {
+    let param = zcode_interstitial_param(provider);
+    let target = urlencode(
+        "https://zcode.z.ai/app/oauth/login?redirect=zcode%3A%2F%2Foauth%2Fcallback",
+    );
+    let prefix = format!("{param}=");
+    let replacement = format!("{prefix}{target}");
+    let (head, fragment) = match authorize_url.split_once('#') {
+        Some((h, f)) => (h, Some(f)),
+        None => (authorize_url, None),
+    };
+    let (path, query) = match head.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (head, ""),
+    };
+    let mut replaced = false;
+    let mut segments: Vec<String> = Vec::new();
+    for seg in query.split('&').filter(|s| !s.is_empty()) {
+        if seg.starts_with(&prefix) {
+            if !replaced {
+                segments.push(replacement.clone());
+                replaced = true;
+            }
+            continue;
+        }
+        segments.push(seg.to_string());
+    }
+    if !replaced {
+        segments.push(replacement);
+    }
+    let mut out = String::from(path);
+    out.push('?');
+    out.push_str(&segments.join("&"));
+    if let Some(f) = fragment {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
+}
+
+/// 轮询一次。Ok(Some(token)) = 授权完成；Ok(None) = 继续等。
+async fn zcode_poll(
+    flow_id: &str,
+    poll_token: &str,
+    provider: &str,
+) -> Result<Option<String>, String> {
+    let url = format!("https://zcode.z.ai/api/v1/oauth/cli/poll/{flow_id}");
+    let resp = match auth_http()
+        .get(&url)
+        .header("authorization", format!("Bearer {poll_token}"))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        // 网络错误 = 这次没问成，不是被拒 → 继续轮询
+        Err(_) => return Ok(None),
+    };
+    let status = resp.status().as_u16();
+    // 5xx / 408 / 429 同样当 pending（上游没问成），其余 4xx 才是真被拒
+    if status >= 500 || status == 408 || status == 429 {
+        return Ok(None);
+    }
+    let v: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    if let Some(code) = v.get("code").and_then(|x| x.as_i64()) {
+        if code != 0 {
+            let msg = v.get("msg").and_then(|x| x.as_str()).unwrap_or("未知原因");
+            return Err(format!("ZCode 授权轮询失败（{code} {msg}）"));
+        }
+    }
+    if status >= 400 {
+        return Err(format!("ZCode 授权轮询被拒：HTTP {status}"));
+    }
+    let data = match v.get("data") {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    match data.get("status").and_then(|x| x.as_str()).unwrap_or("") {
+        "ready" => {
+            // 两地的分支键不同：data.zai.access_token / data.bigmodel.access_token
+            let tok = data
+                .get(provider)
+                .and_then(|p| p.get("access_token"))
+                .and_then(|t| t.as_str())
+                .or_else(|| data.get("access_token").and_then(|t| t.as_str()))
+                .unwrap_or("")
+                .to_string();
+            if tok.is_empty() {
+                return Err("ZCode 授权完成但没拿到 access_token".to_string());
+            }
+            Ok(Some(tok))
+        }
+        "failed" | "expired" => Err("ZCode 授权被拒绝或已失效，请重新发起登录".to_string()),
+        _ => Ok(None),
+    }
+}
 
 #[cfg(test)]
 mod tests {
+
+    /// ★ 契约：poll 的返回**必须**带 platform。
+    ///   调用方靠它找 spec 再拉登录用户信息；漏了就是静默失效（第一版就漏了）。
+    #[test]
+    fn poll_response_carries_platform_and_account() {
+        let sess = Session {
+            id: "s1".into(),
+            platform: "wb-gateway".into(),
+            qr_image: String::new(),
+            qr_text: String::new(),
+            state: String::new(),
+            status: "success".into(),
+            message: "ok".into(),
+            login_url: String::new(),
+            user_code: String::new(),
+        };
+        let v = LoginEngine::new().poll_response_for_test(&sess);
+        assert_eq!(v["platform"], "wb-gateway", "poll 必须带回 platform: {v}");
+        assert_eq!(v["ok"], true);
+        // 拿到凭据时还要带上 account_id，调用方据此落 profile
+        let v2 = LoginEngine::new().poll_response_with_account(&sess, "acc-1");
+        assert_eq!(v2["account_id"], "acc-1", "{v2}");
+        assert_eq!(v2["platform"], "wb-gateway");
+    }
+
+
+    /// 联网冒烟：真的去打 ZCode 的 init 端点，确认能拿到授权地址。
+    ///
+    /// ★ 标 `#[ignore]`：它需要外网、且上游限流（连打两次会 429），不适合进 CI。
+    ///   手动验证时跑：`cargo test -p aigw-relay -- --ignored zcode_init_smoke`。
+    ///   本机没有 ZCode 账号，因此**只能验证到第 2 步**（拿到 authorize_url），
+    ///   第 4 步「授权完成取 token」仍未端到端验证过。
+    #[tokio::test]
+    #[ignore = "需要外网且上游限流，仅手动验证"]
+    async fn zcode_init_smoke() {
+        let (flow_id, poll_token, auth_url) = zcode_start("bigmodel")
+            .await
+            .expect("ZCode init 应成功（实测 2026-10-26 可用）");
+        assert!(!flow_id.is_empty(), "flow_id 不应为空");
+        assert_eq!(poll_token.len(), 64);
+        assert!(auth_url.starts_with("http"), "{auth_url}");
+        // 授权地址必须已带中转页参数，否则 poll 会永远 pending
+        assert!(auth_url.contains("redirect="), "{auth_url}");
+        println!("authorize_url = {auth_url}");
+    }
+
+
+    /// ZCode 中转页参数：两地的参数名不同（国内 redirect / 国际 redirect_uri），
+    /// 写错对应那一地的登录会**静默停在 pending 直到超时** —— 症状最不直观的一处。
+    #[test]
+    fn zcode_interstitial_uses_the_right_param_per_region() {
+        let url = "https://bigmodel.cn/login?appId=zcode&redirect=OLD&state=abc";
+        let cn = zcode_interstitial("bigmodel", url);
+        assert!(cn.contains("redirect="), "{cn}");
+        assert!(!cn.contains("OLD"), "同名参数必须被替换而不是追加：{cn}");
+        assert!(!cn.contains("redirect_uri="), "国内版不该出现 redirect_uri：{cn}");
+        assert!(cn.contains("appId=zcode"), "其余查询参数要原样保留：{cn}");
+        assert!(cn.contains("state=abc"), "state 要原样保留：{cn}");
+
+        let url2 = "https://z.ai/login?redirect_uri=OLD&state=s";
+        let intl = zcode_interstitial("zai", url2);
+        assert!(intl.contains("redirect_uri="), "{intl}");
+        assert!(!intl.contains("OLD"), "{intl}");
+        assert!(!intl.contains("?redirect="), "国际版不该出现 redirect：{intl}");
+    }
+
+    #[test]
+    fn zcode_interstitial_appends_when_param_missing_and_keeps_fragment() {
+        // 上游没给这个参数：追加一个（而不是报错）
+        let out = zcode_interstitial("bigmodel", "https://bigmodel.cn/login?appId=z");
+        assert!(out.contains("redirect="), "{out}");
+        assert!(out.contains("appId=z"), "{out}");
+        // # 片段不参与查询，必须原样拼回
+        let out2 = zcode_interstitial("bigmodel", "https://bigmodel.cn/login?a=1#frag");
+        assert!(out2.ends_with("#frag"), "{out2}");
+        assert!(out2.contains("a=1"), "{out2}");
+    }
+
+    #[test]
+    fn zcode_provider_maps_both_regions() {
+        assert_eq!(zcode_provider("sub-zcode"), Some("bigmodel"));
+        assert_eq!(zcode_provider("sub-zcode-intl"), Some("zai"));
+        assert_eq!(zcode_provider("api-zhipu"), None);
+    }
+
+    #[test]
+    fn zcode_poll_token_is_64_hex_chars() {
+        let t = zcode_poll_token();
+        assert_eq!(t.len(), 64, "{t}");
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()), "{t}");
+        assert_ne!(zcode_poll_token(), zcode_poll_token());
+    }
+
     #[test]
     fn session_fail_sets_both_status_and_message() {
         // 各登录分支的 Err 侧都走 Session::fail。旧写法手抄两行，
@@ -1904,6 +2427,85 @@ mod tests {
         let expect = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(v.as_bytes()));
         assert_eq!(c, expect);
         assert_eq!(oauth_state().len(), 32);
+    }
+
+    #[tokio::test]
+    async fn accio_authorize_url_shape() {
+        // 国内/国际用不同的登录域，但 client_id 与回调地址必须一致 ——
+        // 回调地址会被拿去换码（redirectUri 要逐字相同），选错域就等于登录到另一个站。
+        //
+        // ★ 域名判据是 `-cn` 后缀（见 accio_start 的注释与
+        //   `accio_domain_selection_follows_cn_suffix`）。这里用两个
+        //   明确表达意图的 provider 名来验两条分支。
+        let (intl, v1, s1) = accio_start("apk-accio").await.expect("国际授权 URL");
+        let (cn, v2, s2) = accio_start("apk-accio-cn").await.expect("国内授权 URL");
+        assert!(intl.starts_with("https://www.accio.com/login?"), "国际登录域: {intl}");
+        assert!(cn.starts_with("https://www.accio-ai.com/login?"), "国内登录域: {cn}");
+        for url in [&intl, &cn] {
+            assert!(url.contains("client_id=accio-work"), "client_id: {url}");
+            assert!(url.contains("code_challenge_method=S256"), "PKCE 方法: {url}");
+            assert!(
+                url.contains("return_url=http%3A%2F%2Flocalhost%3A51123%2Fauth%2Fcallback-accio"),
+                "回调必须指向 51123 且已 urlencode: {url}"
+            );
+            assert!(url.contains("state="), "state: {url}");
+        }
+        // verifier 每次不同（不可复用），state 也是随机
+        assert_ne!(v1, v2);
+        assert_ne!(s1, s2);
+        assert_eq!(s1.len(), 32);
+    }
+
+    /// 域名选择只看 `-cn` 后缀，不看 id 是否等于 `apk-accio`。
+    ///
+    /// 这条约束是踩过的坑：`providers/apk-accio.toml` 声明 `region = "intl"`、
+    /// `login_url = https://www.accio.com`，但旧实现按「id == apk-accio → 国内域」
+    /// 判断，于是给一个**国际站**的 provider 拼了**国内站**授权页。
+    /// 两站账号不通用，用户在国际站注册的号登进去拿不到模型，而界面一切正常。
+    #[tokio::test]
+    async fn accio_domain_selection_follows_cn_suffix() {
+        for (provider, expect_cn) in [
+            // 现有配置是国际站：无后缀必须走国际域，与 region="intl" 一致。
+            ("apk-accio", false),
+            ("apk-accio-intl", false),
+            ("web-accio", false),
+            // 显式大陆站。
+            ("apk-accio-cn", true),
+            ("web-accio-cn", true),
+        ] {
+            let (url, _, _) = accio_start(provider).await.expect("授权 URL");
+            let is_cn = url.starts_with(ACCIO_LOGIN_CN);
+            assert_eq!(
+                is_cn, expect_cn,
+                "provider={provider} 期望 国内={expect_cn}，实际 URL={url}"
+            );
+        }
+    }
+
+    /// `apk-accio` 的登录域必须与它自己 toml 里的 `login_url` / `region` 一致。
+    ///
+    /// 这是「配置声明」与「运行时行为」的一致性检查：两者漂移时界面会显示国际站
+    /// 而实际跳国内站（或反过来），用户看到的是「登录成功但没有模型」。
+    #[tokio::test]
+    async fn accio_runtime_domain_matches_provider_config() {
+        let toml_text = include_str!("../../../providers/apk-accio.toml");
+        let is_cn_region = toml_text.contains("region = \"cn\"");
+        let (url, _, _) = accio_start("apk-accio").await.expect("授权 URL");
+        let runtime_cn = url.starts_with(ACCIO_LOGIN_CN);
+        assert_eq!(
+            runtime_cn, is_cn_region,
+            "apk-accio.toml 声明 region={}，但运行时跳的是 {}（URL: {url}）",
+            if is_cn_region { "cn" } else { "intl" },
+            if runtime_cn { "国内站 accio-ai.com" } else { "国际站 accio.com" },
+        );
+    }
+
+    #[test]
+    fn accio_redirect_matches_constant() {
+        // accio_exchange 里硬编码用 ACCIO_REDIRECT 换码，授权 URL 也必须用同一个值。
+        // 两处若漂移，上游会回 "redirect_uri mismatch"，而错误信息不会指出是这里。
+        assert_eq!(ACCIO_REDIRECT, "http://localhost:51123/auth/callback-accio");
+        assert_eq!(ACCIO_CLIENT_ID, "accio-work");
     }
 
     #[tokio::test]
@@ -2224,6 +2826,200 @@ mod tests {
         assert!(e.contains("公钥解析失败"), "{e}");
         let e = rsa_encrypt_password("!!!", "pw").unwrap_err();
         assert!(e.contains("base64"), "{e}");
+    }
+
+    /// 智谱：微信 408 待扫 → 405 带 code → wechat_qr_login 换 refresh_token。
+    ///
+    /// 上游那两家平台都不认本地 base（qrconnect 域名和登录接口域名都是写死的常量），
+    /// 所以这里只 mock 微信扫码那一半，换码那一半用独立函数单测（见下面 glm_exchange）。
+    #[tokio::test]
+    async fn wechat_qr_poll_once_maps_errcodes() {
+        use axum::body::Body;
+        use axum::response::Response;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let app = axum::Router::new().route(
+            "/connect/l/qrconnect",
+            axum::routing::get(move || {
+                let c = calls2.clone();
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    // 依次返回：408 待扫 → 404 已扫未确认 → 405 带 code
+                    let body = match n {
+                        0 => "window.wx_errcode=408;window.wx_code='';",
+                        1 => "window.wx_errcode=404;window.wx_code='';",
+                        _ => "window.wx_errcode=405;window.wx_code='wx-code-glm';",
+                    };
+                    Response::new(Body::from(body))
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(l, app).await });
+
+        let client = OutClient::new();
+        let base = format!("http://{addr}");
+        // 408 = 状态未变，Ok(None)，调用方翻成「等待扫码」
+        assert_eq!(
+            wechat_qr_poll_once(&client.http(), &base, "u-1").await.unwrap(),
+            None
+        );
+        // 404 = 已扫码未确认，直接给出可读提示
+        let e = wechat_qr_poll_once(&client.http(), &base, "u-1")
+            .await
+            .unwrap_err();
+        assert!(e.contains("已扫码"), "{e}");
+        // 405 + code = 成功取到 wx_code
+        let code = wechat_qr_poll_once(&client.http(), &base, "u-1")
+            .await
+            .unwrap();
+        assert_eq!(code.as_deref(), Some("wx-code-glm"));
+    }
+
+    /// 405 但 wx_code 为空是异常帧：宁可报「已扫码」也绝不拿空 code 去换凭据。
+    #[tokio::test]
+    async fn wechat_qr_poll_refuses_empty_code_on_405() {
+        use axum::body::Body;
+        use axum::response::Response;
+
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/connect/l/qrconnect",
+            axum::routing::get(|| async {
+                Response::new(Body::from("window.wx_errcode=405;window.wx_code='';"))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(l, app).await });
+
+        let client = OutClient::new();
+        let e = wechat_qr_poll_once(&client.http(), &format!("http://{addr}"), "u-1")
+            .await
+            .unwrap_err();
+        assert!(e.contains("已扫码"), "{e}");
+    }
+
+    /// 秘塔：回调按 Set-Cookie 下发 uid/sid，拼成 metaso.rs 认的 `uid-sid`。
+    #[tokio::test]
+    async fn metaso_exchange_code_reads_uid_and_sid_cookies() {
+        use axum::body::Body;
+        use axum::response::Response;
+
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/login",
+            axum::routing::get(|| async {
+                let mut r = Response::new(Body::from("{\"code\":0}"));
+                let h = r.headers_mut();
+                h.append(
+                    "set-cookie",
+                    "uid=u-42; Path=/; Domain=.metaso.cn".parse().unwrap(),
+                );
+                h.append(
+                    "set-cookie",
+                    "sid=s-99; Path=/; Domain=.metaso.cn".parse().unwrap(),
+                );
+                r
+            }),
+        );
+        tokio::spawn(async move { axum::serve(l, app).await });
+
+        let client = OutClient::new();
+        let got = metaso_exchange_code_at(&client.http(), &format!("http://{addr}"), "wx-c")
+            .await
+            .unwrap();
+        assert_eq!(got, "u-42-s-99");
+    }
+
+    /// 回调没下发 uid/sid 时必须报错，绝不能让空凭据覆盖账号池里的旧行。
+    #[tokio::test]
+    async fn metaso_exchange_code_surfaces_upstream_message() {
+        use axum::body::Body;
+        use axum::response::Response;
+
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/login",
+            axum::routing::get(|| async {
+                Response::new(Body::from(
+                    "{\"code\":1003,\"msg\":\"\\u5fae\\u4fe1\\u626b\\u7801\\u53c2\\u6570\\u6709\\u8bef,"
+                        .to_string()
+                        + "\\u8bf7\\u91cd\\u8bd5\"}",
+                ))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(l, app).await });
+
+        let client = OutClient::new();
+        let e = metaso_exchange_code_at(&client.http(), &format!("http://{addr}"), "wx-c")
+            .await
+            .unwrap_err();
+        assert!(e.contains("微信扫码参数有误"), "{e}");
+    }
+
+    /// 智谱 `has_login=false`（微信号没注册过智谱）要给可操作提示，而不是含糊的「登录失败」。
+    #[tokio::test]
+    async fn glm_exchange_code_explains_unregistered_wechat() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/user-api/user/wechat_qr_login",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "status": 0,
+                    "message": "success",
+                    "result": {"has_login": false, "wechat_union_id": "union-1"}
+                }))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(l, app).await });
+
+        let client = OutClient::new();
+        let e = glm_exchange_code_at(&client.http(), &format!("http://{addr}"), "wx-c")
+            .await
+            .unwrap_err();
+        assert!(e.contains("手机号注册"), "{e}");
+    }
+
+    /// 智谱成功路径：status=0 + has_login=true → 取 result.refresh_token。
+    #[tokio::test]
+    async fn glm_exchange_code_returns_refresh_token() {
+        use axum::body::Body;
+        use axum::response::Response;
+
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/user-api/user/wechat_qr_login",
+            axum::routing::post(|| async {
+                let mut r = Response::new(Body::from(
+                    serde_json::json!({
+                        "status": 0,
+                        "message": "success",
+                        "result": {"has_login": true, "refresh_token": "rt-glm-1", "access_token": "at-1"}
+                    })
+                    .to_string(),
+                ));
+                r.headers_mut().insert(
+                    "content-type",
+                    "application/json".parse().unwrap(),
+                );
+                r
+            }),
+        );
+        tokio::spawn(async move { axum::serve(l, app).await });
+
+        let client = OutClient::new();
+        let rt = glm_exchange_code_at(&client.http(), &format!("http://{addr}"), "wx-c")
+            .await
+            .unwrap();
+        assert_eq!(rt, "rt-glm-1");
     }
 
     #[tokio::test]
@@ -2563,12 +3359,12 @@ fn note_callback_port(port: u16, ok: bool, err: String) {
 }
 
 /// 启动 OAuth 本地回调监听：
-/// - 1455=Codex、54545=Claude、51121=Antigravity（PKCE code+state）
+/// - 1455=Codex、54545=Claude、51121=Antigravity、51123=Accio（PKCE code+state）
 /// - 18080=Trae（/authorize?refreshToken=..&loginTraceID=..，token 直传回调）
 /// - 51122=CodeArts（/authentication?secret=..&ticket_id=..，ticket 流程回调）
 /// 绑定失败仅告警（登录可用「粘贴回调 URL」兜底）。
 pub fn start_callback_listeners() {
-    for port in [1455u16, 54545u16, 51121u16, 18080u16, 51122u16] {
+    for port in [1455u16, 54545u16, 51121u16, 51123u16, 18080u16, 51122u16] {
         let bind = format!("127.0.0.1:{port}");
         tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(&bind).await {
@@ -4185,5 +4981,331 @@ async fn raccoon_qr_poll(
         }
         _ => Err("等待扫码：请用微信扫一扫二维码（打开商汤小浣熊小程序）".to_string()),
     }
+}
+
+// ═════════ 微信开放平台扫码（智谱清言 / 秘塔）═════════
+// 两家都是 open.weixin.qq.com/connect/qrconnect 标准扫码，与 Loomy 同一套协议：
+//   授权页取 uuid → /connect/qrcode/{uuid} 出图 → 长轮询 408 待扫 / 404 已扫 / 405 拿到 code。
+// 差异只在「拿到 code 之后换什么」：智谱换 refresh_token，秘塔换 uid+sid。
+// 一手来源：chatglm.cn main.*.js 的 WxLogin 调用 + user-api/user/wechat_qr_login；
+//           metaso.cn chunk 41209 的 WxQrCode 组件 + /login 回调。
+
+/// 从微信授权页 HTML 取二维码 uuid（Loomy 那份正则同样适用，只是 appid 不同）。
+/// 抽成泛型是因为三家平台的授权页结构一致，没必要抄三份。
+fn wechat_qr_uuid(html: &str) -> Option<String> {
+    loomy_wechat_uuid(html)
+}
+
+/// 通用：向微信开放平台要一张扫码二维码，返回 (uuid, 二维码 base64, mime)。
+///
+/// `redirect_uri` 必须是平台**官方登记**的回调地址，换本地域名微信会直接回参数错误页。
+async fn wechat_qr_fetch(
+    http: &reqwest::Client,
+    wechat_base: &str,
+    appid: &str,
+    redirect_uri: &str,
+    state: &str,
+) -> Result<(String, String, String), String> {
+    let auth_url = format!(
+        "{wechat_base}/connect/qrconnect?appid={appid}&scope=snsapi_login&redirect_uri={}&state={}&login_type=jssdk&self_redirect=true",
+        urlencode(redirect_uri),
+        urlencode(state)
+    );
+    let html = http
+        .get(&auth_url)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("User-Agent", LOOMY_WECHAT_UA)
+        .header("Referer", "https://open.weixin.qq.com/")
+        .send()
+        .await
+        .map_err(|e| format!("打开微信授权页失败：{e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("读微信授权页失败：{e}"))?;
+    let uuid = wechat_qr_uuid(&html).ok_or_else(|| {
+        format!(
+            "微信授权页未找到二维码 uuid（{} 字节，多半是 redirect_uri 与登记值不符）",
+            html.len()
+        )
+    })?;
+    let bytes = http
+        .get(format!("{wechat_base}/connect/qrcode/{uuid}"))
+        .timeout(std::time::Duration::from_secs(20))
+        .header("User-Agent", LOOMY_WECHAT_UA)
+        .header("Referer", "https://open.weixin.qq.com/")
+        .send()
+        .await
+        .map_err(|e| format!("下载微信二维码失败：{e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("读微信二维码失败：{e}"))?;
+    if bytes.len() < 200 {
+        return Err(format!(
+            "微信二维码过小（{} 字节），多半是错误页",
+            bytes.len()
+        ));
+    }
+    let mime = loomy_image_mime(&bytes).ok_or_else(|| "微信二维码不是已知图片格式".to_string())?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok((uuid, b64, mime.to_string()))
+}
+
+/// 通用：微信长轮询一帧，返回 Ok(Some(wx_code)) / Ok(None)=还没扫 / Err(提示文案)。
+///
+/// 微信这个长轮询在状态不变时会挂到约 25s，这里主动 5s 断开：前端 2s 一轮，
+/// 5s 超时既能把「已扫码/已确认」的延迟压到 5s 内，又不会让 /api/auth 长时间占连接。
+async fn wechat_qr_poll_once(
+    http: &reqwest::Client,
+    long_base: &str,
+    uuid: &str,
+) -> Result<Option<String>, String> {
+    let url = format!(
+        "{long_base}/connect/l/qrconnect?uuid={}&_={}",
+        urlencode(uuid),
+        now_millis()
+    );
+    let resp = http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .header("User-Agent", LOOMY_WECHAT_UA)
+        .header("Referer", "https://open.weixin.qq.com/")
+        .send()
+        .await;
+    let body = match resp {
+        Ok(r) => r.text().await.unwrap_or_default(),
+        // 主动短超时 = 状态还没变化，不是错误
+        Err(e) if e.is_timeout() => return Ok(None),
+        Err(e) => return Err(format!("轮询扫码状态失败：{e}")),
+    };
+    match loomy_wx_number(&body, "wx_errcode") {
+        Some(405) => {
+            let code = loomy_wx_quoted(&body, "wx_code");
+            if code.trim().is_empty() {
+                // 405 却没 code 是异常帧：保守当「已扫码」，绝不拿空 code 去换凭据
+                Err("已扫码：请在手机上确认登录".into())
+            } else {
+                Ok(Some(code))
+            }
+        }
+        Some(404) => Err("已扫码：请在手机上确认登录".into()),
+        Some(403) => Err("已取消登录，请重新扫码".into()),
+        Some(402) => Err("二维码已失效，请重新开始登录".into()),
+        _ => Ok(None),
+    }
+}
+
+// ── 智谱清言（chatglm.cn）──
+/// 智谱官方微信 appid（chatglm.cn 登录弹窗里写死）。
+const GLM_WECHAT_APPID: &str = "wx7b19c27985d99d60";
+/// 官方登记的回调页：它只负责把 code postMessage 给父窗口，code 本身走长轮询拿。
+const GLM_WECHAT_REDIRECT: &str = "https://chatglm.cn/WeChatLoginTransit";
+/// 智谱 chatglm 前缀（登录接口在 `{base}/user-api/user/wechat_qr_login`）。
+const GLM_CHATGLM_BASE: &str = "https://chatglm.cn/chatglm";
+/// 微信授权页 state：两家都只要求「同一个值在取码与回调间保持一致」，
+/// 智谱官方前端写死 fangState88888My，秘塔用当前页 URL；这里统一用固定串。
+const GLM_WECHAT_STATE: &str = "fangState88888My";
+
+
+/// 发起智谱微信扫码：(state 载荷, 二维码 base64, mime)。
+async fn glm_qr_start(http: &reqwest::Client) -> Result<(String, String, String), String> {
+    let (uuid, b64, mime) = wechat_qr_fetch(
+        http,
+        LOOMY_WECHAT_BASE,
+        GLM_WECHAT_APPID,
+        GLM_WECHAT_REDIRECT,
+        GLM_WECHAT_STATE,
+    )
+    .await?;
+    let payload = json!({"uuid": uuid, "long_base": LOOMY_WECHAT_LONG_BASE});
+    Ok((
+        b64url_nopad(payload.to_string().as_bytes()),
+        b64,
+        mime,
+    ))
+}
+
+/// 轮询智谱扫码；拿到 code 后换 refresh_token 返回。
+async fn glm_qr_poll(http: &reqwest::Client, state_b64: &str) -> Result<String, String> {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(state_b64)
+        .map_err(|_| "会话状态损坏，请重新开始登录".to_string())?;
+    let v: Value = serde_json::from_slice(&raw).map_err(|_| "会话状态解析失败".to_string())?;
+    let uuid = v.get("uuid").and_then(|x| x.as_str()).unwrap_or("");
+    let long_base = v
+        .get("long_base")
+        .and_then(|x| x.as_str())
+        .unwrap_or(LOOMY_WECHAT_LONG_BASE);
+    if uuid.is_empty() {
+        return Err("会话状态不完整，请重新开始登录".into());
+    }
+    let Some(code) = wechat_qr_poll_once(http, long_base, uuid).await? else {
+        return Err("等待扫码：请用微信扫一扫二维码".into());
+    };
+    glm_exchange_code(http, &code).await
+}
+
+/// 用微信 code 换智谱 refresh_token。
+///
+/// 这个接口在风控后面：只带 Content-Type 会被判 40001 bad request，
+/// 必须补上 App-Name / X-Device-Id / X-App-Platform / X-App-Version 这四件「客户端自证」。
+async fn glm_exchange_code(http: &reqwest::Client, code: &str) -> Result<String, String> {
+    glm_exchange_code_at(http, GLM_CHATGLM_BASE, code).await
+}
+
+/// `base` 指向 `{origin}/{chatglm 前缀}`；生产恒为 `https://chatglm.cn/chatglm`，
+/// 拆出来只为让 mock 能把请求指向本地端口。
+async fn glm_exchange_code_at(
+    http: &reqwest::Client,
+    base: &str,
+    code: &str,
+) -> Result<String, String> {
+    let device_id = rand_hex(16);
+    let resp = http
+        .post(format!("{base}/user-api/user/wechat_qr_login"))
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/plain, */*")
+        .header("User-Agent", LOOMY_WECHAT_UA)
+        .header("Referer", "https://chatglm.cn/")
+        .header("App-Name", "chatglm")
+        .header("X-Device-Id", &device_id)
+        .header("X-App-Platform", "pc")
+        .header("X-App-Version", "0.0.1")
+        .header("X-Request-Id", rand_hex(16))
+        .json(&json!({ "login_code": code }))
+        .send()
+        .await
+        .map_err(|e| format!("微信 code 换登录态失败：{e}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) || v.is_null() {
+        return Err(format!(
+            "微信 code 换登录态失败：HTTP {status} {}",
+            truncate(&text, 160)
+        ));
+    }
+    // 信封 {status, message, result}；status === 0 才算成功
+    let biz = v.get("status").and_then(|x| x.as_i64()).unwrap_or(-1);
+    if biz != 0 {
+        let msg = v.get("message").and_then(|x| x.as_str()).unwrap_or("上游拒绝");
+        return Err(format!("智谱登录被拒：{msg}（status={biz}）"));
+    }
+    let result = v.get("result").cloned().unwrap_or(Value::Null);
+    // has_login=false 表示这个微信号还没注册智谱：上游只回 wechat_union_id，
+    // 需要手机号绑定。面板不做绑定流程，直接给出可操作的提示。
+    if result.get("has_login").and_then(|x| x.as_bool()) != Some(true) {
+        return Err(
+            "该微信号还没注册智谱清言：请在官网用手机号注册并绑定微信后重新扫码".into(),
+        );
+    }
+    let rt = result
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if rt.is_empty() {
+        return Err("智谱登录成功但未返回 refresh_token，请重试".into());
+    }
+    Ok(rt)
+}
+
+// ── 秘塔 AI 搜索（metaso.cn）──
+/// 秘塔官方微信 appid（登录弹窗 iframe 里写死）。
+const METASO_WECHAT_APPID: &str = "wx58123abae5d5658b";
+/// 官方回调就是 /login：它按 code 换登录态并下发 uid/sid 两条 Cookie。
+const METASO_WECHAT_REDIRECT: &str = "https://metaso.cn/login";
+const METASO_BASE: &str = "https://metaso.cn";
+/// 秘塔官方前端把 state 设成当前页 URL；后端只校验「与取码时一致」，固定串即可。
+const METASO_WECHAT_STATE: &str = "https://metaso.cn/";
+
+/// 发起秘塔微信扫码：(state 载荷, 二维码 base64, mime)。
+async fn metaso_qr_start(http: &reqwest::Client) -> Result<(String, String, String), String> {
+    let (uuid, b64, mime) = wechat_qr_fetch(
+        http,
+        LOOMY_WECHAT_BASE,
+        METASO_WECHAT_APPID,
+        METASO_WECHAT_REDIRECT,
+        METASO_WECHAT_STATE,
+    )
+    .await?;
+    let payload = json!({"uuid": uuid, "long_base": LOOMY_WECHAT_LONG_BASE});
+    Ok((b64url_nopad(payload.to_string().as_bytes()), b64, mime))
+}
+
+/// 轮询秘塔扫码；拿到 code 后走 /login 回调换 uid-sid 凭据返回。
+async fn metaso_qr_poll(http: &reqwest::Client, state_b64: &str) -> Result<String, String> {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(state_b64)
+        .map_err(|_| "会话状态损坏，请重新开始登录".to_string())?;
+    let v: Value = serde_json::from_slice(&raw).map_err(|_| "会话状态解析失败".to_string())?;
+    let uuid = v.get("uuid").and_then(|x| x.as_str()).unwrap_or("");
+    let long_base = v
+        .get("long_base")
+        .and_then(|x| x.as_str())
+        .unwrap_or(LOOMY_WECHAT_LONG_BASE);
+    if uuid.is_empty() {
+        return Err("会话状态不完整，请重新开始登录".into());
+    }
+    let Some(code) = wechat_qr_poll_once(http, long_base, uuid).await? else {
+        return Err("等待扫码：请用微信扫一扫二维码".into());
+    };
+    metaso_exchange_code(http, &code).await
+}
+
+/// 用微信 code 换秘塔的 uid + sid，返回 `uid-sid`（metaso.rs 的凭据格式）。
+async fn metaso_exchange_code(http: &reqwest::Client, code: &str) -> Result<String, String> {
+    metaso_exchange_code_at(http, METASO_BASE, code).await
+}
+
+/// `base` 是 metaso 站点根；拆出来只为让 mock 能把请求指向本地端口。
+async fn metaso_exchange_code_at(
+    http: &reqwest::Client,
+    base: &str,
+    code: &str,
+) -> Result<String, String> {
+    let url = format!(
+        "{base}/login?code={}&state={}",
+        urlencode(code),
+        urlencode(METASO_WECHAT_STATE)
+    );
+    let resp = http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("User-Agent", LOOMY_WECHAT_UA)
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Referer", base)
+        .send()
+        .await
+        .map_err(|e| format!("微信 code 换登录态失败：{e}"))?;
+    let status = resp.status().as_u16();
+    let mut uid = String::new();
+    let mut sid = String::new();
+    for (k, val) in parse_set_cookies(resp.headers()) {
+        match k.as_str() {
+            "uid" => uid = val,
+            "sid" => sid = val,
+            _ => {}
+        }
+    }
+    let text = resp.text().await.unwrap_or_default();
+    if uid.is_empty() || sid.is_empty() {
+        // 业务失败也是 HTTP 200，只能读 body 的 code/msg（1003 = 微信扫码参数有误）
+        let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let msg = v
+            .get("msg")
+            .and_then(|x| x.as_str())
+            .unwrap_or_else(|| if text.is_empty() { "无响应体" } else { "见下" });
+        return Err(format!(
+            "秘塔登录失败（HTTP {status}）：{msg}{}",
+            if v.is_null() {
+                format!(" {}", truncate(&text, 120))
+            } else {
+                String::new()
+            }
+        ));
+    }
+    Ok(format!("{uid}-{sid}"))
 }
 

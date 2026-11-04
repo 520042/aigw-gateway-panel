@@ -9,6 +9,9 @@ enabled = true
 region = "cn"
 
 auth = "cookie"
+# 扫码只是「获取凭据」的路径：扫码换回 refresh_token 后同样按 cookie 形态入库。
+# paste 必须留着 —— 扫码走不通时用户仍要能自己录入 refresh_token。
+login_methods = ["paste", "qr"]
 base_url = "https://chatglm.cn/chatglm"
 format = "openai"
 login_url = "https://chatglm.cn"
@@ -21,4 +24,4 @@ upstream_kind = "chatglm"
 signer = "glm"
 biz_err = ["登录", "失效", "授权", "未登录"]
 
-notes = "glm-4-flash 免费；对话模型可带 -think/-search 变体后缀（自动映射 thinking/search 开关）。账号从旧版 accounts.json 导入。"
+notes = "glm-4-flash 免费；对话模型可带 -think/-search 变体后缀（自动映射 thinking/search 开关）。录凭据两条路：点「开始登录」用微信扫一扫（自动换 refresh_token 入库），或在官网登录后从 Cookies 复制 chatglm_refresh_token 粘贴。"

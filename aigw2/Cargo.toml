@@ -29,7 +29,12 @@ mime_guess = "2"
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-reqwest = { version = "0.12", features = ["stream", "json"] }
+# ★ 2026-10-26 补 br（Brotli）：上游清单/响应越来越多用 br 压缩
+#   （实测 ai-gateway.vercel.sh、api.kilo.ai、api.featherless.ai 都返回 br）。
+#   没有这个特性时 reqwest 不会解压 br，拿到的仍是压缩字节 —— 表现为
+#   「HTTP 200 但 error decoding response body」，三个源的模型清单一直拉不到。
+#   特性名是 brotli（不是 br）。gzip/deflate 在 0.12 也需显式开。
+reqwest = { version = "0.12", features = ["stream", "json", "brotli", "gzip", "deflate"] }
 futures-util = "0.3"
 tokio-stream = "0.1"
 rand = "0.8"

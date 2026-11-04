@@ -132,7 +132,8 @@ pub async fn chat_nonstream(
 
 /// 验活：发一条极小请求（max_tokens=1），能拿到 choices 即算通过。
 pub async fn verify(http: &HttpClient, secret: &str) -> bool {
-    let (pt_key, tenant) = split_secret(secret);
+    // 验活只关心 key 本身能不能换到回复，租户段对这条判断没有影响。
+    let (pt_key, _tenant) = split_secret(secret);
     if pt_key.is_empty() {
         return false;
     }

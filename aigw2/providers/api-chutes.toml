@@ -9,9 +9,17 @@ auth = "api_key"
 base_url = "https://llm.chutes.ai/v1"
 format = "openai"
 
-# 静态兜底清单（models_policy=live：实时 /models 取不到时按这份展示；拿到 Key 后以实时为准）
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+# ★ 2026-10-26 按上游实测重写：原表有 1 个模型上游已下架（Qwen/Qwen3-32B-TEE），用户从兜底表选到就是 404。
 models = [
-    "Qwen/Qwen3-32B-TEE",
+    "google/gemma-4-31B-turbo-TEE",
+    "Qwen/Qwen3.8-27B-TEE",
+    "deepseek-ai/DeepSeek-V3.2-TEE",
+    "zai-org/GLM-5.1-TEE",
+    "moonshotai/Kimi-K2.6-TEE",
+    "Qwen/Qwen3.6-27B-TEE",
+    "Qwen/Qwen3.5-397B-A17B-TEE",
+    "zai-org/GLM-5.2-TEE",
 ]
 models_policy = "live"
 stream_dialect = "sse_delta"

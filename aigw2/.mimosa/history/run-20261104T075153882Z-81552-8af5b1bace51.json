@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20261104T075153882Z-81552-8af5b1bace51",
+  "runStatus": "inconclusive",
+  "errors": [
+    "baseline:.: baseline_partial: baseline capture had enumeration or snapshot errors",
+    "scan:crates/aigw-store/src/secret.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:crates/aigw-relay/src/auth_login.rs: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT",
+    "scan:web/app.js: scanner_failed: spawnSync C:\\Program Files\\nodejs\\node.exe ETIMEDOUT"
+  ],
+  "target": ".",
+  "revision": "8038d310008f981c2ba59fdb53d37f263b59511f",
+  "diffHash": "4b949b51b3097c119e62726f78596dc6fb18cf0042a7ac1e633116b1e793dc8c",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-11-04T07:51:53.882Z",
+  "timing": {
+    "startedAt": "2026-11-04T07:51:51.194Z",
+    "completedAt": "2026-11-04T07:51:53.882Z",
+    "durationMs": 2688
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "baseline_partial": 1,
+      "scanner_failed": 3,
+      "project_check_failed": 4
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_c068d962-b284-44a6-afd1-00d813f2d50f-20261104T075153882Z-81552-8af5b1bace51.json"
+}

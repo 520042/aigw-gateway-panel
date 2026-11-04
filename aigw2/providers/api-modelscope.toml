@@ -9,15 +9,17 @@ auth = "api_key"
 base_url = "https://api-inference.modelscope.cn/v1"
 format = "openai"
 
-# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+# ★ 2026-10-26 按上游实测重写：原表有 7 个模型上游已下架（Qwen/Qwen3-235B-A22B-Instruct-2507 / Qwen/Qwen3-235B-A22B-Thinking-2507 / Qwen/Qwen3-30B-A3B-Instruct-2507 / Qwen/Qwen3-30B-A3B-Thinking-2507 等），用户从兜底表选到就是 404。
 models = [
-    "Qwen/Qwen3-235B-A22B-Instruct-2507",
-    "Qwen/Qwen3-235B-A22B-Thinking-2507",
-    "Qwen/Qwen3-30B-A3B-Instruct-2507",
-    "Qwen/Qwen3-30B-A3B-Thinking-2507",
-    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-    "ZhipuAI/GLM-4.6",
-    "ZhipuAI/GLM-4.5",
+    "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "deepseek-ai/DeepSeek-V4-Pro",
+    "deepseek-ai/DeepSeek-V4-Pro-0813",
+    "deepseek-ai/DeepSeek-V4.1-Flash",
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "early-access/EA-29B-A4B",
+    "MedAIBase/AntAngelMed",
+    "meituan-longcat/LongCat-Flash-Lite",
 ]
 models_policy = "live"
 stream_dialect = "sse_delta"

@@ -8,6 +8,7 @@ name = "aigw"
 path = "src/main.rs"
 
 [dependencies]
+aigw-core = { path = "../aigw-core" }
 aigw-registry = { path = "../aigw-registry" }
 aigw-server = { path = "../aigw-server" }
 aigw-store = { path = "../aigw-store" }

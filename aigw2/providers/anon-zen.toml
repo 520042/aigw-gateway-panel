@@ -14,8 +14,12 @@ auth = "anon"
 base_url = "https://opencode.ai"
 format = "openai"
 upstream_kind = "opencode"
+# ★ 2026-10-26 补：此前没有这一行，spec.models_path() 回落到默认 /models → 上游 404，
+#   于是 models_policy=live 的清单永远拉不到、只能吃静态兜底。正确路径是 /inference/v1
+#   （v1 的 /zen/v1 已停用）。实测 GET 该路径 200 → 85 个模型。
+models_path = "/inference/v1/models"
 
-# 静态免费清单：只列 2026-10-22 实测确实存在的免费档（400 Model is unavailable /
+# 静态免费清单：只列 2026-10-26 实测确实存在的免费档（400 Model is unavailable /
 # 410 ModelDeprecated 的 id 已剔除：space-bunny-free、step-5-preview-free、
 # ling-3.0-flash-fin-free、ling-3.1-flash-free、union-alpha、exo-free）。
 # 当时全部被 403 FreeTierError（车道级封锁）挡住 —— 这是上游准入策略，不是凭据问题。
@@ -29,7 +33,6 @@ models = [
   "jev-1.13-free",
   "deepseek-v4.1-flash-free",
   "glm-5.3-flash-free",
-  "minimax-m3.1-flash-free",
   # 403 RegionError（地域封锁，换出口 IP 才可用）
   "beam-free",
 ]

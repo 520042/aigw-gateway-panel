@@ -682,7 +682,15 @@ pub fn responses_to_openai(v: &Value) -> Result<Value, String> {
         "model": v.get("model").cloned().unwrap_or_else(|| json!("unknown")),
         "messages": msgs,
     });
-    let val = oa.as_object_mut().expect("object");
+    // ★ 不用 `expect("object")`：`json!({...})` 现在确实产生 Object，但这一行的
+    //   可靠性完全依赖「宏里两个字段都是正常的键值」这一**未来可能被改掉的事实**。
+    //   一旦有人往宏里加了个非对象成分（或改成别的构造），`expect` 就会在
+    //   **请求路径上 panic** —— hyper 会把这个请求变成 500 + 一条毫无信息量的
+    //   "connection closed"，用户和我们都看不出是哪出了问题。
+    //   这里改成显式分支：真不是对象时给出可定位的错误，而不是崩掉进程。
+    let Some(val) = oa.as_object_mut() else {
+        return Err("内部错误：Responses→OpenAI 转换未产出 JSON 对象".to_string());
+    };
     for (from, to) in [
         ("max_output_tokens", "max_tokens"),
         ("temperature", "temperature"),

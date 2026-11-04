@@ -43,8 +43,12 @@ fn global_cfg() -> &'static RwLock<ProxyConfig> {
     PROXY_CFG.get_or_init(|| RwLock::new(ProxyConfig::default()))
 }
 
-/// 默认数据目录（与 main.rs 同逻辑）：`AIGW_DATA_DIR` 优先，其次
-/// %LOCALAPPDATA%\aigw2\data，缺省 ./data。
+/// 默认数据目录：`AIGW_DATA_DIR` 优先，其次按平台默认。
+///
+/// ★ 平台默认必须跨平台：旧实现只认 `%LOCALAPPDATA%`，于是 **Linux/macOS 上一律
+///   退到相对路径 `./data`** —— 那不是「一个位置」，而是「跟着启动目录变」：
+///   从 systemd 启动就在 `/`、从 shell 启动就在 `$HOME`，两次启动看不到同一套账号。
+///   这一条不修，非 Windows 上根本没法正常用。
 pub fn default_data_dir() -> PathBuf {
     if let Ok(d) = std::env::var("AIGW_DATA_DIR") {
         let d = d.trim();
@@ -52,9 +56,7 @@ pub fn default_data_dir() -> PathBuf {
             return PathBuf::from(d);
         }
     }
-    std::env::var("LOCALAPPDATA")
-        .map(|l| PathBuf::from(l).join("aigw2").join("data"))
-        .unwrap_or_else(|_| PathBuf::from("./data"))
+    aigw_core::paths::data_dir()
 }
 
 /// 从 data 目录加载（不存在 → direct 默认）。
@@ -357,4 +359,16 @@ mod tests {
         assert_eq!(current().url, "http://127.0.0.1:7890");
         apply(&ProxyConfig::default());
     }
+}
+
+/// 从代理 URL 抠出 (host, port)：`http://host:port`、`http://user:pass@host:port`、
+/// 无端口按 80。面板「测试连通」与 CLI 体检预检共用一份，不许各写一套。
+pub fn parse_host_port(url: &str) -> Option<(String, u16)> {
+    let rest = url.split("://").nth(1)?;
+    let authority = rest.split('/').next()?;
+    let hostpart = authority.rsplit('@').next()?;
+    if let Some((h, p)) = hostpart.rsplit_once(':') {
+        return Some((h.to_string(), p.parse::<u16>().ok()?));
+    }
+    Some((hostpart.to_string(), 80))
 }

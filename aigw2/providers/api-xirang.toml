@@ -2,7 +2,7 @@
 # 一手来源：_refs/CherryHQ-cherry-studio packages/provider-registry/data/providers.json（version 1b44511badb438e6）
 id = "api-xirang"
 name = "天翼云 息壤"
-enabled = true
+enabled = false
 region = "cn"
 
 auth = "api_key"
@@ -17,3 +17,6 @@ stream_dialect = "sse_delta"
 login_url = "https://huiju.ctyun.cn/service/serviceGroup"
 
 notes = "天翼云息壤 MaaS，OpenAI 兼容；未找到公开模型清单，按控制台填。"
+
+# ★ 已停用（上游失效，非本面板问题）
+# 2026-10-26 体检：域名已废。/v1/models 与 /v1/chat/completions 均返回 nginx 404。天翼云息壤若换了接入地址，改 base_url 后把 enabled 改回 true。

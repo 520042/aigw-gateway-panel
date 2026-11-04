@@ -13,6 +13,9 @@ base_url = "https://copilot.tencent.com"
 chat_path = "/v2/chat/completions"
 format = "openai"
 signer = "wb"
+# ★ 上游同一个端点（copilot.tencent.com）服务国际站，靠 X-Domain 头判定站点。
+#   验活与积分查询都要带它，否则国际版账号会被判成「未授权」。
+domain = "www.workbuddy.ai"
 
 # 与国内站同一套模型族（hy4-preview / deepseek-v4.x / glm-5.x / kimi / minimax）。
 # 国际站 /v1/models 是 404，只能靠静态声明；真实能否调通取决于账号所在站点。

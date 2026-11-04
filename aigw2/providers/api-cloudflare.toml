@@ -6,7 +6,17 @@ enabled = true
 region = "intl"
 
 auth = "api_key"
-base_url = "https://api.cloudflare.com/client/v4/accounts/self/ai/v1"
+# ★ 2026-10-26：改成**占位符**而不是写死 `accounts/self/ai/v1`。
+#
+#   原因：Cloudflare Workers AI 的端点是 `/accounts/{你自己的 account id}/ai/v1`，
+#   `self` 不是有效 id —— 写死它等于「看起来能跑、实际必然失败」：清单永远 405、
+#   转发必然被上游判 account 不存在，而面板只会显示「近24h 失败」。
+#   用占位符之后，未配置时平台会明确处于「地址未配置」状态（请求时报错点名要配什么），
+#   比静默失败诚实。
+#
+#   配置方法：设置里把 cloudflare_ai_url 填成
+#   https://api.cloudflare.com/client/v4/accounts/<你的 account id>/ai/v1
+base_url = "@cloudflare_ai_url"
 format = "openai"
 
 # 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
@@ -25,4 +35,6 @@ stream_dialect = "sse_delta"
 
 login_url = "https://developers.cloudflare.com/workers-ai/"
 
-notes = "免费层每天 10,000 Neurons。key 在 Cloudflare 控制台创建。"
+notes = "免费层每天 10,000 Neurons。key 在 Cloudflare 控制台创建。\n★ 必须先在设置里填 cloudflare_ai_url（含你自己的 account id），否则本平台不可用 —— 见 base_url 上方的说明。"
+
+# ★ 2026-10-26 实测：GET /client/v4/accounts/self/ai/v1/models 返回 405（Cloudflare 该路径不接受 GET），所以 live 清单拉不到、会回落静态表。这不是端点失效——AI Gateway 的模型列表走别的形态。

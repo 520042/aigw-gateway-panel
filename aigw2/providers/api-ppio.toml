@@ -9,15 +9,16 @@ auth = "api_key"
 base_url = "https://api.ppinfra.com/v3/openai"
 format = "openai"
 
-# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示；拿到 Key 后以实时为准）
+# 静态兜底清单（models_policy=live：实时 /models 取不到时，面板/路由按这份展示）
+# ★ 2026-10-26 按上游实测重写：原表有 2 个模型上游已下架（deepseek/deepseek-v3.2 / deepseek/deepseek-v3.1），用户从兜底表选到就是 404。
 models = [
-    "deepseek/deepseek-v3.2",
-    "deepseek/deepseek-v3.1",
     "zai-org/glm-5",
     "zai-org/glm-4.7",
     "moonshotai/kimi-k2.5",
     "minimax/minimax-m2.5",
     "qwen/qwen3.5-122b-a10b",
+    "moonshotai/kimi-k3.1-pro-highspeed",
+    "moonshotai/kimi-k3.1-pro",
 ]
 models_policy = "live"
 stream_dialect = "sse_delta"

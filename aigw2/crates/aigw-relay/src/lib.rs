@@ -383,6 +383,74 @@ impl OutClient {
         let d = Sha256::digest(bytes);
         d.iter().map(|b| format!("{b:02x}")).collect()
     }
+
+    /// 会话指纹：由请求体的**稳定前缀**（system/developer 消息 + 首条 user 消息）
+    /// 确定性派生一个 UUID。多轮对话增长时该值不变。
+    ///
+    /// 为什么不能每请求随机：上游按「会话 id」给**提示词缓存**分桶。同一段对话每次换
+    /// id 就落进不同桶，长上下文下前缀缓存命中率归零，实测积分多花约 3 倍
+    /// （一手：xibai6668/Android-AI-gateway `ConversationFingerprint.kt`，其对
+    /// CodeBuddy 的 `X-Conversation-ID` 实测；同一结论也见于 simplast/workbuddy-api
+    /// 的 `deriveConversationId`，MIT）。
+    ///
+    /// 为什么也不能按凭据派生（我们旧实现的做法）：那是**按账号恒定**的值，
+    /// 官方客户端不会这样——它本身就是"这台机器所有对话用同一个会话"的网关指纹。
+    /// 正解是第三种：**按对话恒定、按账号/请求区分**。
+    ///
+    /// 只取 system + 首条 user 是因为：这两段在会话存续期内不变，正好当作会话
+    /// 身份的种子；后续轮次每秒都在长，纳入种子会让指纹每轮都变（等于随机）。
+    ///
+    /// 算不出种子时返回**固定值**而不是随机值（随机等于放弃缓存）。
+    fn stable_conversation_id(body: &[u8]) -> String {
+        const FALLBACK: &str = "00000000-0000-0000-0000-000000000000";
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return FALLBACK.to_string();
+        };
+        let Some(msgs) = v.get("messages").and_then(|m| m.as_array()) else {
+            return FALLBACK.to_string();
+        };
+        let text_of = |m: &serde_json::Value| -> String {
+            match m.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Array(parts)) => parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => String::new(),
+            }
+        };
+        let mut seed = String::new();
+        let mut first_user: Option<String> = None;
+        for m in msgs {
+            let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role == "system" || role == "developer" {
+                seed.push_str(role);
+                seed.push(':');
+                seed.push_str(&text_of(m));
+                seed.push('\n');
+            } else if role == "user" && first_user.is_none() {
+                first_user = Some(text_of(m));
+            }
+        }
+        if let Some(u) = first_user {
+            seed.push_str("user:");
+            seed.push_str(&u);
+            seed.push('\n');
+        }
+        if seed.is_empty() {
+            return FALLBACK.to_string();
+        }
+        let h = Self::sha256_hex(seed.as_bytes());
+        format!(
+            "{}-{}-{}-{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[12..16],
+            &h[16..20],
+            &h[20..32]
+        )
+    }
     /// WorkBuddy / CodeBuddy 族（signer="wb"）的官方客户端头族注入。
     ///
     /// 上游 copilot.tencent.com 的请求校验不只看 Bearer：它按一组「使用端归属 + 风控闸门 +
@@ -416,9 +484,12 @@ impl OutClient {
         //      是错的——product_name 才是 WorkBuddy AI，而 X-Product=SaaS）；
         //   3. X-IDE-Version 对话链路用 chat_ide_version（intl 5.8.4）——过旧版本号
         //      本身就是网关特征；
-        //   4. 会话头族**每次请求现生成**（会话=带连字符 UUID、消息=32 hex）——上游
-        //      不拿这些 id 存历史也不做跨请求关联，要的是「有」而不是「稳定」；
-        //      恒定派生值（旧实现从 secret 派生）本身就是网关指纹；
+        //   4. 会话头族：**conversation_id 按对话稳定派生**（见 stable_conversation_id），
+        //      消息 id / 请求 id / trace 每请求换新。旧备注写的是「上游要的是有而不是
+        //      稳定」——那条判断对**校验**成立，对**计费**不成立：上游按会话 id 给提示词
+        //      缓存分桶，每请求换 id 会让长对话的前缀缓存 0% 命中、积分多花约 3 倍
+        //      （xibai6668/Android-AI-gateway 对 CodeBuddy 的实测）。反过来按凭据恒定
+        //      派生也不对（那是网关指纹）。正解是第三种：按对话前缀恒定。
         //   5. **不再发 X-Session-ID**：官方对话请求不带它，v2 旧版发的恒定派生值
         //      是另一处网关指纹；
         //   6. 补 X-Agent-Purpose/Type、X-Private-Data=true、Origin/Referer、
@@ -444,12 +515,9 @@ impl OutClient {
         let digest = Self::sha256_hex(secret.as_bytes());
         let uid = digest[..16].to_string();
         let device = |salt: &str| Self::sha256_hex(format!("{salt}:{uid}").as_bytes())[..36].to_string();
-        // 会话头族：每请求现生成（理由见函数头 4）
-        let conversation_id = {
-            // 带连字符 UUID 形态（8-4-4-4-12）；随机来源复用 rand_hex
-            let h = Self::rand_hex(32);
-            format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
-        };
+        // 会话头族：conversation_id 按对话前缀稳定派生（理由见函数头 4 与
+        // stable_conversation_id 的文档），其余消息/请求/链路 id 每请求换新。
+        let conversation_id = Self::stable_conversation_id(_body);
         let message_id = Self::rand_hex(32);
         let conversation_request_id = Self::rand_hex(32);
         let trace = Self::rand_hex(32);
@@ -2209,11 +2277,19 @@ fn tap_passthrough(resp: reqwest::Response, in_bytes: usize) -> (BoxedByteStream
         let err_msg = stat.error_msg.clone();
         let saw_done = stat.saw_done;
         let _ = tx.send(stat).await;
-        if err_for_client.is_some() && !saw_done {
+        // ★ 用 `if let Some(err)` 而不是 `is_some()` + `unwrap()`：
+        //   后者把「这里一定有值」这条不变式交给了一个**跟判断相隔几行的 unwrap**，
+        //   中间任何改动都会让它变成流式路径上的 panic。
+        if let Some(err) = err_for_client {
+            if saw_done {
+                // 已经完整收过 [DONE]：上游把错误写进了正常完成的消息里，
+                // 不是中断，不该再补一帧 error 给客户端。
+                // （旧实现是 `is_some() && !saw_done` 的双条件，拆开后行为等价。）
+            } else {
             let frame = json!({
                 "error": {
                     "message": if err_msg.is_empty() {
-                        format!("上游流式响应中断（{:?}）", err_for_client.unwrap())
+                        format!("上游流式响应中断（{err:?}）")
                     } else {
                         err_msg
                     },
@@ -2224,6 +2300,7 @@ fn tap_passthrough(resp: reqwest::Response, in_bytes: usize) -> (BoxedByteStream
             let _ = bytes_tx
                 .send(Ok(Bytes::from(format!("data: {frame}\n\ndata: [DONE]\n\n"))))
                 .await;
+            }
         }
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(bytes_rx);
@@ -3521,6 +3598,59 @@ mod tests {
         // 车道级封锁/地域封锁是 403 而不是 401：没有凭据可重新认证。
         assert_eq!(status_for_class(ErrorClass::LaneLocked), 403);
         assert_eq!(status_for_class(ErrorClass::Region), 403);
+    }
+
+    /// 会话指纹必须**按对话稳定**：多轮增长时不变（保住提示词缓存分桶），
+    /// 但不同对话必须不同（否则所有对话挤进一个桶）。这两条一起才叫「指纹」，
+    /// 少任一条都会退化成「随机」或「全局常量」。
+    ///
+    /// 为什么值得一条常驻断言：上游按会话 id 给缓存分桶，每请求换 id 会让长对话的
+    /// 前缀缓存归零、积分多花约 3 倍——症状是「费用高但没报错」，测试才盯得住。
+    #[test]
+    fn conversation_fingerprint_is_stable_per_dialogue() {
+        let mk = |msgs: serde_json::Value| serde_json::to_vec(&serde_json::json!({
+            "model": "m", "messages": msgs
+        })).unwrap();
+
+        let turn1 = mk(serde_json::json!([
+            {"role": "system", "content": "你是助手"},
+            {"role": "user", "content": "第一个问题"}
+        ]));
+        let turn3 = mk(serde_json::json!([
+            {"role": "system", "content": "你是助手"},
+            {"role": "user", "content": "第一个问题"},
+            {"role": "assistant", "content": "答复一"},
+            {"role": "user", "content": "追问"},
+            {"role": "assistant", "content": "答复二"},
+            {"role": "user", "content": "再追问"}
+        ]));
+        // 同一段对话随轮次增长，指纹不变
+        assert_eq!(
+            OutClient::stable_conversation_id(&turn1),
+            OutClient::stable_conversation_id(&turn3),
+            "同一对话多轮时指纹必须不变（否则缓存分桶失效）"
+        );
+        // 不同对话指纹必须不同
+        let other = mk(serde_json::json!([
+            {"role": "system", "content": "你是助手"},
+            {"role": "user", "content": "完全不同的问题"}
+        ]));
+        assert_ne!(
+            OutClient::stable_conversation_id(&turn1),
+            OutClient::stable_conversation_id(&other),
+            "不同对话的指纹必须不同"
+        );
+        // 形态是带连字符的 UUID
+        let id = OutClient::stable_conversation_id(&turn1);
+        assert_eq!(id.len(), 36, "应当是 8-4-4-4-12 形态: {id}");
+        assert_eq!(id.matches('-').count(), 4, "{id}");
+        // 算不出种子 → 固定值，不能是随机值（随机等于放弃缓存）
+        let empty = mk(serde_json::json!([]));
+        assert_eq!(
+            OutClient::stable_conversation_id(&empty),
+            OutClient::stable_conversation_id(&empty)
+        );
+        assert_eq!(OutClient::stable_conversation_id(b"not json"), OutClient::stable_conversation_id(b"not json"));
     }
 }
 

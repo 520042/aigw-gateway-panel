@@ -2,7 +2,7 @@
 # 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 tokenrouter）
 id = "api-tokenrouter"
 name = "TokenRouter"
-enabled = true
+enabled = false
 region = "intl"
 
 auth = "api_key"
@@ -39,4 +39,4 @@ stream_dialect = "sse_delta"
 
 login_url = "https://www.tokenrouter.com/"
 
-notes = "Multi-vendor gateway with free slugs."
+notes = "2026-10-28 实测：api.tokenrouter.com 的 TLS 证书**间歇性过期**（连探 6 次：4 次 CERT_HAS_EXPIRED、2 次正常回 HTTP 401）——该站有多后端/多节点，其中一个证书已过期。用户配了 key 也会有约 2/3 的请求失败，故停用；等上游续期后把 enabled 改回 true。这是上游站点问题，与网络/凭据无关。"

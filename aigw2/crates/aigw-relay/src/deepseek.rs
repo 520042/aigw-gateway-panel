@@ -8,7 +8,7 @@
 //! 5. POST /v0/chat/completion          SSE 补丁流（fragments / APPEND / BATCH）
 
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
@@ -21,6 +21,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er, secs, nanos_hex, truncate};
 
 /// 网页版 API 根（实际路径是 /v0/...）。
 pub const DS_DEFAULT_BASE: &str = "https://chat.deepseek.com/api";
@@ -109,28 +110,8 @@ fn solve_pow(challenge: &str, prefix: &str, difficulty: f64) -> Result<f64, Stri
     Ok(value)
 }
 
-fn er(status: u16, msg: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError {
-        status,
-        body: msg.into(),
-        class,
-    }
-}
 
-fn secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
-fn nanos_hex() -> String {
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{n:032x}")
-}
 
 // ---------------------------------------------------------------- 凭据
 
@@ -486,13 +467,6 @@ fn est_tokens(s: &str) -> i64 {
     (cjk + other / 4).max(1)
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    let mut out: String = s.chars().take(n).collect();
-    if s.chars().count() > n {
-        out.push('…');
-    }
-    out
-}
 
 // ---------------------------------------------------------------- 补丁流解析
 
@@ -1034,7 +1008,10 @@ data: {"click_behavior":"none"}
             hosts: vec![],
             login_url: String::new(),
             notes: String::new(),
+            group: String::new(),
             chat_supported: true,
+            verify_chat: false,
+            domain: String::new(),
             region: "global".into(),
         }
     }

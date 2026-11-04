@@ -27,12 +27,37 @@ pub fn default_secret(platform: &str, home: &str, username: &str) -> String {
     format!("zcode-credential-fallback:{platform}:{home}:{username}")
 }
 
-/// Windows 本机默认 secret（%USERNAME% 语义）。
-#[cfg(windows)]
+/// 本机默认 secret（复刻上游「按当前用户推导」的兜底语义）。
+///
+/// ★ 这个函数原来带 `#[cfg(windows)]`，而测试里无条件调它 —— 于是
+///   **Linux/macOS 上 `cargo test` 直接编译失败**（E0425: cannot find function），
+///   整个 workspace 的测试跑不起来。跨平台支持的第一道门槛不是「功能对不对」，
+///   而是「测试能不能编过」，所以这里去掉平台守卫，改成在两个平台上都有意义：
+///   - Windows：`platform=win32`，home/user 取 `USERPROFILE` / `USERNAME`；
+///   - Unix：`platform` 复刻 node 的 `process.platform`（linux / darwin），
+///     home/user 取 `HOME` / `USER`。
+///
+///   取值缺失时留空串而不是 panic：这个值只是**兜底**密钥材料，
+///   真凭据解不开会有明确的 GCM 认证失败提示，不该让进程在启动期崩掉。
 pub fn default_secret_local() -> String {
-    let home = std::env::var("USERPROFILE").unwrap_or_default();
-    let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into());
-    default_secret("win32", &home, &user)
+    #[cfg(windows)]
+    {
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into());
+        default_secret("win32", &home, &user)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+        default_secret("darwin", &home, &user)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+        default_secret("linux", &home, &user)
+    }
 }
 
 /// 解密 `enc:v1:n.t.c` → 明文（tag 拼回 ct 尾部喂 GCM）。
@@ -112,10 +137,30 @@ mod tests {
             s,
             "zcode-credential-fallback:win32:C:\\Users\\zhaol:zhaol"
         );
-        // 本机形态可生成且可往返
+        // 本机形态可生成且可往返。★ 这条原本在非 Windows 上编不过
+        // （函数被 #[cfg(windows)] 挡住），现在三平台都必须能跑。
         let s2 = default_secret_local();
+        assert!(s2.starts_with("zcode-credential-fallback:"), "{s2}");
+        assert!(!s2.is_empty());
         let enc = encrypt_with_secret("x", &s2).unwrap();
         assert_eq!(decrypt_with_secret(&enc, &s2).unwrap(), "x");
+    }
+
+    /// 平台前缀必须跟着宿主走（复刻 node `process.platform` 语义）。
+    #[test]
+    fn default_secret_local_uses_host_platform_prefix() {
+        let s = default_secret_local();
+        let expect = if cfg!(windows) {
+            "win32"
+        } else if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            "linux"
+        };
+        assert!(
+            s.starts_with(&format!("zcode-credential-fallback:{expect}:")),
+            "平台前缀应为 {expect}，实际 {s}"
+        );
     }
 
     #[test]

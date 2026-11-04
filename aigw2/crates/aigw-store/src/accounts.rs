@@ -8,10 +8,6 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-fn default_true() -> bool {
-    true
-}
-
 /// 落盘视图：secret 换成 `dpapi:` 密文（DPAPI 不可用时 fail-open 退回明文），
 /// 并清掉只在内存里成立的 `unreadable` 标记。
 ///
@@ -45,7 +41,7 @@ pub struct Account {
     pub secret: String,
     #[serde(default, rename = "type")]
     pub kind: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "aigw_core::default_true")]
     pub enabled: bool,
     #[serde(default)]
     pub status: String,
@@ -55,6 +51,18 @@ pub struct Account {
     /// 哪个产品线。留空表示这个平台不区分域（绝大多数平台都是这样）。
     #[serde(default)]
     pub domain: String,
+    /// Token 限制器：每周期允许的 token 上限（in+out）。None = 不限制。
+    /// 与 `token_period_s` 一起构成账号规则，由 server 侧步进号池事实表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_limit: Option<u64>,
+    /// 限制窗口秒数（30min~24h，读侧夹）。只在 token_limit=Some 时有意义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_period_s: Option<i64>,
+    /// 登录用户的信息快照（用户名/邮箱/套餐…）。wb 族登录后 best-effort 拉取，
+    /// 解析不出就是 null —— 面板据此显示「某某的账号」，而不是只有一串 id。
+    /// 存进记录里而不是每次实时拉：面板每次刷新都打上游是不可接受的。
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub profile: serde_json::Value,
     /// 磁盘上是 `dpapi:` 密文但**本机解不开**（换了 Windows 用户 / 换了机器 / 文件被改）。
     ///
     /// 这不是持久状态，所以 `#[serde(skip)]`：每次装载都由
@@ -260,6 +268,9 @@ impl AccountStore {
                     secret: String::new(),
                     kind: kind.to_string(),
                     domain: domain.to_string(),
+                    token_limit: None,
+                    token_period_s: None,
+                    profile: serde_json::Value::Null,
                     enabled: false,
                     status: "rejected".into(),
                     unreadable: false,
@@ -296,6 +307,9 @@ impl AccountStore {
             secret: secret.to_string(),
             kind: kind.to_string(),
             domain: domain.trim().to_string(),
+            token_limit: None,
+            token_period_s: None,
+            profile: serde_json::Value::Null,
             enabled: true,
             status: "active".into(),
             unreadable: false,
@@ -351,6 +365,28 @@ impl AccountStore {
     /// 返回 `(hit, err, changed)`。名字按 (platform, name) 唯一
     /// （`add_account_with_domain` 会**覆盖同平台同名行**），所以改名撞上同平台已有行时
     /// 必须拒绝而不是合并 —— 合并会让下一次登录静默覆盖掉另一份凭据。
+    /// 设置/清除账号的 Token 限制。limit=None 清除；越界周期由号池读侧夹，
+    /// 这里只管存（存储层不做策略）。
+    /// 写入登录用户信息快照（wb 族登录后拉取）。解析不出就别写，保持 null。
+    pub fn set_profile(&self, id: &str, profile: serde_json::Value) -> bool {
+        let mut accs = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(a) = accs.iter_mut().find(|a| a.id == id) else { return false };
+        a.profile = profile;
+        drop(accs);
+        self.persist_now();
+        true
+    }
+
+    pub fn set_token_limit(&self, id: &str, limit: Option<u64>, period_s: Option<i64>) -> bool {
+        let mut accs = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(a) = accs.iter_mut().find(|a| a.id == id) else { return false };
+        a.token_limit = limit.filter(|l| *l > 0);
+        a.token_period_s = if a.token_limit.is_some() { period_s } else { None };
+        // 落盘前放锁（与 remove/rename 同一条锁纪律）：DPAPI+fsync 不许卡读侧。
+        drop(accs);
+        self.persist_now();
+        true
+    }
     pub fn rename(&self, id: &str, name: &str) -> (bool, String, bool) {
         let name = name.trim();
         if name.is_empty() {
@@ -476,6 +512,9 @@ impl AccountStore {
                 json!({
                     "id": a.id, "platform": a.platform, "name": a.name,
                     "kind": a.kind, "enabled": a.enabled, "status": a.status,
+                    "token_limit": a.token_limit,
+                    "token_period_s": a.token_period_s,
+                    "profile": a.profile,
                     // secret_len 对 unreadable 的账号没有信息量（那是 base64 密文长度），给 0
                     "secret_len": if a.unreadable { 0 } else { a.secret.len() },
                     "needs_relogin": a.unreadable,
@@ -590,6 +629,7 @@ mod tests {
     /// 中继拿到 `dpapi:...` 去发上游（secrets_for 断言失败）。
     #[test]
     fn secrets_are_encrypted_on_disk_and_plain_in_memory() {
+        crate::secret::test_key_env();
         let tmp = tempfile::tempdir().unwrap();
         let own = tmp.path().join("accounts.json");
         let legacy = tmp.path().join("legacy.json");
@@ -601,8 +641,12 @@ mod tests {
             !on_disk.contains("rt-super-secret-123"),
             "落盘文件里不能出现明文：{on_disk}"
         );
-        #[cfg(windows)]
-        assert!(on_disk.contains("dpapi:"), "Windows 上应写成 dpapi: 密文：{on_disk}");
+        // ★ 不再只认 dpapi:：DPAPI 不可用（非 Windows/受限环境）时走 aigw1:。
+        //   要守住的下线是「不能明文」，不是「必须是哪一种密文」。
+        assert!(
+            crate::secret::is_encrypted_text(&on_disk),
+            "落盘应当是已加密形式：{on_disk}"
+        );
 
         // 重新装载（模拟重启）：仍能拿到明文，且账号状态正常
         let st2 = AccountStore::load_dual(&legacy, &own);
@@ -656,6 +700,7 @@ mod tests {
     /// 不需要等到下一次登录/改账号。
     #[test]
     fn legacy_plaintext_file_is_encrypted_on_load() {
+        crate::secret::test_key_env();
         let tmp = tempfile::tempdir().unwrap();
         let own = tmp.path().join("accounts.json");
         let legacy = tmp.path().join("legacy.json");
@@ -669,8 +714,11 @@ mod tests {
         assert_eq!(st.secrets_for("web-glm"), vec![("p1".to_string(), "rt-legacy-plain".to_string())]);
         let on_disk = std::fs::read_to_string(&own).unwrap();
         assert!(!on_disk.contains("rt-legacy-plain"), "装载后磁盘上不该再有明文：{on_disk}");
-        #[cfg(windows)]
-        assert!(on_disk.contains("dpapi:"), "装载时应该已经加密：{on_disk}");
+        // 同上：只要不是明文即可（本机 DPAPI 不可用时会是 aigw1: 密文）。
+        assert!(
+            crate::secret::is_encrypted_text(&on_disk),
+            "装载时应该已经加密：{on_disk}"
+        );
         // 再装载一次仍然可用（幂等）
         let st2 = AccountStore::load_dual(&legacy, &own);
         assert_eq!(st2.secrets_for("web-glm").len(), 1);

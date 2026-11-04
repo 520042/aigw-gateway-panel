@@ -11,6 +11,7 @@
 //!    parts[].thought=true 是思考，usageMetadata.promptTokenCount / candidatesTokenCount 是用量。
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er, secs, uuid_like, truncate};
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
 use bytes::Bytes;
@@ -25,37 +26,9 @@ const CC_VERSION: &str = "2.9.1";
 const CC_PROD: &str = "https://cloudcode-pa.googleapis.com";
 const CC_DAILY: &str = "https://daily-cloudcode-pa.googleapis.com";
 
-fn er(status: u16, body: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError { status, body: body.into(), class }
-}
 
-fn secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(n).collect();
-        out.push_str("…");
-        out
-    }
-}
 
-fn uuid_like() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let mut b = [0u8; 16];
-    rng.fill(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: Vec<String> = b.iter().map(|x| format!("{:02x}", x)).collect();
-    format!("{}-{}-{}-{}-{}", h[0..4].concat(), h[4..6].concat(), h[6..8].concat(), h[8..10].concat(), h[10..16].concat())
-}
 
 fn relay_status_class(status: u16) -> ErrorClass {
     match status {
@@ -797,7 +770,10 @@ mod tests {
             hosts: vec![],
             login_url: String::new(),
             notes: String::new(),
+            group: String::new(),
             chat_supported: true,
+            verify_chat: false,
+            domain: String::new(),
             region: "global".into(),
         }
     }

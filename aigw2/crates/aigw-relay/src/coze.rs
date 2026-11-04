@@ -28,14 +28,12 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::RelayError;
+use crate::common::{er, nanos_hex};
 
 const COZE_BASE: &str = "https://api.coze.cn";
 const COZE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 const DEFAULT_USER_ID: &str = "aigw-panel";
 
-fn er(status: u16, body: String, class: ErrorClass) -> RelayError {
-    RelayError { status, body, class }
-}
 
 pub fn trunc(s: &str, n: usize) -> String {
     let t: String = s.chars().take(n).collect();
@@ -350,12 +348,6 @@ pub fn parse_event(event: &str, data: &str) -> CozeEvent {
     ev
 }
 
-fn nanos_hex() -> String {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => format!("{:x}{:04x}", d.as_nanos(), std::process::id() & 0xffff),
-        Err(_) => "0".to_string(),
-    }
-}
 
 fn now_secs() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {

@@ -12,6 +12,7 @@
 //! 登录（设备码）已在 auth_login.rs 的 qoder_start / qoder_poll 里实现，本模块只做推理。
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er, secs, uuid_like};
 use aigw_core::ErrorClass;
 use aigw_crypto::qoder::{qoder_encode, CosySession};
 use aigw_registry::ProviderSpec;
@@ -29,27 +30,8 @@ const CHAT_PATH: &str = "/algo/api/v2/service/pro/sse/agent_chat_generation?Fetc
 
 const QD_USER_TYPE: &str = "personal_professional_trial";
 
-fn er(status: u16, body: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError { status, body: body.into(), class }
-}
 
-fn secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
-fn uuid_like() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let mut b = [0u8; 16];
-    rng.fill(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: Vec<String> = b.iter().map(|x| format!("{:02x}", x)).collect();
-    format!("{}-{}-{}-{}-{}", h[0..4].concat(), h[4..6].concat(), h[6..8].concat(), h[8..10].concat(), h[10..16].concat())
-}
 
 /// 导入的 Qoder 凭据：access token（`dt-` 前缀）+ 可选身份字段。
 #[derive(Clone, Debug, Default)]

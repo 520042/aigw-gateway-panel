@@ -1,0 +1,35 @@
+# MonkeyCode（长亭科技）—— 建任务 → WebSocket 任务流 → ACP 事件（自定义 adapter）
+# 一手来源：_refs/Agent2API 的 providers/monkeycode/*（12 个模块）
+id = "web-monkeycode-intl"
+name = "MonkeyCode（国际站）"
+enabled = true
+region = "intl"
+
+# 认证是 session cookie（粘贴式；密码要 go-cap 验证码、OAuth 要短信，都不适合网关代跑）
+auth = "cookie"
+base_url = "https://monkeycode-ai.net"
+format = "openai"
+upstream_kind = "monkeycode"
+models_path = "/api/v1/users/models"
+models_policy = "live"
+stream_dialect = "sse_delta"
+
+# 静态兜底（live 拉不到时用）
+models = [
+    "siliconflow/Qwen/Qwen3.5-Plus",
+    "openai/gpt-4o",
+    "anthropic/claude-sonnet-4",
+]
+
+login_url = "https://monkeycode-ai.net"
+
+notes = """粘贴浏览器 Cookie 里的 `monkeycode_ai_session` 值即可。
+
+★ 这家是**会话式**（不是一次 HTTP 一次回答）：一次对话 = 建任务 + 挂 WebSocket
+  任务流 + 消费 ACP 事件。
+
+★ 连接建立后网关会先发 auto-approve（工具调用自动批准）再发 user-input ——
+  不发 auto-approve 的话任务会停在第一个工具调用等确认，永远不动。
+
+★ 客户端带的 tools 不会透传：上游 Agent 在 VM 内自带工具循环，建任务接口
+  没有接收工具表的字段（与参考实现一致）。"""

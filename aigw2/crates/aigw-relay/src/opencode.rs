@@ -19,6 +19,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er, truncate};
 
 /// 上游根（spec.base_url 为空或非注入地址时使用）。
 pub const OPENCODE_BASE: &str = "https://opencode.ai";
@@ -27,13 +28,6 @@ pub const OPENCODE_UA: &str = "opencode/latest/2.0.26/cli";
 
 const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-fn er(status: u16, msg: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError {
-        status,
-        body: msg.into(),
-        class,
-    }
-}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -260,6 +254,60 @@ fn apply_fingerprint(v: &mut Value) -> Vec<(String, String)> {
     alias
 }
 
+/// GLM 系模型要求历史里每条 assistant 消息都带回 reasoning_content。
+///
+/// 一手依据：luawei1/cline2api e7f6999「beam-free 系缺 reasoning_content 补齐重试」
+/// 对真实上游实测的三种失败形态——非流式 400 / 外层 500、流式 HTTP 200 却在 SSE 里
+/// 回 stream_initialization_failed。zen 免费池里的 glm-5.3-flash-free 属同一族模型，
+/// 客户端（尤其只回传 content 的）一旦带多轮历史就会撞上。
+///
+/// 补齐值优先取同消息的 reasoning / reasoning_content 字段（部分客户端两种形态都回传），
+/// 都没有才补最小非空占位符 —— 实测空字符串同样被上游拒，必须是非空文本。
+/// 返回补了几条（0 表示无需改动，便于调用方保持幂等）。
+fn inject_history_reasoning(v: &mut Value) -> usize {
+    let Some(msgs) = v.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return 0;
+    };
+    let mut fixed = 0;
+    for m in msgs.iter_mut() {
+        if m.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        let existing = m
+            .get("reasoning_content")
+            .and_then(|r| r.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if existing {
+            continue;
+        }
+        let fallback = m
+            .get("reasoning")
+            .map(reasoning_text)
+            .filter(|s| !s.is_empty());
+        let value = fallback.unwrap_or_else(|| ".".to_string());
+        if let Some(obj) = m.as_object_mut() {
+            obj.insert("reasoning_content".to_string(), json!(value));
+            fixed += 1;
+        }
+    }
+    fixed
+}
+
+/// 从客户端的 reasoning 字段取文本：字符串直接用，块数组拼各块 text。
+fn reasoning_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 /// 响应侧还原：把 choices[].message.tool_calls[].function.name 的 alias 换回原名。
 fn restore_tool_calls(v: &mut Value, alias: &[(String, String)]) {
     if alias.is_empty() {
@@ -367,6 +415,9 @@ pub async fn prepare(
         .unwrap_or("")
         .to_string();
     let alias = apply_fingerprint(&mut v);
+    // GLM 系免费模型要求多轮历史里每条 assistant 都带 reasoning_content（见函数注释）。
+    // 放在指纹处理之后：两者改的是不同字段，顺序无耦合，这里只为读起来连贯。
+    inject_history_reasoning(&mut v);
     let session = conversation_signal(&v);
     let stream = v.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
     let hs = headers(spec, &session, stream);
@@ -714,13 +765,6 @@ pub async fn verify(http: &reqwest::Client, spec: &ProviderSpec, _secret: &str) 
 }
 
 /// 截断（错误消息用）。
-fn truncate(s: &str, n: usize) -> String {
-    let mut out: String = s.chars().take(n).collect();
-    if s.chars().count() > n {
-        out.push_str("...");
-    }
-    out
-}
 
 #[cfg(test)]
 mod tests {
@@ -798,6 +842,38 @@ mod tests {
                 .map(|s| s.contains("placeholders"))
                 .unwrap_or(false)
         }));
+    }
+
+    /// GLM 系免费模型要求多轮历史里每条 assistant 带回 reasoning_content。
+    /// 缺失必须补（否则上游 400 / 流内 stream_initialization_failed）；
+    /// 已有则原样保留；补齐值不能是空串（上游拒空）。
+    #[test]
+    fn history_reasoning_is_backfilled_for_assistant_turns() {
+        let mut v = json!({
+            "model": "glm-5.3-flash-free",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "again"},
+                {"role": "assistant", "content": "yo", "reasoning_content": "已有的思考"},
+                {"role": "assistant", "content": "z", "reasoning": [{"text": "块一"}, {"text": "块二"}]},
+            ],
+        });
+        let n = inject_history_reasoning(&mut v);
+        assert_eq!(n, 2, "只有两条缺 reasoning_content 的 assistant 该被补");
+        {
+            let msgs = v["messages"].as_array().unwrap();
+            // 原样保留
+            assert_eq!(msgs[3]["reasoning_content"], json!("已有的思考"));
+            // 从块数组 reasoning 提取
+            assert_eq!(msgs[4]["reasoning_content"], json!("块一\n块二"));
+            // 没有可提取的 → 非空占位符（空串会被上游拒）
+            assert_eq!(msgs[1]["reasoning_content"], json!("."));
+            // user 消息不能被动
+            assert!(msgs[0].get("reasoning_content").is_none());
+        }
+        // 幂等：再跑一次不该继续改
+        assert_eq!(inject_history_reasoning(&mut v), 0);
     }
 
     #[test]

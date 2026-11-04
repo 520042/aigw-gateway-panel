@@ -1,0 +1,10 @@
+[package]
+name = "aigw-pool"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aigw-core = { path = "../aigw-core" }
+serde_json = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }

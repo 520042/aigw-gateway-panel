@@ -11,6 +11,7 @@
 //! 上游通常回 Bad_Request，所以 parse_cred 同时接受「整段 Cookie」形态。
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er, secs};
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
 use bytes::Bytes;
@@ -23,20 +24,7 @@ const QWEN_UA: &str =
 const QWEN_VERSION: &str = "0.2.7";
 const QWEN_BX_V: &str = "2.5.36";
 
-fn er(status: u16, body: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError {
-        status,
-        body: body.into(),
-        class,
-    }
-}
 
-fn secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 fn uuid_v4ish() -> String {
     use rand::Rng;
@@ -718,7 +706,10 @@ data: [DONE]\n\n";
             hosts: vec![],
             login_url: String::new(),
             notes: String::new(),
+            group: String::new(),
             chat_supported: true,
+            verify_chat: false,
+            domain: String::new(),
             region: "global".into(),
         }
     }

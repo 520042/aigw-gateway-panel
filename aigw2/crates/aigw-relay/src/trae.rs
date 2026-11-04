@@ -13,6 +13,7 @@
 //! 登录（跳转回调 18080 + ExchangeToken）已在 auth_login.rs 的 trae_start / trae_exchange 实现。
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er, secs};
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
 use bytes::Bytes;
@@ -32,16 +33,7 @@ const EP_CHAT: &str = "/api/agent/v3/llm_utils_chat";
 const EP_EXCHANGE: &str = "/cloudide/api/v3/trae/oauth/ExchangeToken";
 const EP_USERINFO: &str = "/cloudide/api/v3/trae/GetUserInfo";
 
-fn er(status: u16, body: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError { status, body: body.into(), class }
-}
 
-fn secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 fn rid() -> String {
     let a: u64 = rand::random();
@@ -434,10 +426,14 @@ pub fn parse_event(event: &str, data: &str) -> SoloEvent {
 }
 
 /// SOLO 业务错误码 → 错误类（照 JeffHu0912 SOLOStreamError.Kind）。
+///
+/// 3004 是 TraeCode 的账号级限流码，与 4011 同义（autumnsentiment/Trae2api-cn
+/// db189e2 "prevent empty responses and retry storms" 实测补充）。漏掉它会把一次
+/// 可换号恢复的限流判成 Rejected，该账号就被永久打成坏号。
 fn solo_code_class(code: i64) -> ErrorClass {
     match code {
         1005 | 4008 => ErrorClass::Quota,
-        4011 => ErrorClass::Rate,
+        3004 | 4011 => ErrorClass::Rate,
         _ => ErrorClass::Rejected,
     }
 }
@@ -470,7 +466,12 @@ pub fn merge_tool_calls(acc: &mut Vec<Value>, incoming: &Value) {
         if !acc[idx].is_object() {
             acc[idx] = json!({"index": idx});
         }
-        let merged = acc[idx].as_object_mut().unwrap();
+        // ★ 不用 `unwrap()`：上面刚确保是对象，但这条不变式靠「两步」维持 ——
+        //   中间任何一次改动（比如把 if 改成 is_null 判断）都会让这里 panic 在
+        //   流式解析路径上。流式解析 panic 的后果尤其糟：SSE 已握手 200，
+        //   客户端只会看到「流突然结束」，查不出原因。改成 continue 丢弃这一帧，
+        //   其余工具调用照常合并（丢一帧远好过整条流崩掉）。
+        let Some(merged) = acc[idx].as_object_mut() else { continue };
         if let Some(s) = co.get("id").and_then(|x| x.as_str()) {
             if !s.is_empty() {
                 merged.insert("id".into(), json!(s));
@@ -694,10 +695,13 @@ pub async fn chat_nonstream(
         let Some((ev_name, data)) = scan_line(&mut st, line) else { continue };
         let ev = parse_event(&ev_name, &data);
         if ev.error_code != 0 || !ev.error_message.is_empty() {
+            let class = solo_code_class(ev.error_code);
+            // 限流（3004/4011）回 429 才让下游按「换个号再来」处理；其余真错误保持 502。
+            let status = if matches!(class, ErrorClass::Rate) { 429 } else { 502 };
             return Err(er(
-                if ev.error_code == 4011 { 429 } else { 502 },
+                status,
                 format!("Trae 上游错误 {}：{}", ev.error_code, ev.error_message),
-                solo_code_class(ev.error_code),
+                class,
             ));
         }
         content.push_str(&ev.content);
@@ -1160,6 +1164,23 @@ upstream_kind = "trae"
             .unwrap_err();
         assert!(matches!(err.class, ErrorClass::Rate));
         assert!(err.body.contains("rate limited"));
+    }
+
+    /// 3004 与 4011 同为 TraeCode 的账号级限流码：必须判 Rate（换号可恢复），
+    /// 且对外回 429。判成 Rejected 会把一个只是被限流的号永久打成坏号。
+    #[tokio::test]
+    async fn trae_3004_is_a_rate_limit_not_a_rejection() {
+        assert!(matches!(solo_code_class(3004), ErrorClass::Rate));
+        let sse = "event: error\ndata: {\"code\":3004,\"message\":\"too many requests\"}\n\n";
+        let base = spawn_mock(sse).await;
+        let spec = spec_toml(&base);
+        let http = reqwest::Client::new();
+        let body = json!({"model": "glm-5.2", "messages": [{"role": "user", "content": "hi"}]});
+        let err = chat_nonstream(&http, &spec, "jwt-abc", body.to_string().as_bytes())
+            .await
+            .unwrap_err();
+        assert!(matches!(err.class, ErrorClass::Rate), "3004 必须判 Rate");
+        assert_eq!(err.status, 429, "账号级限流对外应是 429");
     }
 
     /// 续期必须能序列化回账号池 secret：trae 上游会轮换 RefreshToken，

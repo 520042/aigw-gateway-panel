@@ -40,15 +40,11 @@ pub struct AccessKey {
     #[serde(default)]
     pub allow_models: Vec<String>,
     /// 是否启用。
-    #[serde(default = "default_true")]
+    #[serde(default = "aigw_core::default_true")]
     pub enabled: bool,
     /// 备注（面板显示用，不参与校验）。
     #[serde(default)]
     pub note: String,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl AccessKey {
@@ -482,6 +478,7 @@ mod tests {
 
     #[test]
     fn keys_are_encrypted_on_disk_and_survive_reload() {
+        crate::secret::test_key_env();
         let dir = tempfile::tempdir().unwrap();
         let plain = {
             let st = KeyStore::open(dir.path());
@@ -489,7 +486,8 @@ mod tests {
         };
         let raw = std::fs::read_to_string(dir.path().join("keys.json")).unwrap();
         assert!(!raw.contains(&plain), "明文 key 不许出现在盘上：{raw}");
-        assert!(raw.contains(crate::secret::PREFIX), "应当是 dpapi: 密文");
+        // ★ 认全部已加密前缀（dpapi: 或 aigw1:）。
+        assert!(crate::secret::is_encrypted_text(&raw), "应当是已加密密文：{raw}");
 
         // 重新打开：内存里要还原成明文，鉴权照常能用
         let st2 = KeyStore::open(dir.path());

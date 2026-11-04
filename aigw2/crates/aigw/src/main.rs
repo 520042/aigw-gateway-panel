@@ -30,13 +30,16 @@ struct Cli {
     /// 跳过旧版数据导入
     #[arg(long, default_value_t = false)]
     no_import: bool,
-    /// 安装到 %LOCALAPPDATA%\aigw2（快捷方式 + 自启）后退出
+    /// 安装到用户级程序目录（快捷方式 + 自启）后退出。
+    ///
+    /// Windows：`%LOCALAPPDATA%\aigw2`；Linux/macOS：**不支持**（打印提示后退出码 1），
+    /// 请自行配 systemd / launchd 或直接用 `nohup aigw &`。
     #[arg(long, default_value_t = false)]
     install: bool,
-    /// 卸载（保留数据）
+    /// 卸载（保留数据）。仅 Windows。
     #[arg(long, default_value_t = false)]
     uninstall: bool,
-    /// 彻底卸载（删除数据）
+    /// 彻底卸载（删除数据）。仅 Windows。
     #[arg(long, default_value_t = false)]
     purge: bool,
     /// /v1/* 每分钟请求上限（全局；0 = 关闭）。超出返回 429 + Retry-After。
@@ -385,7 +388,14 @@ fn resolve_providers(cli: &Cli) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_dir())
 }
 
-/// v2 数据目录：`AIGW_DATA_DIR` 优先，其次 %LOCALAPPDATA%\aigw2\data（独立于旧版，导入只读）。
+/// v2 数据目录：`AIGW_DATA_DIR` 优先，其次平台默认（见 `aigw_core::paths`）。
+///
+/// | 平台 | 默认值 |
+/// |---|---|
+/// | Windows | `%LOCALAPPDATA%\aigw2\data` |
+/// | Linux/macOS | `$XDG_CONFIG_HOME/aigw2/data` → `~/.config/aigw2/data` |
+///
+/// 与旧版（`aigw-panel-rs`）**互相独立**，导入时只读旧目录。
 ///
 /// 环境变量覆盖让「第二个干净实例」成为可能：想在 8801 上试一份空配置，
 /// 或做便携模式（数据放 U 盘），不必动真实凭据目录。
@@ -396,12 +406,17 @@ fn data_dir() -> PathBuf {
             return PathBuf::from(d);
         }
     }
-    std::env::var("LOCALAPPDATA")
-        .map(|l| PathBuf::from(l).join("aigw2").join("data"))
-        .unwrap_or_else(|_| PathBuf::from("./data"))
+    // ★ 平台默认目录的**唯一来源**在 `aigw_core::paths`（Windows 用 `%LOCALAPPDATA%`，
+    //   Linux/macOS 用 `$XDG_CONFIG_HOME` / `~/.config`）。旧实现在这里写死了
+    //   `%LOCALAPPDATA%`，非 Windows 上会退到相对路径 `./data` —— 数据目录跟着
+    //   启动目录变，两次启动看不到同一套账号。
+    aigw_core::paths::data_dir()
 }
 
-/// 旧版数据目录：%LOCALAPPDATA%\aigw-panel-rs\data
+/// 旧版（第一代 Rust 实现）数据目录：`%LOCALAPPDATA%\aigw-panel-rs\data`。
+///
+/// ★ 这是**历史位置**，写死是对的：它描述的是「别人机器上可能存在的旧目录」，
+///   不该跟着 `aigw_core::paths` 的平台默认走。非 Windows 上恒为 `None`（无旧数据可导）。
 ///
 /// ★ 指定了 `AIGW_DATA_DIR` 就当作「独立档案」，**不做任何旧数据导入**：
 ///   否则想开一个干净实例（便携版/U 盘/测试实例）时，会把另一套安装的
@@ -580,6 +595,24 @@ async fn main() {
     }
 
     let dd = data_dir();
+    // ★ 一次性补迁：把「上游版本用过、但现在不是默认根目录」的数据搬回来。
+    //
+    //   背景：跨平台改造时把 Windows 根目录从 %LOCALAPPDATA% 改成了 %APPDATA%，
+    //   而**已部署机器的真实数据全在 Local**。只改常量的话升级即「账号全丢」。
+    //   现在根目录已改回 Local，这里再兜一层：谁曾经用 APPDATA 版本跑过、
+    //   往那边写过新数据，也能在启动时自动补回来（只补缺、不覆盖、不删源）。
+    //
+    //   ★ 放在 archive::prune **之前**：prune 会按族删旧留档，先迁移能让
+    //     真正要紧的当前文件（accounts.json / panel.db …）优先落位。
+    let migrated = aigw_core::paths::migrate_legacy_data_dir();
+    if !migrated.is_empty() {
+        tracing::warn!(
+            "数据目录补迁：从历史位置搬回 {} 个文件到 {}（{}）；源目录原样保留，确认无误后可自行删除",
+            migrated.len(),
+            dd.display(),
+            migrated.join(", ")
+        );
+    }
     // 留档文件（.bak-* / *.bad-* / *.pre-dpapi-*）按族只留最新若干份：
     // 它们是排障救命用的，但恢复备份每做一次就多一组，无限增长后数据目录没法看，
     // 备份导出也会被无谓拖大。放在开库之前跑，避免与面板运行期写入抢同一批文件。

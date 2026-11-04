@@ -9,6 +9,7 @@
 //! 3. 凭据来自 kiro.dev 社交登录或 AWS SSO OIDC（Builder ID），refreshToken 可长期续期。
 
 use crate::{RelayError, StreamStat};
+use crate::common::{er, secs, truncate, uuid_like};
 use aigw_core::ErrorClass;
 use aigw_registry::ProviderSpec;
 use bytes::Bytes;
@@ -20,27 +21,8 @@ const KIRO_TARGET: &str = "AmazonCodeWhispererStreamingService.GenerateAssistant
 const KIRO_UA: &str = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.17593 os/linux lang/rust/1.92.0 md/appVersion-2.10.0 app/AmazonQ-For-CLI";
 const KIRO_X_AMZ_UA: &str = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.17593 os/linux lang/rust/1.92.0 m/F app/AmazonQ-For-CLI";
 
-fn er(status: u16, body: impl Into<String>, class: ErrorClass) -> RelayError {
-    RelayError { status, body: body.into(), class }
-}
 
-fn secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
-fn uuid_like() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let mut b = [0u8; 16];
-    rng.fill(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: Vec<String> = b.iter().map(|x| format!("{:02x}", x)).collect();
-    format!("{}-{}-{}-{}-{}", h[0..4].concat(), h[4..6].concat(), h[6..8].concat(), h[8..10].concat(), h[10..16].concat())
-}
 
 /// 导入的 Kiro 凭据（kiro.dev 社交登录 / AWS SSO OIDC 两种形态都吃）。
 #[derive(Clone, Debug)]
@@ -135,13 +117,6 @@ pub fn normalize_model(m: &str) -> String {
     t.to_string()
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        s.chars().take(n).collect::<String>() + "…"
-    }
-}
 
 fn headers(spec: &ProviderSpec, token: &str) -> Vec<(String, String)> {
     let mut hs: Vec<(String, String)> = vec![
@@ -919,7 +894,10 @@ mod tests {
             hosts: vec![],
             login_url: String::new(),
             notes: String::new(),
+            group: String::new(),
             chat_supported: true,
+            verify_chat: false,
+            domain: String::new(),
             region: "global".into(),
         }
     }

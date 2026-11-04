@@ -2,7 +2,7 @@
 # 一手来源：C:/Users/liang.zhao/.dsh/our-free-model/rollback/src/providers/registry.json（37 个候选里的 lightning）
 id = "api-lightning"
 name = "Lightning AI"
-enabled = true
+enabled = false
 region = "intl"
 
 auth = "api_key"
@@ -19,3 +19,6 @@ stream_dialect = "sse_delta"
 login_url = "https://lightning.ai/lightning-ai/model-apis/models"
 
 notes = "Lightning AI Model APIs gateway."
+
+# ★ 已停用（上游失效，非本面板问题）
+# 2026-10-26 体检：域名已废。/api/v1/models 与 /api/v1/chat/completions 均返回 404（空响应）。已停用。

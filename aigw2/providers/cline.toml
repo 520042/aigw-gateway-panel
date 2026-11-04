@@ -6,6 +6,9 @@ base_url = "https://api.cline.bot/api/v1"
 chat_path = "/chat/completions"
 format = "openai"
 auth = "o_auth_device"
+# ★ 验活用对话探测而不是清单：Cline 的 /api/v1/models 是**公开**的
+#   （无凭据、错 key 都回 200 + 469 个模型），拿它验活等于「错 key 也通过」。
+verify_chat = true
 models_policy = "static"
 stream_dialect = "sse_delta"
 # Cline 号池常见模型（实际可用集随账号订阅浮动，可在账号页/此处调整）

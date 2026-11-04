@@ -2,7 +2,7 @@
 # 一手来源：旧版 catalog_sites（官方区/公益 relay）
 id = "free-nuomiaomiao"
 name = "糯喵喵 AI 驿站（公益）"
-enabled = true
+enabled = false
 region = "global"
 
 auth = "api_key"
@@ -16,3 +16,6 @@ stream_dialect = "sse_delta"
 login_url = "https://ai.yangwj.me/sign-up?aff=gs6u"
 
 notes = "2026-10-22 探测：/api/pricing 返回 530（源站不可用 Cloudflare HTML）；无模型清单可填。"
+
+# ★ 已停用（上游失效，非本面板问题）
+# 2026-10-26 体检：域名已废。GET /v1/models 与 POST /v1/chat/completions 均返回 HTTP 530（Cloudflare 源站不可用的错误页），不是清单路径问题——整个站点不在了。已停用，上游恢复后把 enabled 改回 true 即可。
