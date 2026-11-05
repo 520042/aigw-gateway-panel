@@ -149,3 +149,8 @@ aigw2/crates/*/src/._*
 
 # 2026-11-06 补：metapi 备份提取笔记含明文 API Key / session token，绝不能入库。
 /metapi备份提取-*.md
+
+# 2026-11-06 补：会话工具运行态不入库（.mimosa 同理）
+/.mimosa/
+/.auto/
+/.zcode/
