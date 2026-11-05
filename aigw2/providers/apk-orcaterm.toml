@@ -27,6 +27,25 @@ chat_path = "/assistant/chat"
 # 2026-10-28 对齐 Agent2API a55e1eb：上游无清单接口（DescribeAIModelList 对普通
 # 账号回空数组），清单是桌面端 1.6.4 面板逐项对证的静态表。id 带上游真实形态
 # TokenHub/ 前缀——用户在 /v1/models 里看到什么，发出去就是什么，不用猜写法。
+#
+# ★ 2026-11-04 本项目**独立复验**了「没有清单接口」这件事（用真实账号跑的）：
+#     DescribeAIModelList  → 200 + {"data":{"Response":[]}}   端点活着、鉴权通过、返回空
+#     DescribeAIModels     → api-action-not-found             动作不存在
+#     DescribeModelList    → api-action-not-found
+#     ListAIModels         → api-action-not-found
+#     lightai /v1/models、/models、/assistant/models → 都不给清单
+#   ⇒ 「刷新模型」在这里的正确形态是 **可用性探测**（逐条真发一次最小对话），
+#     不是拉清单。面板上点「刷新模型」会走 probe 分支（见
+#     crates/aigw-relay/src/orcaterm.rs 的 probe_availability）。
+#
+# ★ 同日还修掉一个长期潜伏的 bug（在此之前这家**根本没法正常对话**）：
+#     input.id 必须是**标准 UUID v4**。旧实现只把 16 字节随机数摆成 UUID 形状，
+#     没设版本位/变体位，上游严格校验后回 `[LLM_ERROR]: Invalid inputId: <那个串>`。
+#     这个错误文案极具误导性（听起来像内容问题），而建会话那一步不校验，
+#     所以现象是「验证通过、一发消息就失败」，很容易被误判成账号失效。
+#     实测定位：同一 token、同一请求体，只把 input.id 换成标准 v4 即恢复正常流式输出。
+#     修复后探测结果（真实账号）：9 个模型里 hy3 与 glm-5.3-flash 可用，
+#     hy4-preview 归为「上游未挂载」（与参考实现的人工结论一致，现在一条命令即可得出）。
 models_policy = "static"
 models = [
   "TokenHub/hy4-preview",

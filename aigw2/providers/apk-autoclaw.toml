@@ -19,6 +19,23 @@ login_url = "https://autoclaw.zhipuai.cn"
 
 notes = """粘贴 AutoClaw 的 accessToken 即可。
 
+★ 为什么没有「跳转登录」（2026-11-04 本项目实测，不是推测）：
+  桌面端确实有一条 OAuth 链路（`POST {intl}/userapi/overseasv1/{zai|google}-oauth-url`
+  → 浏览器登录 → `-oauth-login` 换 token，签名是 `md5(appId&ts&appKey)`），
+  但**国内版根本没开**，国际版又卡在阿里云风控上：
+    · 国内版 oauth-captcha-config → {enabled:false, prefix:"", scene_id:""}
+      —— 这个构建就不走 OAuth，它的登录方式只有手机验证码/密码。
+    · 国际版 oauth-captcha-config → {enabled:true, prefix:"sq51tr",
+      scene_id:"18vhnjxl", captcha_supplier:"aliyun"}
+      而 `zai-oauth-url` / `google-oauth-url` **都强制要求**
+      `ali_captcha_verify_param`：不带就回 400001「请求数据有问题」。
+  那个参数要跑阿里云 `AliyunCaptcha.js`（浏览器端 SDK）才能生成，
+  逆向它成本极高且会随上游更新失效 —— 与本项目「不做浏览器/扫码」的口径冲突
+  （同类问题见 apk-accio 的滑块验证页）。
+  ⇒ 结论：走不通，所以这里仍然是「粘贴 accessToken」。将来若上游放开验证码，
+    实现路径在参考项目 providers/autoclaw/oauth.rs 里是完整的（含三步协议与
+    navigate_uri 的 loopback 端口白名单 18432/19654/19723/53699 这些坑）。
+
 ★ 上游 2026-09-22 起对 system 提示做了白名单闸：必须以身份句开头并带 Tooling 段，
   且不能出现外来 harness 的身份句（You are ZCode / You are Claude Code 等）。
   网关会自动前置身份前缀并改写这些句子 —— 否则上游回 406（空响应体、不给原因）。

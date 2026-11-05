@@ -85,7 +85,24 @@ fn new_conversation_id() -> String {
 }
 
 fn new_seq_id() -> String {
-    let h = rand_hex(16);
+    // ★ 必须是**标准 UUID v4**：上游对 `input.id` 做版本位校验。
+    //
+    //   旧实现只是把 16 字节随机数按 8-4-4-4-12 摆成 UUID 的形状，**没设版本位
+    //   与变体位** —— 生成形如 `87803f8e-8db0-b815-7555-0f40842e65c5` 的串
+    //   （第 13 位是 `b` 不是 4、第 17 位是 `7` 不在 8/9/a/b 里）。上游因此拒收：
+    //     data: [ERROR]: [LLM_ERROR]: Invalid inputId: 87803f8e-...
+    //   这个错误极具误导性（"inputId 无效"听起来像内容有问题）。定位过程是：
+    //   同一 token、同一份请求体，只把 input.id 换成标准 v4 就恢复正常流式输出；
+    //   反过来用那个具体的非 v4 串能**稳定复现**该错误。
+    //
+    //   为什么之前没暴露：`new_conversation_id()` 的 `cid-<uuid>-orcaterm` 不校验
+    //   版本位，所以「建会话成功、发消息才失败」——现象看起来像账号或模型的问题。
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40; // version = 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant = RFC 4122
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
@@ -522,6 +539,380 @@ pub async fn verify(http: &reqwest::Client, spec: &ProviderSpec, secret: &str) -
     create_conversation(http, spec, secret).await.is_ok()
 }
 
+// ─── 模型清单（尽力而为：上游没有公开接口，按优先级试几个候选）────────
+//
+// 参考实现（Agent2API providers/orcaterm/models.rs）的结论是「上游没有清单接口，
+// 下拉项来自桌面端前端打包内置」，依据是 Web 面板的 `DescribeAIModelList` 对普通
+// 账号回空数组。但那是**Web 面板**口径，桌面端可能走别的动作 —— 所以这里不直接
+// 照搬「没有」，而是真去问一遍：拿到了就用上游的，拿不到就退回静态表。
+//
+// 为什么值得试：静态表是 2026-10-16 截图对证的，上游加了新模型我们不会知道；
+// 而用户点「刷新模型」的期待就是「看到上游现在有什么」。
+//
+// ★ 失败语义：任何一步失败都返回 Err，由调用方**保留静态表**并如实告知。
+//   绝不返回空清单 —— 那会让所有模型从 /v1/models 消失，比「刷不出新的」严重得多。
+
+/// 候选动作（按可能性排序）。每个都要求返回里能提出一个模型名数组。
+const MODEL_ACTIONS: &[&str] = &[
+    "DescribeAIModelList",
+    "DescribeAIModels",
+    "DescribeModelList",
+    "ListAIModels",
+];
+
+/// 从任意形状的响应里尽力提出模型 id 列表。
+///
+/// 上游返回形状未知（没有公开文档），所以这里按常见形态逐个试：
+/// - `{Response:{Models:[{ModelName|Name|Id:"..."}]}}`（腾讯云 CGI 惯例）
+/// - `{data:[...]}` / `{models:[...]}` / 裸数组
+/// - 元素可以是字符串，也可以是含 name/id/modelName 键的对象
+fn extract_model_ids(v: &Value) -> Vec<String> {
+    fn pick_name(item: &Value) -> Option<String> {
+        match item {
+            Value::String(s) => {
+                let t = s.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            }
+            Value::Object(o) => {
+                for k in ["ModelName", "modelName", "model_name", "Name", "name", "Id", "id", "Model", "model"] {
+                    if let Some(Value::String(s)) = o.get(k) {
+                        let t = s.trim();
+                        if !t.is_empty() {
+                            return Some(t.to_string());
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+    fn walk(v: &Value, out: &mut Vec<String>, depth: usize) {
+        if depth > 4 || !out.is_empty() {
+            return;
+        }
+        match v {
+            Value::Array(a) => {
+                for it in a {
+                    if let Some(n) = pick_name(it) {
+                        out.push(n);
+                    }
+                }
+                // 数组里套数组/对象的情形再往下走一层
+                if out.is_empty() {
+                    for it in a {
+                        walk(it, out, depth + 1);
+                    }
+                }
+            }
+            Value::Object(o) => {
+                // 优先找像「模型列表」的键
+                for k in [
+                    "Models", "models", "ModelList", "modelList", "Data", "data",
+                    "Items", "items", "List", "list", "Response", "response",
+                ] {
+                    if let Some(inner) = o.get(k) {
+                        walk(inner, out, depth + 1);
+                        if !out.is_empty() {
+                            return;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(v, &mut out, 0);
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 尽力向上游要一份模型清单。拿不到就 Err（调用方保留静态表）。
+///
+/// ★ 实测结论（2026-11-04，用项目内真实账号跑的）：
+///   · `DescribeAIModelList` 存在且鉴权通过，但对该账号返回 **`{"data":{"Response":[]}}`**
+///     —— 空数组，与参考实现 Agent2API 的结论一致（它对普通账号就是空的）；
+///   · `DescribeAIModels` 等名字回 `api-action-not-found`（动作不存在）；
+///   · lightai 网关的 `/v1/models`、`/models`、`/assistant/models` 也不给清单。
+///   ⇒ 这家**确实没有可用的清单接口**。所以「刷新模型」在这里的正确形态不是
+///     「拉上游清单」，而是 [`probe_availability`]：逐个真发一次最小对话，
+///     确认静态表里哪些模型现在真的能用。
+pub async fn fetch_models(
+    http: &reqwest::Client,
+    spec: &ProviderSpec,
+    secret: &str,
+) -> Result<Vec<String>, RelayError> {
+    let (uin, _) = claims_of(secret);
+    let mut tried: Vec<String> = Vec::new();
+
+    // ① CGI 动作（带 uin）
+    if !uin.is_empty() {
+        for action in MODEL_ACTIONS {
+            let url = format!("{CGI_BASE}/cgi/api?action={action}&uin={uin}");
+            let body = json!({ "action": action, "data": {} });
+            let rb = http
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {secret}"))
+                .header("X-Product", "orcaterm")
+                .header("User-Agent", ORCA_UA)
+                .body(body.to_string())
+                .timeout(std::time::Duration::from_secs(12));
+            match rb.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if status.is_success() {
+                        if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                            let ids = extract_model_ids(&v);
+                            if !ids.is_empty() {
+                                return Ok(ids);
+                            }
+                        }
+                    }
+                    // 200 但提不出模型名时，把响应体前 200 字带上：否则只剩一个
+                    // 「200 OK」看不出上游到底回了什么（空数组 / 错误信封 / 别的结构）。
+                    let hint = text.chars().take(200).collect::<String>().replace('\n', " ");
+                    tried.push(format!("{action}={status}[{hint}]"));
+                }
+                Err(e) => tried.push(format!("{action}=net:{e}")),
+            }
+        }
+    }
+
+    // ② lightai 网关上的 REST 候选（有些部署在这里暴露 OpenAI 风格 /models）
+    for path in ["/v1/models", "/models", "/assistant/models"] {
+        let url = format!("{}{}", base_of(spec), path);
+        let mut rb = http.get(&url).timeout(std::time::Duration::from_secs(12));
+        for (k, v) in assistant_headers(secret, &new_seq_id()) {
+            rb = rb.header(k, v);
+        }
+        match rb.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        let ids = extract_model_ids(&v);
+                        if !ids.is_empty() {
+                            return Ok(ids);
+                        }
+                    }
+                }
+                let hint = text.chars().take(200).collect::<String>().replace('\n', " ");
+                tried.push(format!("{path}={status}[{hint}]"));
+            }
+            Err(e) => tried.push(format!("{path}=net:{e}")),
+        }
+    }
+
+    Err(er(
+        0,
+        format!(
+            "上游没有可用的模型清单接口（试过 {} ），保留静态表",
+            tried.join(", ")
+        ),
+        ErrorClass::Transient,
+    ))
+}
+
+/// 探测时**单个模型**的时间预算。
+///
+/// ★ 为什么必须有：`OutClient` 只有 `connect_timeout`(10s) 与 `read_timeout`(300s)，
+///   没有整体超时。`chat_nonstream` 里「建会话 → 发消息 → `resp.text()` 读完」
+///   任一环节卡住，最坏要等满 300 秒的 read_timeout。九个模型串行下来就是 45 分钟，
+///   而用户是**点了按钮在界面等着** —— 那不是「慢」，是看起来死掉了。
+///
+/// 40 秒的依据：正常一轮最小对话（"hi" / max_tokens=1）实测 2~8 秒，
+/// 建会话 + 首帧各留一倍余量。超时的判为 [`ProbeFail::Upstream`]（抖动，稍后重试），
+/// 不冤枉成模型或账号的问题。
+const PROBE_PER_MODEL: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// 整次探测的总预算。到点就停，剩下的标成「未探测」而不是假装探过。
+///
+/// 90 秒 ≈ 9 个模型正常跑完（约 30~70 秒）再留一点余量。
+/// 没有它的话，即使每条都只耗 40 秒上限，九条串行也要 6 分钟。
+const PROBE_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// 一个候选模型的探测结论。
+#[derive(Debug, Clone)]
+pub struct ModelProbe {
+    /// 模型名（静态表里的形态，带 `TokenHub/` 前缀）。
+    pub model: String,
+    /// 现在能不能用。
+    pub usable: bool,
+    /// 失败归类，决定「这是模型的事还是账号的事」。
+    pub kind: ProbeFail,
+    /// 不能用的原因（给用户看的一句话）。
+    pub why: String,
+}
+
+/// 探测失败的三类。**这个区分是本模块的核心价值**：
+/// 把「某个模型没挂载」和「整个账号/上游坏了」混成一句话，用户会以为平台废了
+/// 而去重新登录，而实际上换一个模型就能用（或者反过来：所有模型都挂 = 该换号）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeFail {
+    /// 这个模型本身不可用（上游没挂载 / 名字不对）——换模型即可。
+    Model,
+    /// 账号或登录态层面（401/403 / Invalid inputId 这类整条链路都不通）——要重登/换号。
+    Account,
+    /// 上游抖动（5xx / 超时）——稍后重试，不代表任何一方坏了。
+    Upstream,
+}
+
+impl ProbeFail {
+    /// 从错误正文归类。判据都来自实测：
+    /// - `LLM is not loaded` → 模型没挂载（参考项目里 hy4-preview 两次实测就是这个）
+    /// - `Invalid inputId` → 上游拒了输入 id，实测该账号下**所有**模型都这样，
+    ///   说明是会话/登录态层面的问题，不是单个模型
+    /// - 401/403 / `Invalid or expired AccessToken` → 凭据
+    /// - 5xx → 上游抖动
+    fn classify(status: u16, body: &str) -> ProbeFail {
+        let low = body.to_ascii_lowercase();
+        if low.contains("not loaded") || low.contains("not mounted") || low.contains("not found the model")
+        {
+            return ProbeFail::Model;
+        }
+        if status == 401
+            || status == 403
+            || low.contains("invalid or expired accesstoken")
+            || low.contains("need_uin_and_skey")
+            || low.contains("invalid inputid")
+        {
+            return ProbeFail::Account;
+        }
+        ProbeFail::Upstream
+    }
+}
+
+/// **可用性探测**：这是本平台「刷新模型」的正确形态。
+///
+/// ── 为什么不是「拉清单」 ──────────────────────────────────
+/// 上游没有清单接口（见 [`fetch_models`] 的实测结论）。所以「刷新」能做的最有价值的
+/// 事，是拿静态表逐条去**真发一次最小对话**，回答「现在到底哪些能用」。
+/// 这恰好解决了静态表最大的痛点：`hy4-preview` 这种「面板有、上游没挂载」的档位
+/// 在参考实现里是靠人工两次实测隔 10 小时发现的 —— 现在点一下就全知道。
+///
+/// ── 成本控制 ──────────────────────────────────────────────
+/// 每条都要建会话 + 发一轮，所以：
+///   · prompt 固定为单字 "hi"，`max_tokens` 压到 1（能出首帧就算通）；
+///   · **串行**执行：并发建会话在上游看来是异常流量，也容易触发限流；
+///   · 每条独立超时（见 [`PROBE_PER_MODEL`]），单条失败不影响其余；
+///   · 整体有上限（见 [`PROBE_TOTAL_BUDGET`]），不会让用户对着转圈等到天荒地老；
+///   · 由调用方决定是否要点这个按钮（默认不自动跑）。
+///
+/// ── 早停 ──────────────────────────────────────────────────
+/// 一旦连续两条都归为 [`ProbeFail::Account`]，说明是整条链路的问题（不是模型），
+/// 剩下的不再探 —— 否则九条全打一遍既慢又给上游添无谓流量，还把同一个原因重复九遍。
+pub async fn probe_availability(
+    http: &reqwest::Client,
+    spec: &ProviderSpec,
+    secret: &str,
+    models: &[String],
+) -> Vec<ModelProbe> {
+    let mut out: Vec<ModelProbe> = Vec::with_capacity(models.len());
+    let mut consecutive_account_fails = 0usize;
+    let started = std::time::Instant::now();
+    for m in models {
+        // 总预算到点就停：剩下的标「未探测」，不假装探过（那会污染归因）。
+        if started.elapsed() >= PROBE_TOTAL_BUDGET {
+            for rest in &models[out.len()..] {
+                out.push(ModelProbe {
+                    model: rest.clone(),
+                    usable: false,
+                    kind: ProbeFail::Upstream,
+                    why: format!(
+                        "（未探测：整次探测已超过 {} 秒预算）",
+                        PROBE_TOTAL_BUDGET.as_secs()
+                    ),
+                });
+            }
+            break;
+        }
+        // 上游要的是带前缀的形态；静态表里已经是 TokenHub/xxx，直接用。
+        let body = json!({
+            "model": m,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 1,
+            "stream": false,
+        });
+        let body = serde_json::to_vec(&body).unwrap_or_default();
+        // 单条超时：卡住的那一条不能拖垮整次探测（见 PROBE_PER_MODEL 注释）。
+        let verdict = match tokio::time::timeout(
+            PROBE_PER_MODEL,
+            chat_nonstream(http, spec, secret, &body),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(er(
+                0,
+                format!(
+                    "探测超时：{} 秒内没拿到结果（上游可能卡住）",
+                    PROBE_PER_MODEL.as_secs()
+                ),
+                ErrorClass::Transient,
+            )),
+        };
+        match verdict {
+            Ok(_) => {
+                consecutive_account_fails = 0;
+                out.push(ModelProbe {
+                    model: m.clone(),
+                    usable: true,
+                    kind: ProbeFail::Model,
+                    why: String::new(),
+                });
+            }
+            Err(e) => {
+                let kind = ProbeFail::classify(e.status, &e.body);
+                if kind == ProbeFail::Account {
+                    consecutive_account_fails += 1;
+                } else {
+                    consecutive_account_fails = 0;
+                }
+                let why = match kind {
+                    ProbeFail::Model => "上游未挂载该模型（面板里有、实际不可用）".to_string(),
+                    ProbeFail::Account => {
+                        // ★ 必须带原文：归成「账号层面」是个**判断**，用户有权看到
+                        //   判断依据。只写一句结论会让人无法自查（实测踩过：上游先回
+                        //   502、再回鉴权错误，两次结论不同而界面只显示同一句话）。
+                        format!(
+                            "账号/登录态层面不通（整条链路，不是这一个模型）：HTTP {} {}",
+                            e.status,
+                            e.body.chars().take(100).collect::<String>().replace('\n', " ")
+                        )
+                    }
+                    ProbeFail::Upstream => {
+                        format!("上游抖动：{}", e.body.chars().take(100).collect::<String>())
+                    }
+                };
+                out.push(ModelProbe {
+                    model: m.clone(),
+                    usable: false,
+                    kind,
+                    why,
+                });
+                // 连续两条账号级失败 → 整条链路的问题，剩下的不再试
+                if consecutive_account_fails >= 2 {
+                    for rest in &models[out.len()..] {
+                        out.push(ModelProbe {
+                            model: rest.clone(),
+                            usable: false,
+                            kind: ProbeFail::Account,
+                            why: "（未探测：前面已确认账号层面不通）".to_string(),
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 // ─── 续期（OAuthRefreshToken）──────────────────────────────────
 //
 // ★ 之前这个平台是「粘一枚 JWT，2 小时后失效，手动重取」——那是错的。
@@ -851,3 +1242,145 @@ mod resolve_tests {
         assert_eq!(&resolve_model("gpt-9999"), "TokenHub/glm-5.3-flash");
     }
 }
+
+#[cfg(test)]
+mod probe_tests {
+    use super::{extract_model_ids, new_seq_id, ProbeFail};
+    use serde_json::json;
+
+    /// `input.id` 必须是**标准 UUID v4**，否则上游回 `Invalid inputId`。
+    ///
+    /// 这是踩过的真坑：旧实现只是把 16 字节随机数摆成 UUID 的形状，没设版本位与
+    /// 变体位。上游严格校验，于是「建会话成功、发消息失败」，而且错误文案
+    /// （"Invalid inputId"）看着像内容问题，实际是格式问题。
+    ///
+    /// 反向验证过：用旧实现产出的那种串（如 87803f8e-8db0-**b**815-**7**555-…）
+    /// 能稳定复现该错误；换成 v4 立刻恢复。
+    #[test]
+    fn seq_id_is_a_standard_uuid_v4() {
+        for _ in 0..50 {
+            let s = new_seq_id();
+            assert_eq!(s.len(), 36, "长度应为 36：{s}");
+            let parts: Vec<&str> = s.split('-').collect();
+            assert_eq!(
+                parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+                vec![8, 4, 4, 4, 12],
+                "段长应为 8-4-4-4-12：{s}"
+            );
+            assert!(
+                s.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+                "只能有十六进制与连字符：{s}"
+            );
+            // version = 4：第 13 位（第 3 段首字符）必须是 '4'
+            assert_eq!(&parts[2][..1], "4", "版本位必须是 4：{s}");
+            // variant = RFC 4122：第 17 位（第 4 段首字符）必须是 8/9/a/b
+            let v = &parts[3][..1];
+            assert!(
+                matches!(v, "8" | "9" | "a" | "b"),
+                "变体位必须是 8/9/a/b：{s}"
+            );
+        }
+        // 两次不应相同（随机性）
+        assert_ne!(new_seq_id(), new_seq_id());
+    }
+
+    /// 上游没有公开文档，所以提取要能吃下多种形态 —— 这是「探测能不能用」的地基。
+    #[test]
+    fn extract_handles_common_shapes() {
+        // 腾讯云 CGI 惯例：Response 里套数组
+        assert_eq!(
+            extract_model_ids(&json!({"data":{"Response":[{"ModelName":"a"},{"ModelName":"b"}]}})),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // OpenAI 风格：data 里是含 id 的对象
+        assert_eq!(
+            extract_model_ids(&json!({"data":[{"id":"m1"},{"id":"m2"}]})),
+            vec!["m1".to_string(), "m2".to_string()]
+        );
+        // 裸字符串数组
+        assert_eq!(
+            extract_model_ids(&json!({"models":["x","y"]})),
+            vec!["x".to_string(), "y".to_string()]
+        );
+        // 裸数组
+        assert_eq!(
+            extract_model_ids(&json!(["p","q"])),
+            vec!["p".to_string(), "q".to_string()]
+        );
+        // 各种 name 键
+        assert_eq!(
+            extract_model_ids(&json!({"list":[{"name":"n1"},{"model":"n2"}]})),
+            vec!["n1".to_string(), "n2".to_string()]
+        );
+        // 空/无模型：提不出东西（调用方据此保留静态表）
+        assert!(extract_model_ids(&json!({"data":{"Response":[]}})).is_empty());
+        assert!(extract_model_ids(&json!({"code":0})).is_empty());
+        assert!(extract_model_ids(&json!("just a string")).is_empty());
+        // 去重
+        assert_eq!(
+            extract_model_ids(&json!(["a","a","b"])),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    /// 失败归类决定「用户该做什么」，三类不能混。
+    #[test]
+    fn failure_classification_separates_model_account_upstream() {
+        // 模型没挂载 → 换个模型就行
+        assert_eq!(
+            ProbeFail::classify(502, "[LLM_ERROR] LLM(TokenHub/hy4-preview) is not loaded"),
+            ProbeFail::Model
+        );
+        assert_eq!(
+            ProbeFail::classify(400, "not found the model xyz"),
+            ProbeFail::Model
+        );
+        // 账号/登录态层面 → 要重登或换号
+        assert_eq!(ProbeFail::classify(401, "unauthorized"), ProbeFail::Account);
+        assert_eq!(ProbeFail::classify(403, "forbidden"), ProbeFail::Account);
+        assert_eq!(
+            ProbeFail::classify(502, "[LLM_ERROR]: Invalid inputId: abc-def"),
+            ProbeFail::Account
+        );
+        assert_eq!(
+            ProbeFail::classify(502, "Invalid or expired AccessToken"),
+            ProbeFail::Account
+        );
+        assert_eq!(
+            ProbeFail::classify(502, "NEED_UIN_AND_SKEY"),
+            ProbeFail::Account
+        );
+        // 其余 5xx / 网络 → 上游抖动，等会儿再试
+        assert_eq!(ProbeFail::classify(504, "gateway timeout"), ProbeFail::Upstream);
+        assert_eq!(ProbeFail::classify(0, "network: connection reset"), ProbeFail::Upstream);
+        // 超时（status=0 + 我们自己的文案）也归抖动，不能冤枉成模型或账号问题
+        assert_eq!(
+            ProbeFail::classify(0, "探测超时：40 秒内没拿到结果（上游可能卡住）"),
+            ProbeFail::Upstream
+        );
+    }
+
+    /// 超时预算必须让「最坏情况」有界 —— 这是用户对着界面等待的硬约束。
+    ///
+    /// 背景：`OutClient` 只有 connect_timeout(10s) + read_timeout(300s)，没有整体超时。
+    /// 没有本模块的两个预算时，9 个模型串行的最坏耗时是 9 × 300s = 45 分钟。
+    #[test]
+    fn probe_budgets_bound_the_worst_case() {
+        use super::{PROBE_PER_MODEL, PROBE_TOTAL_BUDGET};
+        // 单条预算必须明显小于 read_timeout(300s)，否则等于没设
+        assert!(
+            PROBE_PER_MODEL.as_secs() < 300,
+            "单条预算 {}s 不小于 read_timeout，起不到保护作用",
+            PROBE_PER_MODEL.as_secs()
+        );
+        // 总预算要能覆盖「9 条正常跑完」，但别大到用户以为卡死
+        assert!(
+            PROBE_TOTAL_BUDGET.as_secs() >= 60 && PROBE_TOTAL_BUDGET.as_secs() <= 180,
+            "总预算 {}s 超出合理区间（60~180）",
+            PROBE_TOTAL_BUDGET.as_secs()
+        );
+        // 总预算不必等于 条数×单条 —— 单条超时是上界，正常每条只要几秒
+        assert!(PROBE_TOTAL_BUDGET < PROBE_PER_MODEL * 9, "总预算应小于逐条上限的简单累加");
+    }
+}
+

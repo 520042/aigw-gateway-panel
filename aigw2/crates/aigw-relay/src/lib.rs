@@ -1522,6 +1522,14 @@ pub fn classify_verify_probe(status: u16, body: &str) -> VerifyOutcome {
         spec: &ProviderSpec,
         secret: &str,
     ) -> Result<Vec<String>, RelayError> {
+        // ★ orcaterm 的清单不在 base_url 的常规 REST 路径上（它有两套网关：对话走
+        //   lightai、CGI 动作走 api.orcaterm.cloud.tencent.com），而且上游没有公开的
+        //   清单接口文档。这里交给专门的 probe：它会按优先级试若干候选端点，
+        //   拿不到就 Err（调用方保留静态表）。走通用路径只会打到 lightai 的
+        //   /models 上拿一个 404，反而看不出「到底试过哪些」。
+        if spec.upstream_kind == "orcaterm" {
+            return orcaterm::fetch_models(&self.http, spec, secret).await;
+        }
         let url = format!("{}{}", spec.base_url, spec.models_path());
         let rb = Self::apply_headers(self.http.get(&url), spec, secret, "", &[])
             .timeout(Duration::from_secs(12));

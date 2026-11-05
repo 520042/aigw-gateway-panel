@@ -674,6 +674,28 @@ impl Pool {
         }
     }
 
+    /// 这些候选账号里，有几个只是**并发已满**（而不是冷却/触顶/拉黑）。
+    ///
+    /// ★ 为什么需要单独判一档：`acquire` 在上限满时返回 `None`，上层原本把它和
+    ///   「账号不可用」混成同一句话 →「账号当前全部不可用（冷却中或凭据失效隔离）」。
+    ///   实测 8 并发打一个免密车道时 5 个请求收到这句 —— 而真实原因只是
+    ///   `max_inflight`（默认 2）满了，**账号完全健康**。用户按提示去「重新登录」
+    ///   不会有任何帮助，反而会以为凭据坏了。
+    ///
+    ///   并发满的正确处置是「稍后重试」（通常几十毫秒后就空出来），
+    ///   与「凭据失效要重登」是两件完全不同的事。
+    pub fn inflight_full_count(&self, accounts: &[String], platform: &str, model: &str) -> usize {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let cap = self.max_inflight();
+        accounts
+            .iter()
+            .filter(|a| {
+                let key = (platform.to_string(), (*a).clone(), model.to_string());
+                g.inflight.get(&key).copied().unwrap_or(0) >= cap
+            })
+            .count()
+    }
+
     /// 上报结果：成功清冷却/拉黑；失败按归因冷却或拉黑。
     /// 判定只依赖 `class`。早期版本还有一个 waf_fingerprint 形参（HTTP 200 + 业务码
     /// 失败 = 上游假成功），但拉黑改由 class 统一决定后它只剩一条消警语句 —— 留着会
@@ -1574,6 +1596,49 @@ mod tests {
         drop(l1);
         let l3 = pool.acquire("p", "a", "m");
         assert!(l3.is_some(), "Drop 后应释放名额");
+    }
+
+    /// 「并发已满」必须能被单独识别出来，不能与「账号不可用」混为一谈。
+    ///
+    /// 实测踩过：8 并发打一个免密车道时，5 个请求收到
+    /// 「平台 xxx 的账号当前全部不可用（冷却中或凭据失效隔离）→ 请到账号页重新登录」，
+    /// 而真实原因只是 max_inflight（默认 2）满了、**账号完全健康**。
+    /// 用户照提示去重登毫无帮助，还会以为凭据坏了。
+    ///
+    /// `inflight_full_count` 就是给上层做这个区分用的：它只数「并发满」，
+    /// 不看冷却/触顶/拉黑。
+    #[test]
+    fn inflight_full_count_isolates_concurrency_from_unavailability() {
+        let pool = Pool::new();
+        let accts = vec!["a".to_string()];
+        // 一开始没人占名额
+        assert_eq!(pool.inflight_full_count(&accts, "p", "m"), 0);
+        // 占满（默认上限 2）
+        let l1 = pool.acquire("p", "a", "m").expect("1");
+        let l2 = pool.acquire("p", "a", "m").expect("2");
+        assert_eq!(
+            pool.inflight_full_count(&accts, "p", "m"),
+            1,
+            "占满后应能识别出「这个号并发满」"
+        );
+        // 释放一个就回到 0
+        drop(l1);
+        drop(l2);
+        assert_eq!(pool.inflight_full_count(&accts, "p", "m"), 0);
+        // 换了模型就不算同一个 key
+        let _l = pool.acquire("p", "a", "m").expect("3");
+        assert_eq!(
+            pool.inflight_full_count(&accts, "p", "other-model"),
+            0,
+            "在飞计数是按 (平台,账号,模型) 分开算的"
+        );
+        // 多账号：只数满了的那些
+        let two = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            pool.inflight_full_count(&two, "p", "m"),
+            0,
+            "a 只占 1 路（未满），b 没占 —— 一个都不该算满"
+        );
     }
 
     /// 锁中毒不能让号池「假装没有账号」或「漏还在飞计数」。

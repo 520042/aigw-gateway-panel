@@ -222,7 +222,7 @@ pub(crate) async fn backup_restore(_st: State<AppState>, body: Bytes) -> Respons
     //   放 async handler 里做会把 tokio worker 占住，全站对话跟着卡。
     let ts = now_ms();
     let data = body.to_vec();
-    match tokio::task::spawn_blocking(move || restore_into_at(&dd, &data, ts)).await {
+    let resp = match tokio::task::spawn_blocking(move || restore_into_at(&dd, &data, ts)).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("备份恢复任务异常：{e}");
@@ -231,6 +231,69 @@ pub(crate) async fn backup_restore(_st: State<AppState>, body: Bytes) -> Respons
                 Json(json!({"ok": false, "message": format!("恢复失败（内部任务异常）：{e}")})),
             )
                 .into_response()
+        }
+    };
+    // ★ 恢复只把文件写回磁盘，**不会**更新已经加载进内存的运行时配置。
+    //
+    //   实测踩过：把 think_tags.json 恢复成 `{"mode":"strip"}` 之后，磁盘上是对的，
+    //   但 `/api/think_tags` 仍回 `mode: null` —— 面板显示「未启用」，实际行为要等
+    //   下次重启才变。用户会以为「恢复没生效」，然后在两套状态之间反复折腾。
+    //
+    //   所以恢复成功后把这几项全局配置按磁盘内容重新加载一遍。只重载「纯配置」类
+    //   （都是幂等的读文件 + 设全局），不碰账号/密钥等由各自 store 管理的状态
+    //   （它们有自己的加载路径与锁，混进来只会引入竞态）。
+    if resp.status().is_success() {
+        reload_runtime_cfgs();
+    }
+    resp
+}
+
+/// 恢复备份后，把「纯配置」类的运行时状态按磁盘内容重新加载。
+///
+/// 为什么需要单独一步：这些模块把配置缓存在各自的全局（`Mutex`/`OnceLock`）里，
+/// 启动时读一次文件就再也不看磁盘了。恢复只改文件，它们自然还是旧值。
+///
+/// 每一项都是「读文件 → 覆盖全局」，幂等、无副作用；读不到就保持现状（不 panic）。
+fn reload_runtime_cfgs() {
+    let dd = aigw_relay::proxy::default_data_dir();
+
+    // think_tags：`{enabled, mode}` 里的 mode
+    if let Ok(txt) = std::fs::read_to_string(dd.join("think_tags.json")) {
+        if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+            let mode = v.get("mode").and_then(|x| x.as_str());
+            aigw_relay::think_tags::apply_cfg(mode);
+            tracing::info!(mode = ?mode, "恢复备份后已重载 think_tags 配置");
+        }
+    }
+
+    // history_trim
+    if let Ok(txt) = std::fs::read_to_string(dd.join("history_trim.json")) {
+        if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+            let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+            let cfg = aigw_relay::history_trim::TrimCfg::from_json(&v);
+            aigw_relay::history_trim::apply_cfg(&cfg, enabled);
+            tracing::info!(enabled, "恢复备份后已重载 history_trim 配置");
+        }
+    }
+
+    // sysprompt：用 load() 解析磁盘内容，再 apply_cfg 覆盖全局
+    let sp = aigw_relay::sysprompt::load(&dd);
+    aigw_relay::sysprompt::apply_cfg(&sp);
+    tracing::info!("恢复备份后已重载 sysprompt 配置");
+
+    // model_map：load() 返回 (规则, keep_upstream)，用它覆盖全局（不要调
+    // save_and_apply —— 那会反过来把刚恢复的文件再写一遍）
+    let (rules, keep) = aigw_relay::model_map::load(&dd);
+    aigw_relay::model_map::apply_cfg(&rules, keep);
+    tracing::info!(rules = rules.len(), keep, "恢复备份后已重载 model_map 配置");
+
+    // param_override
+    if let Ok(txt) = std::fs::read_to_string(dd.join("param_override.json")) {
+        if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+            let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+            let cfg = aigw_relay::param_override::ParamOverride::from_json(&v);
+            aigw_relay::param_override::apply_cfg(&cfg, enabled);
+            tracing::info!(enabled, "恢复备份后已重载 param_override 配置");
         }
     }
 }
