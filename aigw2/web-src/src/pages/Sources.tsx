@@ -45,8 +45,8 @@ const isAuto = (p: Platform) => ['one_click', 'qr', 'device', 'oauth'].includes(
 
 type Filter = 'all' | 'auto' | 'qr' | 'bad';
 
-export function Sources({ platforms }: { platforms: PlatformResponse | null }) {
-  // 平台清单由框架层拉取一次传入（写操作走 /api/* 后端直改，本页不需要 reload）。
+export function Sources({ platforms, refresh }: { platforms: PlatformResponse | null; refresh: () => void }) {
+  // 平台清单由框架层拉取一次传入；保存凭据/导入后调 refresh() 让框架层重取。
   const [filter, setFilter] = useState<Filter>('all');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState<string | null>(null);
@@ -161,14 +161,14 @@ export function Sources({ platforms }: { platforms: PlatformResponse | null }) {
         </div>
 
         <div className="src-detail-col">
-          {current ? <PlatformDetail p={current} /> : <div className="empty">没有匹配的平台</div>}
+          {current ? <PlatformDetail p={current} onChanged={refresh} /> : <div className="empty">没有匹配的平台</div>}
         </div>
       </div>
     </>
   );
 }
 
-function PlatformDetail({ p }: { p: Platform }) {
+function PlatformDetail({ p, onChanged }: { p: Platform; onChanged: () => void }) {
   const a = accessOf(p);
   return (
     <>
@@ -195,13 +195,13 @@ function PlatformDetail({ p }: { p: Platform }) {
             const v = el?.value.trim();
             if (!v) { alert('请先粘贴凭据'); return; }
             api.post('/api/auth', { action: 'save', platform: p.id, secret: v })
-              .then(() => alert('凭据已保存'))
+              .then(() => { alert('凭据已保存'); onChanged(); })
               .catch((e: unknown) => alert('保存失败：' + (e instanceof Error ? e.message : String(e))));
           }}>保存凭据</button>
           {a.kind === 'one_click' && (
             <button className="btn" onClick={() => {
               api.post('/api/auth', { action: 'save', platform: p.id, from_client: true })
-                .then((r: unknown) => alert(JSON.stringify(r)))
+                .then((r: unknown) => { alert(JSON.stringify(r)); onChanged(); })
                 .catch((e: unknown) => alert('导入失败：' + (e instanceof Error ? e.message : String(e))));
             }}>从本机客户端导入</button>
           )}

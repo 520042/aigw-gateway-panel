@@ -71,12 +71,16 @@ export function App() {
     return t === 'light' || t === 'dark' ? t : 'auto';
   });
 
-  useEffect(() => {
-    let alive = true;
+  // ★ 供子页写操作后刷新平台清单（保存凭据 / 导入 / 启停平台都会改变它）。
+  //   清单提升到框架层后，子页自己没有数据源，刷新必须走这个句柄。
+  const refreshPlatforms = () => {
     api.get<PlatformResponse>('/api/platforms')
-      .then((d) => { if (alive) setPlatforms(d); })
+      .then((d) => setPlatforms(d))
       .catch(() => {});
-    return () => { alive = false; };
+  };
+
+  useEffect(() => {
+    refreshPlatforms();
   }, []);
 
   useEffect(() => {
@@ -98,7 +102,9 @@ export function App() {
     };
     load();
     const t = setInterval(load, 15_000);
-    return () => { alive = false; clearInterval(t); };
+    const onVis = () => { if (document.visibilityState === 'visible') load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { alive = false; clearInterval(t); document.removeEventListener('visibilitychange', onVis); };
   }, []);
 
   const go = (id: ViewId) => { location.hash = '#/' + id; };
@@ -152,7 +158,7 @@ export function App() {
 
         <div className="view-wrap">
           {view === 'overview' && <Overview health={health} platforms={platforms} />}
-          {view === 'sources' && <Sources platforms={platforms} />}
+          {view === 'sources' && <Sources platforms={platforms} refresh={refreshPlatforms} />}
           {view === 'accounts' && <Accounts />}
           {view === 'usage' && <UsagePage />}
           {view === 'logs' && <Logs />}
