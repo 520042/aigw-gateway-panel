@@ -170,6 +170,38 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
 
 function PlatformDetail({ p, onChanged }: { p: Platform; onChanged: () => void }) {
   const a = accessOf(p);
+  // 保存/导入的即时状态：验活要打上游（实测最长 15s+），alert 是模态的、
+  // 会把整页冻住——期间必须让用户看到「正在验活」，否则以为卡死。
+  const [credMsg, setCredMsg] = useState<{ tone: 'ok' | 'err' | 'busy'; text: string } | null>(null);
+  const saveCred = (fromClient: boolean) => {
+    const el = document.getElementById('cred-' + p.id) as HTMLInputElement | null;
+    if (!fromClient) {
+      const v = el?.value.trim();
+      if (!v) { setCredMsg({ tone: 'err', text: '请先粘贴凭据' }); return; }
+    }
+    setCredMsg({ tone: 'busy', text: fromClient ? '正在从本机客户端读取凭据并验活…' : '正在保存并验活…' });
+    const req = fromClient
+      ? api.post<{ ok?: boolean; message?: string; source?: string; credential_replaced?: boolean; verified?: boolean }>(
+          '/api/auth', { action: 'save', platform: p.id, from_client: true })
+      : api.post<{ ok?: boolean; message?: string; source?: string; credential_replaced?: boolean; verified?: boolean }>(
+          '/api/auth', { action: 'save', platform: p.id, secret: el?.value.trim() ?? '' });
+    req.then((r) => {
+      if (r.ok === false) {
+        setCredMsg({ tone: 'err', text: '失败：' + (r.message ?? '未知原因') });
+        return;
+      }
+      const parts: string[] = [];
+      if (fromClient && r.source) parts.push(`来源：${r.source}`);
+      parts.push(r.credential_replaced ? '已替换既有凭据' : '已作为新账号存入');
+      if (r.verified === true) parts.push('验活通过 ✓');
+      else if (r.verified === false) parts.push('⚠ 验活未通过，凭据可能无效（可用一次真实对话再确认）');
+      setCredMsg({ tone: r.verified === false ? 'err' : 'ok', text: parts.join(' · ') });
+      if (!fromClient && el) el.value = '';
+      onChanged();
+    }).catch((e: unknown) => {
+      setCredMsg({ tone: 'err', text: '失败：' + (e instanceof Error ? e.message : String(e)) });
+    });
+  };
   return (
     <>
       <Card title={<span>{p.name}<span className="faint mono"> {p.id}</span></span>}>
@@ -190,44 +222,12 @@ function PlatformDetail({ p, onChanged }: { p: Platform; onChanged: () => void }
         {p.notes && <div className="note">{p.notes}</div>}
         <div className="row">
           <input className="q mono" placeholder="粘贴凭据…" id={'cred-' + p.id} />
-          <button className="btn pri" onClick={() => {
-            const el = document.getElementById('cred-' + p.id) as HTMLInputElement | null;
-            const v = el?.value.trim();
-            if (!v) { alert('请先粘贴凭据'); return; }
-            api.post<{ ok?: boolean; message?: string; credential_replaced?: boolean; verified?: boolean }>(
-              '/api/auth', { action: 'save', platform: p.id, secret: v },
-            )
-              .then((r) => {
-                // 区分「新增账号」与「替换已有凭据」：同名手填账号是 upsert，
-                // 保存后账号数不变是正常行为，必须说清，否则用户以为没存上。
-                const action = r.credential_replaced ? '已替换该平台的既有凭据' : '已作为新账号存入账号池';
-                const verified = r.verified === true ? '，验活通过'
-                  : r.verified === false ? '（注意：验活未通过，保存的凭据可能无效）' : '';
-                alert(`${action}${verified}`);
-                if (el) el.value = '';
-                onChanged();
-              })
-              .catch((e: unknown) => alert('保存失败：' + (e instanceof Error ? e.message : String(e))));
-          }}>保存凭据</button>
+          <button className="btn pri" onClick={() => saveCred(false)}>保存凭据</button>
           {a.kind === 'one_click' && (
-            <button className="btn" onClick={() => {
-              api.post<{ ok?: boolean; message?: string; source?: string; credential_replaced?: boolean; verified?: boolean }>(
-                '/api/auth', { action: 'save', platform: p.id, from_client: true },
-              )
-                .then((r) => {
-                  if (r.ok === false) { alert('导入失败：' + (r.message ?? '未知原因')); return; }
-                  const parts: string[] = [];
-                  if (r.source) parts.push(`来源：${r.source}`);
-                  parts.push(r.credential_replaced ? '已替换既有凭据' : '已作为新账号存入');
-                  if (r.verified === true) parts.push('验活通过');
-                  else if (r.verified === false) parts.push('⚠ 验活未通过，凭据可能无效');
-                  alert(`导入成功（${parts.join(' · ')}）`);
-                  onChanged();
-                })
-                .catch((e: unknown) => alert('导入失败：' + (e instanceof Error ? e.message : String(e))));
-            }}>从本机客户端导入</button>
+            <button className="btn" onClick={() => saveCred(true)}>从本机客户端导入</button>
           )}
         </div>
+        {credMsg && <Note tone={credMsg.tone === 'ok' ? 'ok' : credMsg.tone === 'err' ? 'err' : undefined}>{credMsg.text}</Note>}
       </Card>
 
       <Card title={<span>模型 · 已启用 {p.models_on}/{p.models_n}</span>}>
