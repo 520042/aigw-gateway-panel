@@ -59,6 +59,23 @@ function viewFromHash(): ViewId {
   return valid.includes(h as ViewId) ? (h as ViewId) : 'overview';
 }
 
+/**
+ * localStorage 防御性读取（借鉴 Agent2API table-shell 的 readPageSize）：
+ * · try/catch 全包 —— 隐私模式 / 存储被禁时 getItem 直接 throw，
+ *   裸调会把整棵 React 树在 useState 初始化里炸掉（首屏白屏）。
+ * · 存量值必须**还在 allowed 列表里**才采纳：合法值集合改动后（比如删掉
+ *   一个主题档），旧存档值会让下拉框缺项而界面仍用它 —— 表现为「无法解释」。
+ * · 刻意不提供写封装：写失败只影响下次打开，当场仍生效，不值得包一层。
+ */
+function loadPref(key: string, allowed: readonly string[], fallback: string): string {
+  try {
+    const saved = localStorage.getItem(key);
+    return saved !== null && allowed.includes(saved) ? saved : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function App() {
   const [view, setView] = useState<ViewId>(viewFromHash);
   const [health, setHealth] = useState<Health | null>(null);
@@ -66,10 +83,9 @@ export function App() {
   //   每次切视图整页卸载重建的话，两个页面来回切一次就拉两遍。
   //   放这里取一次传下去；子页仍可 reload（来自家机制）。
   const [platforms, setPlatforms] = useState<PlatformResponse | null>(null);
-  const [theme, setTheme] = useState<'light' | 'dark' | 'auto'>(() => {
-    const t = localStorage.getItem('aigw-theme');
-    return t === 'light' || t === 'dark' ? t : 'auto';
-  });
+  const [theme, setTheme] = useState<'light' | 'dark' | 'auto'>(() =>
+    loadPref('aigw-theme', ['light', 'dark'], 'auto') as 'light' | 'dark' | 'auto',
+  );
 
   // ★ 供子页写操作后刷新平台清单（保存凭据 / 导入 / 启停平台都会改变它）。
   //   清单提升到框架层后，子页自己没有数据源，刷新必须走这个句柄。
@@ -92,7 +108,7 @@ export function App() {
   useEffect(() => {
     if (theme === 'auto') document.documentElement.removeAttribute('data-theme');
     else document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('aigw-theme', theme);
+    try { localStorage.setItem('aigw-theme', theme); } catch { /* 存不了只影响下次打开 */ }
   }, [theme]);
 
   useEffect(() => {
