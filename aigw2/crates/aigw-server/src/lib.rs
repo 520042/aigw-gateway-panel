@@ -598,7 +598,9 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
                 "rates": rates,
                 // 倍率数据来源（离线(2026-09) / 在线 MM-DD HH:MM）：界面上注明新旧，
                 // 用户才敢把 x0.79 当真数用 —— 这是 model_rates 模块的设计承诺。
-                "rates_source": model_rates::source_label(),
+                // ★ 2026-11-06：这是 205 行**逐字重复**的同一句话（进程级唯一），
+                //   挪到顶层 once，一次响应少 ~3.2KB。legacy 前台读 row.rates_source
+                //   时回落顶层的 rates_source_field（前端同步改）。
                 "models_policy": s.models_policy,
                 "placeholder": s.base_url.starts_with('@'),
                 "accounts_n": acct_n,
@@ -631,7 +633,9 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
                 "anon": is_anon,
                 "login_url": s.login_url,
                 "notes": s.notes,
-                "chat_path": s.chat_path(),
+                // ★ 2026-11-06：chat_path 移出响应 —— 两个前台（React / legacy）都
+                //   没读过它，205 行 × ~19B ≈ 3.8KB 纯浪费。转发走的是服务端自己
+                //   的 chat_path()，与面板无关。若未来抽屉要展示路径，从 spec 现取。
                 "chat_supported": s.chat_supported,
                 // 这个平台支持的登录方式（qr/sms/pwd/device/paste）：抽屉按它画选项卡，
                 // 接入源页的「仅看扫码」也按它筛。没有这个字段，前端就只能按平台 id 写死。
@@ -666,6 +670,8 @@ async fn platforms(State(st): State<AppState>) -> Json<Value> {
         "rows": rows,
         "disabled_models": disabled_list,
         "disabled_platforms": st.flags.disabled_platforms(),
+        // 进程级唯一的信息放顶层一次（原先 205 行每行重复一份）
+        "rates_source": model_rates::source_label(),
     }))
 }
 

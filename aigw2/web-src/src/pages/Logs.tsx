@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, Loading, ErrorBox, useAsync } from '../components';
 import { api } from '../api';
 
@@ -13,7 +13,14 @@ function parseLine(raw: string): LogLine {
 export function Logs() {
   const [lines, setLines] = useState(300);
   const [level, setLevel] = useState('');
+  // 关键词走 300ms 防抖：搜索框每敲一个字符都打一次 /api/logs 的话，
+  // 一次过滤请求要后端多读 6 倍日志窗口，连打十个字就是十次白跑。
+  const [draft, setDraft] = useState('');
   const [q, setQ] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setQ(draft.trim()), 300);
+    return () => clearTimeout(t);
+  }, [draft]);
   const q2 = new URLSearchParams({ lines: String(lines), ...(level ? { lv: level } : {}), ...(q ? { g: q } : {}) });
   const { data, error, loading, reload } = useAsync<{ lines: string[]; file_size: number }>(
     () => api.get('/api/logs?' + q2.toString()), [lines, level, q],
@@ -34,7 +41,7 @@ export function Logs() {
             <option value="warn">WARN</option>
             <option value="info">INFO</option>
           </select>
-          <input className="q" style={{ width: 180 }} placeholder="关键词过滤…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input className="q" style={{ width: 180 }} placeholder="关键词过滤…" value={draft} onChange={(e) => setDraft(e.target.value)} />
           <button className="btn sm" onClick={reload}>刷新</button>
         </div>
       }

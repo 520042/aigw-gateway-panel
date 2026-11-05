@@ -581,6 +581,9 @@ async function viewSources(el) {
   //   注意：本工程没有 React 式的全局 S 对象，状态放模块级变量（与 __DISABLED_MODELS 同风格）。
   await api('/api/accounts').then((a) => { ACCT_SNAPSHOT = a; }).catch(() => {});
   window.__DISABLED_MODELS = pl.disabled_models || [];
+  // 2026-11-06：rates_source 从 205 行各自一份挪到响应顶层一份（进程级唯一）；
+  // 行内值不再下发，全局兜底在这。
+  window.__ratesSource = pl.rates_source || '离线';
   // 主从布局下，右侧详情与左侧列表的选中切换都走 srcSelect()，它需要能按 id
   // 反查平台行 —— 把这一轮的 /api/platforms 结果挂到 window 上供它读取。
   // （不用闭包传参：srcSelect 是 onclick 全局函数，拿不到 viewSources 的作用域。）
@@ -1257,7 +1260,7 @@ function srcModelsBlock(p) {
   window.__PLATMAP[p.id] = p;
   const rateN = Object.keys(p.rates || {}).length;
   const rateLegend = rateN
-    ? ` · <span class="pill mut">×N</span> 是积分倍率（该模型每条请求扣积分池的系数，数值越高越费额度；来源：${esc(p.rates_source || '离线')}）`
+    ? ` · <span class="pill mut">×N</span> 是积分倍率（该模型每条请求扣积分池的系数，数值越高越费额度；来源：${esc(p.rates_source || window.__ratesSource || '离线')}）`
     : '';
   // 自定义 API 且清单已固定（models_policy 不再是 live）：说清「这份清单说了算」，
   // 并给一键恢复跟随上游（服务端 sync_models 不带清单 = 重拉上游并解除固定）。

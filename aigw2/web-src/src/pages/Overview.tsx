@@ -1,21 +1,22 @@
 import { Kpi, Card, Note, Loading, ErrorBox, useAsync } from '../components';
-import { api, type Usage, type PlatformResponse, type AccountsResponse, type Health } from '../api';
+import { api, type Usage, type AccountsResponse, type Health, type PlatformResponse } from '../api';
 
 const fmt = (n: number) => Number(n || 0).toLocaleString('en-US');
 const ms = (v: number | undefined) =>
   v == null ? '—' : v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms';
 
-export function Overview({ health }: { health: Health | null }) {
-  const pl = useAsync<PlatformResponse>(() => api.get('/api/platforms'), []);
+export function Overview({ health, platforms }: { health: Health | null; platforms: PlatformResponse | null }) {
+  // 平台清单由框架层拉取一次传入（167KB，不该每次切页重取）；
+  // 这里只拉轻量的账号与用量。
   const ac = useAsync<AccountsResponse>(() => api.get('/api/accounts'), []);
   const us = useAsync<Usage>(() => api.get('/api/usage'), []);
 
-  if (pl.error || ac.error || us.error) {
-    return <ErrorBox message={pl.error ?? ac.error ?? us.error ?? ''} onRetry={() => { pl.reload(); ac.reload(); us.reload(); }} />;
+  if (ac.error || us.error) {
+    return <ErrorBox message={ac.error ?? us.error ?? ''} onRetry={() => { ac.reload(); us.reload(); }} />;
   }
-  if (!pl.data || !ac.data || !us.data) return <Loading />;
+  if (!platforms || !ac.data || !us.data) return <Loading />;
 
-  const enabled = pl.data.rows.filter((p) => p.enabled).length;
+  const enabled = platforms.rows.filter((p) => p.enabled).length;
   const realReq = Math.max(0, us.data.requests - us.data.cancelled);
   const rate = realReq ? Math.round((us.data.success / realReq) * 100) : 100;
   const lat = us.data.latency ?? { p50: 0, p95: 0, samples: 0 };
@@ -30,7 +31,7 @@ export function Overview({ health }: { health: Health | null }) {
   return (
     <>
       <div className="grid g4 mb-3">
-        <Kpi label="平台" value={`${enabled}/${pl.data.total}`} hint="启用 / 声明式 spec + 自定义" />
+        <Kpi label="平台" value={`${enabled}/${platforms.total}`} hint="启用 / 声明式 spec + 自定义" />
         <Kpi label="账号" value={ac.data.total} hint="已导入 · secret 仅后台使用" />
         <Kpi label="累计调用" value={fmt(us.data.requests)} hint={`成功 ${fmt(us.data.success)} · 失败 ${fmt(us.data.failed)}`} />
         <Kpi label="成功率" value={`${rate}%`} tone={rate >= 90 ? 'ok' : rate >= 60 ? 'warn' : 'err'} hint={`tokens ${fmt(us.data.tokensIn)} in / ${fmt(us.data.tokensOut)} out`} />

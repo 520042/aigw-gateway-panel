@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Health } from './api';
+import type { Health, PlatformResponse } from './api';
 import { api } from './api';
 import { Overview } from './pages/Overview';
 import { Sources } from './pages/Sources';
@@ -62,10 +62,22 @@ function viewFromHash(): ViewId {
 export function App() {
   const [view, setView] = useState<ViewId>(viewFromHash);
   const [health, setHealth] = useState<Health | null>(null);
+  // ★ 平台清单提升到框架层：总览与接入源都要 167KB 的 /api/platforms，
+  //   每次切视图整页卸载重建的话，两个页面来回切一次就拉两遍。
+  //   放这里取一次传下去；子页仍可 reload（来自家机制）。
+  const [platforms, setPlatforms] = useState<PlatformResponse | null>(null);
   const [theme, setTheme] = useState<'light' | 'dark' | 'auto'>(() => {
     const t = localStorage.getItem('aigw-theme');
     return t === 'light' || t === 'dark' ? t : 'auto';
   });
+
+  useEffect(() => {
+    let alive = true;
+    api.get<PlatformResponse>('/api/platforms')
+      .then((d) => { if (alive) setPlatforms(d); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
     const onHash = () => setView(viewFromHash());
@@ -139,8 +151,8 @@ export function App() {
         </header>
 
         <div className="view-wrap">
-          {view === 'overview' && <Overview health={health} />}
-          {view === 'sources' && <Sources />}
+          {view === 'overview' && <Overview health={health} platforms={platforms} />}
+          {view === 'sources' && <Sources platforms={platforms} />}
           {view === 'accounts' && <Accounts />}
           {view === 'usage' && <UsagePage />}
           {view === 'logs' && <Logs />}

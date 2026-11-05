@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Card, Kpi, Pill, Note, Loading, ErrorBox, useAsync } from '../components';
+import { Card, Kpi, Pill, Note, Loading } from '../components';
 import { api, type Platform, type PlatformResponse } from '../api';
 
 /** 接入能力表：与旧版 ACCESS 同口径，但作为纯数据放在框架层，界面从它派生。 */
@@ -45,12 +45,14 @@ const isAuto = (p: Platform) => ['one_click', 'qr', 'device', 'oauth'].includes(
 
 type Filter = 'all' | 'auto' | 'qr' | 'bad';
 
-export function Sources() {
-  const { data, error, loading, reload } = useAsync<PlatformResponse>(() => api.get('/api/platforms'), []);
+export function Sources({ platforms }: { platforms: PlatformResponse | null }) {
+  // 平台清单由框架层拉取一次传入（写操作走 /api/* 后端直改，本页不需要 reload）。
   const [filter, setFilter] = useState<Filter>('all');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(true);
+
+  const data = platforms;
 
   const rows = useMemo(() => {
     if (!data) return [];
@@ -70,8 +72,7 @@ export function Sources() {
   const loggedN = data?.rows.filter((p) => p.anon || p.accounts_n > 0).length ?? 0;
   const current = rows.find((p) => p.id === sel) ?? rows[0] ?? null;
 
-  if (error) return <ErrorBox message={error} onRetry={reload} />;
-  if (loading || !data) return <Loading />;
+  if (!data) return <Loading />;
 
   const groups: Array<[AccessKind, string, string]> = [
     ['one_click', '一键导入', '本机客户端已登录，点一下自动读凭据'],
