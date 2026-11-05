@@ -1,0 +1,68 @@
+/* aigw v2 · 接入能力层：接入方式徽章 + 快速开始向导。
+   由 web/style.css 末尾 @import 引入。 */
+
+/* ═══════════════════════════════════════════════════════════════════════
+   接入方式徽章（框架重构新增）
+   ───────────────────────────────────────────────────────────────────────
+   206 个平台的平铺列表里，用户看不出哪些「不用自己翻客户端目录找凭据」。
+   这张徽章把 accessOf() 判出的能力直接标在行内，颜色按省事程度递进。
+   ═══════════════════════════════════════════════════════════════════════ */
+.ac-tag {
+  flex: none;
+  font-size: 10px; font-weight: 600; line-height: 1.4;
+  padding: 1px 5px; border-radius: 4px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  letter-spacing: .01em;
+}
+/* 一键最省事 → 用品牌色实心；越往下越淡，手动的不显示徽章 */
+.ac-one_click { background: var(--brand); color: #fff; }
+.ac-qr        { background: var(--ok-soft);   color: var(--ok);   border-color: var(--ok-line); }
+.ac-device    { background: var(--brand-soft);color: var(--brand);border-color: var(--brand-line); }
+.ac-oauth     { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
+/* 名称的 flex:1 + ellipsis 已在 .src-row .nm 定义，这里不重复。 */
+
+/* ═══════════════════════════════════════════════════════════════════════
+   快速开始向导（框架重构新增）
+   ───────────────────────────────────────────────────────────────────────
+   把「能自动接入的 26 个平台」按省事程度分组摆出来，点一下直接选中。
+   旧版只有一句文字说明，用户仍要在 206 个平台里自己找。
+   ═══════════════════════════════════════════════════════════════════════ */
+.onboard-card { padding-bottom: var(--sp-4); }
+.onboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: var(--sp-3);
+}
+.onboard-col {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+}
+.onboard-h {
+  display: flex; align-items: center; gap: var(--sp-2);
+  flex-wrap: wrap; margin-bottom: var(--sp-2);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+.onboard-h b { font-size: var(--fs-sm); }
+.onboard-h .faint { flex-basis: 100%; }
+/* 每组最多显示 6 行；超出时出现滚动条。
+   ★ 必须给 .onboard-item 固定高度：旧版靠 padding 撑，12 个平台挤在
+     180px 里会被 flex 压扁（实测截图里设备码一列文字叠在一起）。 */
+.onboard-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 192px; overflow-y: auto;
+}
+.onboard-item { height: 28px; flex: 0 0 28px; }
+.onboard-item {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+  width: 100%; padding: 4px 6px;
+  border: 0; border-radius: 4px; background: transparent;
+  color: var(--fg); font: inherit; font-size: var(--fs-sm);
+  text-align: left; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.onboard-item:hover { background: var(--surface-3); color: var(--brand); }

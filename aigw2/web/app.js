@@ -150,6 +150,29 @@ async function api(path) {
   if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
   return r.json();
 }
+
+// `/api/health` 的去重缓存。
+//
+// ★ 为什么需要：首屏会把它请求**两次** —— 启动引导那一步为了拿 `milestone`
+//   写页脚先要一次，随后的 `viewOverview` 为了统计与台账再要一次。实测浏览器
+//   时间线里能看到两条 health 请求。它本身不算慢（~10ms），但那是首屏关键路径上
+//   的两倍串行等待。
+//
+// ★ 只缓存 health、只缓存很短时间（1s），原因：
+//   · health 是「只读快照」，1 秒内的两份对用户没有区别；
+//   · 过期就重取，避免把「服务刚起来/刚失败」这种瞬时状态长期钉住；
+//   · 不做通用 api() 缓存 —— 其他接口（accounts/platforms/usage）会被写操作
+//     立刻改变，缓存它们会让面板显示过期状态，那是比省一次请求严重得多的问题。
+let _healthCache = { at: 0, p: null };
+function apiHealth() {
+  const now = Date.now();
+  if (_healthCache.p && now - _healthCache.at < 1000) return _healthCache.p;
+  const p = api('/api/health');
+  _healthCache = { at: now, p };
+  // 失败不留在缓存里：下次调用应当真的重试，而不是一直拿到同一个 rejected promise。
+  p.catch(() => { if (_healthCache.p === p) _healthCache = { at: 0, p: null }; });
+  return p;
+}
 async function post(path, body) {
   const r = tokenGuard(await fetch(path, withToken({
     method: 'POST',
@@ -475,7 +498,10 @@ async function copyText(t) { try { await navigator.clipboard.writeText(t); } cat
 // 接入源页：分组卡片 + 登录面板 + 自定义 API + 公益站
 // ─────────────────────────────────────────────
 let SRC_Q = '';
-let SRC_HELP = false;
+// 快速开始向导默认展开：用户第一次进「接入源」页就该看到「哪些能一键接入」，
+// 而不是面对 206 个平铺平台自己找。看过之后可以收起，状态留到下次刷新
+// （不持久化，避免用户以后想再看却找不到）。
+let SRC_HELP = true;
 /// ★ 2026-10-28：接入源页用的账号快照（/api/accounts 原样，含 acct_detail）。
 /// 只在 viewSources 里赋值；未加载时为 null，卡片退回只显示账号数。
 let ACCT_SNAPSHOT = null;
@@ -483,6 +509,9 @@ let SRC_OPEN = {};   // 分组收起状态：group → bool（默认收起 false
 let SRC_BADONLY = false; // 只看「近 24h 有失败」的接入源
 // 只看「支持扫码登录」的接入源（按平台声明的 login_methods 含 qr 判定）
 let SRC_QRSONLY = false;
+// 只看「可一键 / 扫码 / 设备码 / OAuth 接入」的平台。
+// ★ 这是用户最该先看到的：它们不需要自己去翻客户端目录或查文档找凭据。
+let SRC_AUTOONLY = false;
 let SRC_EXPAND = null; // 展开的平台卡片 id
 // 当前抽屉正在展示哪个平台（null = 未展开）。
 // 用途：判断「换平台了」从而停掉上一轮的自动轮询 —— 见 viewSources 里抽屉分支的说明。
@@ -563,9 +592,11 @@ async function viewSources(el) {
   // 「支持扫码登录」= toml 里 auth 声明为 qr_scan 的平台（有出码 + 轮询的纯服务端协议）
   const isQr = (p) => (Array.isArray(p.login_methods) ? p.login_methods : [p.auth]).includes('qr');
   const qrN = pl.rows.filter(isQr).length;
+  const autoN = pl.rows.filter(isAutoAccess).length;
   const rows = pl.rows.filter((p) => {
     if (SRC_BADONLY && !isBad(p)) return false;
     if (SRC_QRSONLY && !isQr(p)) return false;
+    if (SRC_AUTOONLY && !isAutoAccess(p)) return false;
     if (!SRC_Q) return true;
     const q = SRC_Q.toLowerCase();
     return (p.name || '').toLowerCase().includes(q) || (p.id || '').toLowerCase().includes(q) || (p.notes || '').toLowerCase().includes(q);
@@ -586,33 +617,52 @@ async function viewSources(el) {
   let h = `<div class="grid g4 mb-3">
     <div class="card kpi"><div class="lb">平台总数</div><div class="vl">${pl.total}</div><div class="ex">${loggedN} 个已接入</div></div>
     <div class="card kpi"><div class="lb">账号凭据</div><div class="vl">${pl.rows.reduce((a, p) => a + (p.accounts_n || 0), 0)}</div><div class="ex">secret 仅后台使用</div></div>
-    <div class="card kpi"><div class="lb">可扫码登录</div><div class="vl">${qrN}</div><div class="ex">豆包 / 库库 / 小浣熊 / Loomy / 秘塔 / 智谱</div></div>
+    <div class="card kpi"><div class="lb">免手动接入</div><div class="vl">${autoN}</div><div class="ex">一键 / 扫码 / 设备码 / 跳转登录</div></div>
     <div class="card kpi"><div class="lb">近 24h 有问题</div><div class="vl"${badN ? ' style="color:var(--err)"' : ''}>${badN}</div><div class="ex">台账里有失败记录的平台</div></div>
   </div>`;
   if (SRC_HELP) {
-    h += `<div class="note">接入三步：① 点左侧平台，在右侧完成登录或填 Key ② 客户端 base_url 填 <code>${esc(location.origin)}/v1</code>、api_key 填 <code>admin</code> ③ model 填 <code>模型id@平台</code> 或清单内模型。</div>`;
+    // ★ 快速开始向导：按「省事程度」分组列出可自动接入的平台，点一下直接选中。
+    //   旧版这里只有一句「接入三步」的文字，用户还是得自己在 206 个平台里找 ——
+    //   而 26 个平台明明不用手动翻目录，却和其余 180 个混在一起。
+    //   这个向导把 accessOf() 的结果变成可点的入口，是「接入便利」的关键一步。
+    const byKind = {};
+    for (const p of pl.rows) {
+      if (!isAutoAccess(p)) continue;
+      const k = accessOf(p).kind;
+      (byKind[k] ||= []).push(p);
+    }
+    const ORDER = [
+      ['one_click', '一键导入', '本机客户端已登录，点一下自动读凭据'],
+      ['qr', '扫码登录', '手机扫一下，不用开浏览器 F12'],
+      ['device', '设备码 / 跳转授权', '运行一条命令或跳到官网授权'],
+      ['oauth', '跳转登录', '浏览器完成 OAuth，自动回调换 token'],
+    ];
+    h += `<section class="card onboard-card">
+      <div class="card-t">快速开始 · 选一个能自动接入的
+        <span class="faint small" style="font-weight:400;margin-left:auto">共 ${autoN} 个，不用自己找凭据</span>
+      </div>
+      <div class="onboard-grid">
+        ${ORDER.filter(([k]) => (byKind[k] || []).length).map(([k, title, desc]) => `
+          <div class="onboard-col">
+            <div class="onboard-h"><span class="ac-tag ac-${k}">${ACCESS_LABEL[k]}</span>
+              <b>${title}</b><span class="faint fs-xs">${desc}</span></div>
+            <div class="onboard-list">
+              ${byKind[k].map((p) => `<button class="onboard-item" onclick="srcSelect('${att(p.id)}')" title="${att(accessOf(p).way)}">
+                ${esc(p.name)}<span class="faint fs-xs">${p.accounts_n ? '已接入 ' + p.accounts_n : ''}</span>
+              </button>`).join('')}
+            </div>
+          </div>`).join('')}
+      </div>
+      <div class="note mt-3" style="margin-bottom:0">接入三步：① 上面点一个平台，在右侧完成登录 ② 客户端 <code>base_url</code> 填 <code>${esc(location.origin)}/v1</code>、<code>api_key</code> 填 <code>admin</code> ③ <code>model</code> 填 <code>模型id@平台</code> 或清单内模型。<br>
+        其余 ${pl.total - autoN} 个是开放平台或需要客户端登录态：在左侧列表里选，按右侧说明填 Key 或粘贴凭据。</div>
+    </section>`;
   }
   h += `<div class="srcbar2">
     <button class="btn sm gh" onclick="SRC_HELP=!SRC_HELP;srcRerender()">怎么用 ${SRC_HELP ? '▴' : '▾'}</button>
-    <!-- ★ 2026-10-28（用户要求，参考图「⋯ 管理操作」）：接入源栏右侧一键管理入口。
-         把「账号运维」类批量动作收敛到一处：健康检查 / 签到 / 成长任务 / 猫猫旅行。
-         菜单项都是既有能力的复用（同一套 /api/checkin 与 /api/accounts 动作），
-         不新增后端路径 —— 用户不必先跳到账号页才知道有这些操作。 -->
-    <div class="menu-wrap ml-auto">
-      <button class="btn sm" onclick="event.stopPropagation();srcMgrToggle()" title="批量管理：健康检查 / 签到 / 成长任务 / 猫猫旅行">⋯ 管理操作</button>
-      <div id="srcMgrMenu" class="menu-pop" style="display:none">
-        <div class="menu-sec">额度与批量管理</div>
-        <button class="menu-item" onclick="srcMgr('health')">♡ 一键健康检查（积分 / 模型 / 对话）</button>
-        <button class="menu-item" onclick="srcMgr('checkin')">◷ 每日签到（wb 加油站 + Lobster）</button>
-        <button class="menu-item" onclick="srcMgr('growth')">☑ 成长任务与领奖</button>
-        <div class="menu-sec">成长活动（单步操作）</div>
-        <button class="menu-item" onclick="srcMgr('overview')">▤ 成长概览（等级 / 能量 / 活跃度）</button>
-        <button class="menu-item" onclick="srcMgr('redeem')">◈ 连登奖励兑换</button>
-        <button class="menu-item" onclick="srcMgr('lottery')">✦ 限时抽奖</button>
-        <button class="menu-item" onclick="srcMgr('travel')">✈ 猫猫旅行与领奖</button>
-        <button class="menu-item" onclick="srcMgr('buddyq')">◻ 盲盒配额与开盒</button>
-      </div>
-    </div>
+    <!-- ★ 2026-11-05：原「⋯ 管理操作」菜单（健康检查 / 签到 / 成长任务 / 猫猫旅行
+         等 10 个动作）已全部移到「模型与用量」页的「WB 任务」区。
+         理由：这些动作作用对象是**账号与积分**，不是接入源配置；放在接入源页时
+         用户要在两个页面之间来回跳。按使用路径归位后，接入源页只做「接入」。 -->
   </div>`;
 
   // ── 主从两栏：左列表（虚拟滚动）+ 右详情 ──
@@ -628,7 +678,7 @@ async function viewSources(el) {
     const items = byGroup[g] || [];
     if (!items.length) continue;
     // 筛选生效时强制展开，否则命中的平台全在收起的分组里，点了看不到变化
-    const anyFilter = SRC_BADONLY || SRC_QRSONLY || !!SRC_Q;
+    const anyFilter = SRC_BADONLY || SRC_QRSONLY || SRC_AUTOONLY || !!SRC_Q;
     const open = anyFilter || (SRC_OPEN[g] ?? GROUP_META[g].open);
     flat.push({ kind: 'grp', g, onN: items.filter(isIn).length, total: items.length, open });
     if (open) for (const p of items) flat.push({ kind: 'row', p });
@@ -647,9 +697,10 @@ async function viewSources(el) {
         <div class="s">共 ${pl.total} 个 · 显示 ${rows.length} 个</div>
       </div>
       <div class="src-list-filters">
-        <button class="chip ${!SRC_BADONLY && !SRC_QRSONLY ? 'on' : ''}" onclick="SRC_BADONLY=false;SRC_QRSONLY=false;srcRerender()">全部</button>
-        <button class="chip ${SRC_BADONLY ? 'on' : ''}" onclick="SRC_BADONLY=!SRC_BADONLY;srcRerender()" title="只看台账里近 24 小时有失败记录的接入源">有问题${badN ? ' ' + badN : ''}</button>
-        <button class="chip ${SRC_QRSONLY ? 'on' : ''}" onclick="SRC_QRSONLY=!SRC_QRSONLY;srcRerender()" title="只看支持扫码登录的接入源">可扫码${qrN ? ' ' + qrN : ''}</button>
+        <button class="chip ${!SRC_BADONLY && !SRC_QRSONLY && !SRC_AUTOONLY ? 'on' : ''}" onclick="SRC_BADONLY=false;SRC_QRSONLY=false;SRC_AUTOONLY=false;srcRerender()">全部</button>
+        <button class="chip ${SRC_AUTOONLY ? 'on' : ''}" onclick="SRC_AUTOONLY=!SRC_AUTOONLY;SRC_BADONLY=false;SRC_QRSONLY=false;srcRerender()" title="只看不用手动找凭据的平台：一键导入 / 扫码 / 设备码 / 跳转登录">免手动${autoN ? ' ' + autoN : ''}</button>
+        <button class="chip ${SRC_QRSONLY ? 'on' : ''}" onclick="SRC_QRSONLY=!SRC_QRSONLY;SRC_AUTOONLY=false;srcRerender()" title="只看支持扫码登录的接入源">可扫码${qrN ? ' ' + qrN : ''}</button>
+        <button class="chip ${SRC_BADONLY ? 'on' : ''}" onclick="SRC_BADONLY=!SRC_BADONLY;SRC_AUTOONLY=false;srcRerender()" title="只看台账里近 24 小时有失败记录的接入源">有问题${badN ? ' ' + badN : ''}</button>
       </div>
       <div class="src-list-search">
         <input class="q" placeholder="搜索名称 / id / 说明…" value="${esc(SRC_Q)}"
@@ -1239,6 +1290,50 @@ async function srcRefreshModels(id, btn) {
   srcRerender();
 }
 
+// 可用性探测（目前只对 OrcaTerm 开放）。
+//
+// 为什么单独一个按钮：这家上游**没有模型清单接口**（实测：DescribeAIModelList 回
+// 空数组、其余动作 api-action-not-found），所以「刷新模型」对它只能是「重新读静态表」，
+// 那没有意义。有意义的是**逐条真发一次最小对话**，回答「现在到底哪些能用」——
+// 静态表里混着「面板有、上游未挂载」的档位（hy4-preview 就是），光看表看不出来。
+//
+// 结果按三类归因展示（模型 / 账号 / 上游），因为三者的处置完全不同：
+// 换模型、重新登录、稍后重试 —— 混成一句「都不可用」等于没说。
+async function srcProbeModels(id, btn) {
+  const t = btn ? btn.textContent : '';
+  if (!confirm('探测会对每个模型真发一次最小对话（约消耗少量额度，通常 30~70 秒，最长 90 秒）。继续？')) return;
+  if (btn) { btn.disabled = true; }
+  // 服务端有 90 秒总预算（PROBE_TOTAL_BUDGET）。这里同步显示已用时间，
+  // 否则用户点完对着一个不动的「探测中…」干等一分钟，会以为界面卡死了。
+  const t0 = Date.now();
+  let timer = null;
+  const tick = () => {
+    if (!btn) return;
+    const s = Math.round((Date.now() - t0) / 1000);
+    btn.textContent = `探测中… ${s}s`;
+  };
+  if (btn) { tick(); timer = setInterval(tick, 1000); }
+  const r = await post('/api/platforms', { action: 'refresh_models', id, probe: true })
+    .catch((e) => ({ ok: false, message: e.message }));
+  if (timer) clearInterval(timer);
+  if (btn) { btn.disabled = false; btn.textContent = t || '探测可用性'; }
+  if (!r || !r.ok) { alert('探测失败：' + ((r && r.message) || '未知错误')); return; }
+  const usable = Array.isArray(r.usable) ? r.usable : [];
+  const unusable = Array.isArray(r.unusable) ? r.unusable : [];
+  const KIND = { model: '模型侧', account: '账号侧', upstream: '上游抖动' };
+  const rows = unusable
+    .map((u) => `<div class="kv"><span>${esc(u.model)}</span><span class="c-warn">${esc(KIND[u.kind] || '')}</span><span class="faint">${esc(u.why || '')}</span></div>`)
+    .join('');
+  const shell = modalShell(
+    `探测结果：${esc(r.message || '')}`,
+    `${r.advice ? `<div class="note warnnote">${esc(r.advice)}</div>` : ''}
+     <div class="note">${usable.length ? '可用：<span class="mono">' + usable.map(esc).join(', ') + '</span>' : '没有一个可用（见下面的归因）'}</div>
+     ${rows || '<div class="faint">没有不可用项</div>'}
+     <div class="faint fs-sm mt-2">这是一次「现在能不能用」的快照，不会改动模型清单 —— 让它改清单的话，一次网络抖动就会永久删掉几个模型。</div>`,
+  );
+  document.body.insertAdjacentHTML('beforeend', shell);
+}
+
 // 恢复跟随上游：重新拉上游全量清单并解除固定。
 async function unpinCustomModels(id) {
   if (!confirm('恢复跟随上游？将重新拉取上游全量模型清单，替换当前固定的白名单。')) return;
@@ -1378,6 +1473,85 @@ const LOGIN_UI_OF = (() => {
   for (const [k, ids] of Object.entries(LOGIN_UI)) ids.forEach((id) => { if (!m[id]) m[id] = k; });
   return m;
 })();
+
+// ══════════════════════════════════════════════════════════════════════
+// 接入能力表：这个平台「一键能到什么程度」
+// ──────────────────────────────────────────────────────────────────────
+// ★ 为什么要这张表：后端 auth_login.rs 里其实有 20+ 个平台的自动登录实现
+//   （扫码 / 设备码 / PKCE / 跳转回调），加上「本机客户端导入」2 个，
+//   但界面上 206 个平台是一张平铺列表，用户根本看不出哪些不用手动翻目录。
+//   结果是能一键接入的平台也被当成「要自己找凭据」，白走一遍弯路 ——
+//   这正是用户反馈「账号登录不便利」的根源。
+//
+// ★ 表里只声明**事实**（这个平台有哪些自动路径），不写界面长什么样。
+//   界面从这张表派生筛选、徽章和排序，保证「列表里的标记」与「详情页的能力」
+//   是同一个数据源，不会两边漂移。
+//
+// kind 取值（按「用户省事程度」排序，越靠前越省事）：
+//   one_click  本机客户端已装且登录过 → 点一下自动读凭据（orcaterm / monkeycode）
+//   qr         扫码登录（后端出码 + 轮询，纯服务端）
+//   device     设备码 / 跳转授权
+//   oauth      PKCE 跳转登录
+//   manual     只能手动粘贴（开放平台 Key，或没有官方登录流程的客户端）
+//   none       免密，无需任何凭据
+const ACCESS = {
+  // ① 一键：从本机桌面客户端数据文件里读凭据
+  'apk-orcaterm':   { kind: 'one_click', way: 'OrcaTerm 桌面端', auto: 'from_client' },
+  'web-monkeycode':  { kind: 'one_click', way: 'MonkeyCode 客户端', auto: 'from_client' },
+  // ② 扫码（出码 + 轮询，纯服务端，不用开浏览器 F12）
+  'apk-doubao':      { kind: 'qr', way: '抖音/豆包 App 扫码' },
+  'apk-kuku':        { kind: 'qr', way: '百度 App 扫码' },
+  'apk-raccoon':     { kind: 'qr', way: '商汤小浣熊扫码' },
+  'apk-loomy':       { kind: 'qr', way: '讯飞 Loomy 扫码' },
+  'apk-metaso':      { kind: 'qr', way: '秘塔扫码' },
+  'web-glm':         { kind: 'qr', way: '智谱清言微信扫码' },
+  // ③ 设备码 / 跳转授权
+  'minimax':         { kind: 'device', way: '设备码授权' },
+  'cline':           { kind: 'device', way: '设备码授权' },
+  'sub-meta':        { kind: 'device', way: '设备码授权' },
+  'codearts':        { kind: 'device', way: '华为云跳转 / AK-SK' },
+  'wb-gateway':      { kind: 'device', way: 'WorkBuddy 设备授权' },
+  'wb-gateway-intl': { kind: 'device', way: 'WorkBuddy 设备授权' },
+  'apk-qoder':       { kind: 'device', way: 'Qoder 跳转回调' },
+  'web-qoder':       { kind: 'device', way: 'Qoder 跳转回调' },
+  'apk-trae':        { kind: 'device', way: 'Trae 跳转回调' },
+  'web-trae':        { kind: 'device', way: 'Trae 跳转回调' },
+  'lobster':         { kind: 'device', way: 'Lobster OAuth' },
+  'sub-grok':        { kind: 'device', way: 'OAuth 跳转' },
+  // ④ PKCE 跳转登录
+  'sub-codex':       { kind: 'oauth', way: 'Codex 跳转登录' },
+  'sub-claude':      { kind: 'oauth', way: 'Claude 跳转登录' },
+  'sub-antigravity': { kind: 'oauth', way: 'Google 跳转登录' },
+  'sub-devin':       { kind: 'oauth', way: 'Devin 跳转登录' },
+  'apk-accio':       { kind: 'oauth', way: '阿里 Phoenix 跳转登录' },
+  'apk-accio-cn':    { kind: 'oauth', way: '阿里 Phoenix 跳转登录' },
+};
+
+/// 一个平台的接入能力（带兜底推导，新平台不用手写也能有合理分类）。
+function accessOf(p) {
+  if (!p) return { kind: 'manual', way: '手动填 Key / 粘贴凭据' };
+  if (ACCESS[p.id]) return ACCESS[p.id];
+  // 免密车道：无需任何凭据
+  if (p.auth === 'anon') return { kind: 'none', way: '免密，无需登录' };
+  // 开放平台 API：填官方 Key 是合理且唯一的方式，不算「不方便」
+  if (p.upstream_kind === 'openai' || !p.upstream_kind) {
+    return { kind: 'manual', way: p.auth === 'api_key' ? '填官方 API Key' : '手动粘贴凭据' };
+  }
+  // 其余客户端反代：只能从客户端/网页取登录态，如实标注
+  return { kind: 'manual', way: '从客户端 / 网页取登录态后粘贴' };
+}
+
+/// 是否是「不用自己翻目录找凭据」的平台（一键 / 扫码 / 设备码 / OAuth）。
+function isAutoAccess(p) {
+  const k = accessOf(p).kind;
+  return k === 'one_click' || k === 'qr' || k === 'device' || k === 'oauth';
+}
+
+/// 接入方式的中文短标签（列表徽章用，短到能放进 32px 行）。
+const ACCESS_LABEL = {
+  one_click: '一键导入', qr: '扫码', device: '设备码', oauth: '跳转登录',
+  manual: '手动', none: '免密',
+};
 
 /// @param {boolean} [bodyOnly] 只返回登录体（供主从布局的详情栏直接用），
 ///        不套抽屉外壳、不带账号与模型区块。
@@ -1594,14 +1768,15 @@ function srcDrawer(p, bodyOnly) {
     //   所以这条分支必须排在 isKey 前面，否则永远到不了。
     body = `<div class="note">OrcaTerm 要的是<b>桌面客户端的 OAuth Access Token（JWT）</b>，不是 API Key、也不是 Cookie：
         <br>① 装并登录 <a href="https://orcaterm.cloud.tencent.com" target="_blank" rel="noopener">腾讯遨驰终端</a>（微信扫码）
-        <br>② 用记事本打开 <span class="mono">%APPDATA%/com.orcaterm-desktop.app/data.bin</span>（Tauri store，<b>明文，不用解密</b>）
-        <br>③ 找到 <span class="mono">oauth_access_token</span>，复制它那串值（<span class="mono">eyJ…</span> 开头的 JWT）粘到下面。</div>
+        <br>② 面板直接读 <span class="mono">%APPDATA%/com.orcaterm-desktop.app/data.bin</span>（Tauri store，<b>明文，不用解密</b>）——点下面的「从本机客户端导入」就不用自己翻文件
+        <br>③ 也可以手动打开 data.bin，找到 <span class="mono">oauth_access_token</span>，复制那串值（<span class="mono">eyJ…</span> 开头的 JWT）粘到下面。</div>
       <div class="note">账号 uin 会从 JWT 的 payload 自动解析，不用另外填。模型走 <span class="mono">TokenHub/</span> 前缀，裸名请求会自动归一。</div>
       <div class="note oknote">✔ 粘一次就够了，<b>不用定时重取</b>：这枚 JWT 本身约 2 小时时效，但上游有续期接口，面板会在临期 10 分钟内自动换新，401 时还会再强制续期一次并重试 —— 结果写回账号池，重启也保留。</div>
-      <div class="note warnnote">只有续期本身被上游拒（<span class="mono">INVALID_REQUEST：无法获取会话标识</span>，通常是桌面端改了登录态或号被封）时，才需要回 data.bin 重新复制一次。</div>
+      <div class="note warnnote">只有续期本身被上游拒（<span class="mono">INVALID_REQUEST：无法获取会话标识</span>，通常是桌面端改了登录态或号被封）时，才需要回 data.bin 重新取一次 —— 那时再点一次「从本机客户端导入」即可。</div>
       <div class="row">
-        <input class="q mono" id="keyInput" placeholder="粘贴 oauth_access_token 的 JWT（eyJ… 开头）…">
-        <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+        <button class="btn pri" onclick="authImportFromClient('${att(p.id)}')" title="直接读本机 OrcaTerm 桌面端的数据文件，省掉手动翻 %APPDATA% 复制">从本机客户端导入</button>
+        <input class="q mono" id="keyInput" placeholder="或手动粘贴 oauth_access_token 的 JWT（eyJ… 开头）…">
+        <button class="btn" onclick="authSave('${att(p.id)}')">保存凭据</button>
       </div>
       <div id="authBox"></div>`;
   } else if (isKey) {
@@ -1635,6 +1810,26 @@ function srcDrawer(p, bodyOnly) {
         <div class="note">怎么拿：登录订阅账号${loginUrl ? `（${link}）` : ''}完成授权，然后取出 access token 粘到下面。需要的是平台开放平台 Key 的话，请改用对应的 <span class="mono">api-*</span> 平台。</div>
         <div class="row">
           <input class="q mono" id="keyInput" placeholder="粘贴订阅账号的 access token…">
+          <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+        </div>
+        <div id="authBox"></div>`;
+    } else if (p.placeholder) {
+      // ★ 上游地址还是占位符（如 `@cloudflare_ai_url`）时，光填 Key 是**用不了**的。
+      //
+      //   实测过的误导：api-cloudflare / api-officeace 两个平台声明了占位 base_url，
+      //   界面却照常显示「填官方 API Key：把 Key 粘贴到下面，保存即入库」——
+      //   用户按提示填完 Key、验活失败，然后以为是 Key 的问题。真正的前置条件
+      //   （先在自己的控制台拿到 account id / 专属域名并填进设置）一个字都没提。
+      //   这属于「界面承诺了一条走不通的路」，与之前 Accio / AutoClaw 那次同类。
+      //
+      //   所以占位符平台**第一句就说清顺序**：先配地址，再填 Key；并且不给出
+      //   「保存即入库」这种让人误以为马上能用的暗示。
+      body = `<div class="note warnnote">⚠ <b>这个平台还缺一步配置：上游地址还没填。</b>
+          它不是一个统一的公开端点，需要你自己账号里的专属地址（通常含 account id / 专属域名）。
+          <b>请先在「运行配置」里把对应地址填好</b>，否则下面的 Key 存进去也用不了。</div>
+        <div class="note">配好地址之后，再填<b>官方 API Key</b>：粘贴到下面保存，转发时会自动作为 Bearer 头发出去。${loginUrl ? `<br>还没有 Key？${link.replace(' →', ' 申请/登录 →')}` : ''}</div>
+        <div class="row">
+          <input class="q mono" id="keyInput" placeholder="配好地址后，再粘贴 API Key…">
           <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
         </div>
         <div id="authBox"></div>`;
@@ -1773,10 +1968,15 @@ function srcDrawer(p, bodyOnly) {
       // 只有「没有专门分支」的 cookie 平台才落到这里；不写「面板不支持扫码」（豆包 /
       // 库库 / 小浣熊 / Loomy 都有真扫码分支），免得一句话否定掉四个平台的扫码能力。
       const hint = COOKIE_HINT[p.id] || '登录后 F12 → Application → Cookies 复制整段 Cookie。';
-      body = `<div class="note">${loginUrl ? `① <a href="${esc(loginUrl)}" target="_blank" rel="noopener">打开登录页 →</a> 在自己的浏览器完成登录　` : ''}② ${hint}　③ 粘贴到下面保存入库。</div>
+      // 能从本机客户端直接读的平台，给一个「不用手翻 F12」的入口。
+      // 与后端 client_import.rs 的 SOURCES 白名单一一对应 —— 那边不认的平台，
+      // 这里也不该显示按钮（否则点了只会得到「不支持」）。
+      const CAN_IMPORT = { 'web-monkeycode': true };
+      body = `<div class="note">${loginUrl ? `① <a href="${esc(loginUrl)}" target="_blank" rel="noopener">打开登录页 →</a> 在自己的浏览器完成登录　` : ''}② ${hint}　③ 粘贴到下面保存入库。${CAN_IMPORT[p.id] ? '<br>或者：客户端登录过的话，直接点下面的「从本机客户端导入」，面板会自己去读 cookie。' : ''}</div>
         <div class="row">
+          ${CAN_IMPORT[p.id] ? `<button class="btn pri" onclick="authImportFromClient('${att(p.id)}')" title="直接读本机客户端的 cookie 文件，省掉手翻 F12">从本机客户端导入</button>` : ''}
           <input class="q mono" id="keyInput" placeholder="${COOKIE_PH[p.id] || '粘贴整段 Cookie / 凭据…'}">
-          <button class="btn pri" onclick="authSave('${att(p.id)}')">保存凭据</button>
+          <button class="btn ${CAN_IMPORT[p.id] ? '' : 'pri'}" onclick="authSave('${att(p.id)}')">保存凭据</button>
         </div>
         <div id="authBox"></div>`;
     }
@@ -1792,6 +1992,8 @@ function srcDrawer(p, bodyOnly) {
     <div class="srcsec"><div class="srcsec-h">模型清单${p.models_n ? '（' + p.models_n + ' 个）' : ''}
       <button class="btn sm ml-2" onclick="srcRefreshModels('${att(p.id)}', this)"
         title="用本平台已登录账号的凭据去上游问一遍，立刻刷新清单（不必等缓存过期）">刷新模型</button>
+      ${p.upstream_kind === 'orcaterm' ? `<button class="btn sm" onclick="srcProbeModels('${att(p.id)}', this)"
+        title="这家上游没有模型清单接口（实测确认），所以「刷新」在这里是逐条真发一次最小对话，确认哪些模型现在真的能用。会消耗少量额度、耗时数十秒。">探测可用性</button>` : ''}
     </div>${srcModelsBlock(p)}</div>
     ${body}
 `,
@@ -2497,6 +2699,36 @@ async function authPoll(platform) {
   // 跳转授权要等用户在浏览器登录（可能还要过二次验证），用 3 秒慢一点，别把 /api/auth 打满。
   if (SRC_QR_ACTIVE) srcQrSchedule(platform, waiting ? 3000 : 2000);
 }
+// 从**本机桌面客户端**直接导入凭据（服务端读文件，前端碰不到 %APPDATA%）。
+//
+// 为什么值得做：OrcaTerm 的凭据只存在于客户端 data.bin 里，手动去翻目录、
+// 用记事本打开、在一堆字段里找 oauth_access_token、再复制粘贴 —— 每一步都可能
+// 粘错一个字符，而失败时上游只回一个含糊的鉴权错误。一键导入把这条路径压成一次点击。
+//
+// 服务端只认白名单里的平台（见 client_import.rs），这里不做任何路径拼接。
+async function authImportFromClient(platform) {
+  const box = $('#authBox');
+  if (box) box.innerHTML = '<div class="faint">正在从本机客户端读取凭据…</div>';
+  const r = await post('/api/auth', { action: 'save', platform, from_client: true })
+    .catch((e) => ({ ok: false, message: e.message }));
+  const b = $('#authBox');
+  if (!r || !r.ok) {
+    // supported=false 表示这个平台压根不支持导入（不是故障）；
+    // supported=true 但失败才是「找不到文件/字段缺失」这类可操作的问题。
+    if (b) {
+      b.innerHTML = `<div class="note ${r && r.supported === false ? '' : 'errnote'}">${esc((r && r.message) || '导入失败')}</div>`;
+    }
+    return;
+  }
+  // ★ 不在这里调 srcRerender()：它会整块重建详情栏，把刚写进 #authBox 的成功提示
+  //   立刻冲掉 —— 实测现象是「点完按钮什么反馈都没有」，用户会以为没生效。
+  //   改成把结果留在原地，并在旁边给出「下一步可以干什么」。
+  if (b) {
+    b.innerHTML = `<div class="note oknote">✔ ${esc(r.message || '已从本机客户端导入并验活通过')}
+      <br>凭据已入账号池，可以直接用这个平台的模型了。若列表没刷新，切一下视图再回来即可。</div>`;
+  }
+}
+
 async function authSave(platform, allowEmpty) {
   const input = $('#keyInput');
   const secret = input ? input.value.trim() : '';
@@ -2767,10 +2999,17 @@ function srcListRow(p) {
   }
   const lm = Array.isArray(p.login_methods) ? p.login_methods : [];
   const qr = lm.includes('qr');
-  return `<button class="src-row ${on ? 'on' : ''}" onclick="srcSelect('${att(p.id)}')" title="${att(p.name)} · ${att(p.id)}">
+  // ★ 接入方式徽章：让用户一眼看出「这个平台不用手动找凭据」。
+  //   旧版只有一个 ⌗ 表示可扫码，含义不明，且设备码/PKCE/一键导入都看不出来。
+  const ac = accessOf(p);
+  const acTag = ac.kind === 'manual' || ac.kind === 'none'
+    ? ''
+    : `<span class="ac-tag ac-${ac.kind}" title="${att(ac.way)}">${ACCESS_LABEL[ac.kind]}</span>`;
+  return `<button class="src-row ${on ? 'on' : ''}" onclick="srcSelect('${att(p.id)}')" title="${att(p.name)} · ${att(p.id)} · ${att(ac.way)}">
     <span class="dot ${dot}"></span>
     <span class="nm">${esc(p.name)}</span>
-    ${qr ? '<span class="bd" title="支持扫码登录">⌗</span>' : ''}
+    ${acTag}
+    ${qr && !acTag ? '<span class="bd" title="支持扫码登录">⌗</span>' : ''}
     ${p.accounts_n ? `<span class="bd">${p.accounts_n}</span>` : ''}
   </button>`;
 }
@@ -2981,9 +3220,12 @@ function skippedNote(h) {
     + '<div class="faint" style="font-size:var(--fs-xs);margin-top:var(--sp-2)">这些平台不会出现在「接入源」与 /v1/models 里；修好 providers/ 下对应的 .toml 后重启即可。</div></div>';
 }
 async function viewOverview(el) {
-  const [h, pl, ac, us, pool] = await Promise.all([
-    api('/api/health'), api('/api/platforms'), api('/api/accounts'), api('/api/usage'),
+  const [h, pl, ac, us, pool, hist] = await Promise.all([
+    apiHealth(), api('/api/platforms'), api('/api/accounts'), api('/api/usage'),
     api('/api/pool').catch(() => null),
+    // 近期请求趋势：与「用量明细」页同一个接口，取最近 60 条。
+    // 总览页要能回答「刚才是好的还是一直在失败」，光有累计数字看不出来。
+    api('/api/requests?limit=60').catch(() => null),
   ]);
   const enabled = pl.rows.filter((p) => p.enabled).length;
   // 成功率的分母要扣掉「客户端主动取消」：那是用户点停止，不是平台失败，
@@ -3025,7 +3267,77 @@ async function viewOverview(el) {
         <div class="mini"><b>存储</b><span class="pill ${us.db ? 'ok' : 'warn'}">${us.db ? 'SQLite WAL' : 'JSON 降级'}</span></div>
         <div class="mini"><b>端点</b><code>/v1/chat/completions</code> · <code>/v1/messages</code> · <code>/v1/responses</code><br><span class="faint">模型路由：清单匹配 或 <code>模型id@平台</code></span></div>
       </div>
+    </section>
+    ${overviewInsights(us, hist)}`;
+}
+
+/// 总览页的「深入一层」区块：延迟分位 + 平台用量排行 + 近期失败。
+///
+/// ★ 为什么加这个：旧版总览只有 4 个 KPI + 一张小卡，在 1080p 上**下半屏全是空白**
+///   —— 实测截图里内容只占上面 40%。而 `/api/usage` 其实早就返回了 latency /
+///   ttfb / byPlatform / byModel，面板却一个字都不展示，用户想看「哪个平台在跑、
+///   慢不慢、哪家在失败」只能去「用量明细」页翻表格。
+///   总览页的职责就是「一眼看清现在怎么样」，这些恰恰是最该在这里看到的。
+function overviewInsights(us, hist) {
+  const lat = us.latency || {};
+  const ttfb = us.ttfb || {};
+  const fmtMs = (v) => (v == null ? '—' : v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms');
+
+  // 平台排行：按请求数降序取前 6
+  const rows = (us.byPlatform && us.byPlatform.rows) || [];
+  const top = [...rows].sort((a, b) => (b.requests || 0) - (a.requests || 0)).slice(0, 6);
+  const maxReq = top.length ? Math.max(...top.map((r) => r.requests || 0)) : 1;
+  const bar = (n) => {
+    const pct = maxReq ? Math.round((n / maxReq) * 100) : 0;
+    return `<div class="rk-bar"><i style="width:${pct}%"></i></div>`;
+  };
+  const rateOf = (r) => {
+    const denom = Math.max(1, (r.requests || 0) - (r.cancelled || 0));
+    return Math.round(((r.success || 0) / denom) * 100);
+  };
+
+  const platRows = top.length
+    ? top
+        .map((r) => {
+          const rate = rateOf(r);
+          const cls = rate >= 90 ? 'ok' : rate >= 60 ? 'warn' : 'err';
+          return `<div class="rk-row">
+            <span class="rk-name mono" title="${att(r.key)}">${esc(r.key)}</span>
+            ${bar(r.requests || 0)}
+            <span class="rk-num">${nfmt(r.requests)}</span>
+            <span class="pill ${cls}">${rate}%</span>
+          </div>`;
+        })
+        .join('')
+    : '<div class="faint small">还没有调用记录 —— 从任意 OpenAI 兼容客户端指向本网关发一次请求就会出现。</div>';
+
+  return `<div class="grid g2 mt-3">
+    <section class="card">
+      <div class="card-t">延迟分位</div>
+      <div class="lat-grid">
+        <div class="lat"><span class="lat-k">首字节 p50</span><span class="lat-v">${fmtMs(ttfb.p50)}</span></div>
+        <div class="lat"><span class="lat-k">首字节 p95</span><span class="lat-v">${fmtMs(ttfb.p95)}</span></div>
+        <div class="lat"><span class="lat-k">总耗时 p50</span><span class="lat-v">${fmtMs(lat.p50)}</span></div>
+        <div class="lat"><span class="lat-k">总耗时 p95</span><span class="lat-v">${fmtMs(lat.p95)}</span></div>
+      </div>
+      <div class="faint small mt-2">总耗时样本 ${nfmt(lat.samples || 0)} 条 · 首字节样本 ${nfmt(ttfb.samples || 0)} 条（只有流式请求才有首字节）</div>
+    </section>
+    <section class="card">
+      <div class="card-t">平台用量排行</div>
+      ${platRows}
+    </section>
+  </div>
+  ${(() => {
+    // 近期趋势：累计数字看不出「刚才是好的还是一直在失败」。
+    // 复用「用量明细」页的 trendSVG（零依赖纯 SVG），不重画一套。
+    if (!hist || !Array.isArray(hist.recent) || !hist.recent.length) return '';
+    return `<section class="card mt-3">
+      <div class="card-t">近期请求趋势
+        <span class="faint small" style="font-weight:400;margin-left:auto">最近 ${hist.recent.length} 条 · 越高越慢</span>
+      </div>
+      ${trendSVG(hist.recent, 1500, 160)}
     </section>`;
+  })()}`;
 }
 
 // 号池治理状态（/api/pool）：在途租约、账号/模型冷却、WAF 限速、会话粘性占用。
@@ -3113,11 +3425,92 @@ function poolCard(p) {
 
 let AC_CACHE = [];
 
+/// WB 任务面板：把原「接入源 → ⋯ 管理操作」里的 10 个动作全部收进来。
+///
+/// ★ 为什么搬到这里：这些动作的作用对象是**账号与积分**（签到、成长、验活、领奖），
+///   不是接入源配置。放在接入源页时用户要来回跳两个页面；按使用路径归位后，
+///   「模型与用量」页就是账号运维的唯一入口。
+/// ★ 改名「WB 任务」：这些任务几乎全部来自 WorkBuddy（wb-gateway / 国际版 /
+///   codebuddy），叫「成长任务」既不准确也和上游的「成长」概念混淆。
+///
+/// 面板分三块：日常任务（一键 + 自动开关）、自动执行设置（时刻 + 逐平台）、活动单次操作。
+/// 所有按钮复用既有 srcMgr() / wbCheckin() / wbGrowth() 实现，不新增后端路径。
+function wbTasksPanel(ac, wbN, autoCfg) {
+  const on = (v) => v ? '开 ✔' : '关';
+  const autoBtn = (act, cur, title) => `<button class="btn sm ${cur ? 'pri' : 'gh'}" onclick="${act}(${!cur}, this)" title="${title}">自动：${on(cur)}</button>`;
+  const cfg = (autoCfg && autoCfg.cfg) || {};
+  const platforms = (autoCfg && autoCfg.platforms) || [];
+  const hour = Number.isInteger(cfg.run_hour) ? cfg.run_hour : 9;
+  const checked = Array.isArray(cfg.checkin_platforms) ? cfg.checkin_platforms : [];
+  // 旧配置（per_platform=false）里没存逐平台集合：界面默认全勾，但提交后才落到存储。
+  const isOn = (id) => checked.length ? checked.includes(id) : true;
+  return `<section class="card wb-task-panel">
+    <div class="card-t">WB 任务
+      <span class="faint small" style="font-weight:400;margin-left:auto">WorkBuddy 账号运维 · ${wbN} 个可操作账号</span>
+    </div>
+    ${wbN === 0 ? '<div class="faint">还没有 WorkBuddy 系账号 —— 到「接入源」页接入一个 wb-gateway / 国际版 / CodeBuddy 账号后，这里会出现签到与任务入口。</div>' : `
+    <div class="grid g2">
+      <div class="wb-task-col">
+        <div class="wb-task-h">日常任务 <span class="faint fs-xs">可一键执行，也可设成每日自动</span></div>
+        <div class="wb-task-row">
+          <div class="wb-task-info"><b>每日签到</b><span class="faint fs-xs">Buddy 加油站 + Lobster + 小浣熊，当天已领过会幂等跳过</span></div>
+          <div class="acts">
+            <button class="btn sm pri" onclick="wbCheckin()">立即签到</button>
+            ${autoBtn('wbAutoToggle', ac.daily_checkin, '开启后后台每日自动领取，默认关；开关存 flags.json，重启保持')}
+          </div>
+        </div>
+        <div class="wb-task-row">
+          <div class="wb-task-info"><b>WB 日常任务</b><span class="faint fs-xs">17 项闭环：事件链上报 + 领奖，全新账号约 +1950 积分</span></div>
+          <div class="acts">
+            <button class="btn sm pri" onclick="wbGrowth()">立即执行</button>
+            ${autoBtn('wbGrowthToggle', ac.daily_growth, '开启后后台每日自动跑一轮 WB 任务，默认关')}
+          </div>
+        </div>
+        <div class="wb-task-row">
+          <div class="wb-task-info"><b>一键健康检查</b><span class="faint fs-xs">逐账号验活：积分 / 模型 / 对话，不消耗对话额度</span></div>
+          <div class="acts"><button class="btn sm" onclick="srcMgr('health')">开始检查</button></div>
+        </div>
+        ${checkinTaskLine(ac.checkin_task)}
+      </div>
+      <div class="wb-task-col">
+        <div class="wb-task-h">自动执行设置 <span class="faint fs-xs">每日一次</span></div>
+        <div class="row" style="margin:0 0 var(--sp-2) 0;gap:8px">
+          <label class="faint fs-xs" for="wbRunHour">执行时刻（北京时间）</label>
+          <select class="q" id="wbRunHour" style="width:auto;min-width:90px">
+            ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${h === hour ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('')}
+          </select>
+          <button class="btn sm" onclick="wbSaveAutoConfig()">保存</button>
+        </div>
+        <div class="faint fs-xs" style="margin-bottom:6px">自动签到作用于哪些平台（勾选后立即生效）：</div>
+        <div class="wb-platforms">
+          ${platforms.map((p) => `<label class="wb-plat" title="${att(p.id)}">
+            <input type="checkbox" class="w-auto" value="${att(p.id)}" ${isOn(p.id) ? 'checked' : ''} onchange="wbSaveAutoConfig()">
+            <span>${esc(p.name)}</span>
+          </label>`).join('') || '<span class="faint fs-xs">平台清单加载中…</span>'}
+        </div>
+        <div id="wbAutoMsg" class="mt-2"></div>
+      </div>
+      <div class="wb-task-col">
+        <div class="wb-task-h">活动 · 单次操作 <span class="faint fs-xs">按需点，不做自动化</span></div>
+        <div class="wb-task-acts">
+          <button class="btn sm" onclick="srcMgr('overview')">▤ 成长概览</button>
+          <button class="btn sm" onclick="srcMgr('redeem')">◈ 连登奖励兑换</button>
+          <button class="btn sm" onclick="srcMgr('lottery')">✦ 限时抽奖</button>
+          <button class="btn sm" onclick="srcMgr('travel')">✈ 猫猫旅行</button>
+          <button class="btn sm" onclick="srcMgr('buddyq')">◻ 盲盒配额 / 开盒</button>
+        </div>
+      </div>
+    </div>`}
+  </section>`;
+}
+
 async function viewAccounts(el) {
   // /api/pool 拿不到不该让整页空白：账号表是主内容，号池状态是附加信息。
-  const [ac, pool] = await Promise.all([
+  const [ac, pool, autoCfg] = await Promise.all([
     api('/api/accounts'),
     api('/api/pool').catch(() => null),
+    // 自动任务配置（执行时刻 / 逐平台开关）。失败不阻断整页：退回空对象用默认值渲染。
+    post('/api/checkin', { action: 'config' }).catch(() => null),
   ]);
   AC_CACHE = ac.rows || [];
   // ★ wb 族账号数（决定签到 / 成长任务 / 自动签到开关显不显示）。
@@ -3129,16 +3522,11 @@ async function viewAccounts(el) {
   // 免密车道（anon）不需要账号：池里出现的行都是历史遗留占位（name=匿名公共池 / secret=public），
   // 单列出来提示可删，别让用户以为那是一份要维护的凭据。
   const anonRows = ac.rows.filter((a) => a.anon);
-  el.innerHTML = `<section class="card">
+  el.innerHTML = `${wbTasksPanel(ac, wbN, autoCfg)}<section class="card">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
       <b>账号凭据</b>
-      ${wbN > 0 ? `<button class="btn sm" onclick="wbCheckin()">每日签到（${wbN} 账号）</button>` : ''}
-      ${wbN > 0 ? `<button class="btn sm ${ac.daily_checkin ? 'pri' : 'gh'}" onclick="wbAutoToggle(${ac.daily_checkin ? 'false' : 'true'}, this)" title="开启后后台每 12 小时自动领取一次；默认关，开关存 flags.json，重启保持。当天已领过时上游回「今日已领取」，无副作用">自动签到：${ac.daily_checkin ? '开 ✔' : '关'}</button>` : ''}
-      ${wbN > 0 ? `<button class="btn sm" onclick="wbGrowth()" title="一键完成成长任务（17 项）：事件链上报 + 领奖，全新账号约 +1950 积分">⚡ 成长任务</button>` : ''}
-      ${wbN > 0 ? `<button class="btn sm ${ac.daily_growth ? 'pri' : 'gh'}" onclick="wbGrowthToggle(${ac.daily_growth ? 'false' : 'true'}, this)" title="开启后后台每 12 小时自动跑一轮成长任务；默认关">自动成长：${ac.daily_growth ? '开 ✔' : '关'}</button>` : ''}
-      <span class="faint ml-auto">健康列来自最近一次真实请求 / 「检查」验活的结果（重启后清空）· Buddy 加油站每日 100 积分仅 wb 族账号可签到</span>
+      <span class="faint ml-auto">健康列来自最近一次真实请求 / 「检查」验活的结果（重启后清空）</span>
     </div>
-    ${checkinTaskLine(ac.checkin_task)}
     ${creditSummary(ac.rows)}
     ${ac.rows.some((a) => a.platform_known === false) ? `<div class="note">有 ${ac.rows.filter((a) => a.platform_known === false).length} 个账号所属的平台已经不在 providers/ 里了（标记「平台已移除」）：这些号转不出去，留着只会混淆，可以直接删除。</div>` : ''}
     ${ac.rows.length ? `<table><thead><tr><th>账号名</th><th>平台</th><th>凭据类型</th><th>凭据</th><th>状态</th><th>健康</th><th style="width:250px">操作</th></tr></thead>
@@ -3155,12 +3543,14 @@ async function viewAccounts(el) {
           : a.needs_relogin
           ? `<span class="faint fs-xs">重新登录一次（或「手动粘贴」）即可恢复</span>
              <button class="btn sm" onclick="acDelete('${att(a.id)}')">删除</button>`
-          : `<button class="btn sm" onclick="acVerify('${att(a.id)}', this)" title="立刻用该凭据发一次验活请求">检查</button>
+          : `<div class="acts">
+             <button class="btn sm" onclick="acVerify('${att(a.id)}', this)" title="立刻用该凭据发一次验活请求">检查</button>
              ${a.balance_supported ? `<button class="btn sm" onclick="acBalance('${att(a.id)}', this)" title="查询积分余额（该平台有计费端点）">积分</button>` : ''}
-              <button class="btn sm" onclick="acLimit('${att(a.id)}')" title="Token 周期限额：防用量过猛被上游盯上">限额</button>
+             <button class="btn sm" onclick="acLimit('${att(a.id)}')" title="Token 周期限额：防用量过猛被上游盯上">限额</button>
              <button class="btn sm" onclick="acRename('${att(a.id)}', this)" title="给这个号起个认得出的名字（同平台不能重名）">改名</button>
              <button class="btn sm" onclick="acToggle('${att(a.id)}', ${a.enabled ? 'false' : 'true'})">${a.enabled ? '停用' : '启用'}</button>
-             <button class="btn sm" onclick="acDelete('${att(a.id)}')">删除</button>`}
+             <button class="btn sm danger" onclick="acDelete('${att(a.id)}')">删除</button>
+             </div>`}
       </td>
     </tr>`).join('')}</tbody></table>` : '<div class="empty">还没有账号：到「接入源」页挑一个平台接入</div>'}
     ${ac.rows.some((a) => a.needs_relogin) ? `<div class="note"><b>有 ${ac.rows.filter((a) => a.needs_relogin).length} 个账号的凭据在本机解不开</b>：磁盘上的凭据用 Windows DPAPI 加密，密钥绑定「当前 Windows 用户 + 本机」—— 从别的机器 / 别的 Windows 用户拷过来的 accounts.json 在这里解不开。把文件搬回原机器即可恢复，也可以在本机重新登录一次（旧的密文会原样保留，不会被覆盖）。</div>` : ''}
@@ -3420,6 +3810,30 @@ async function acDelete(id) {
   render();
 }
 
+/// 保存自动执行配置：执行时刻 + 逐平台勾选。
+///
+/// ★ 勾选「按需参与」后，后端 daily_at_hour_loop 每轮重新读 flags，
+///   所以这里保存完下一轮就生效，不用重启服务。
+/// ★ 用户一个都不勾 = 明确表示「不自动签任何平台」，后端会整体跳过；
+///   与「从未配置过」（空集 = 沿用总开关）是两种状态，靠 per_platform 区分。
+async function wbSaveAutoConfig() {
+  const sel = document.getElementById('wbRunHour');
+  const hour = sel ? Number(sel.value) : 9;
+  const ids = [...document.querySelectorAll('.wb-platforms input[type=checkbox]:checked')]
+    .map((c) => c.value);
+  const box = document.getElementById('wbAutoMsg');
+  const r = await post('/api/checkin', {
+    action: 'config',
+    set_run_hour: hour,
+    set_platforms: ids,
+  }).catch((e) => ({ ok: false, message: e.message }));
+  if (box) {
+    box.innerHTML = (r && r.ok)
+      ? `<span class="c-ok">✔ 已保存：每天 ${String(hour).padStart(2, '0')}:00 自动执行 · ${ids.length} 个平台参与自动签到</span>`
+      : `<span class="c-err">保存失败：${esc((r && r.message) || '未知错误')}</span>`;
+  }
+}
+
 // 自动签到后台任务的上一次结果（ok 优先；最近一次是失败就显示失败——
 // 成功过一次不能把之后的失败盖住，与 freeSourceLine 同一套口径）。
 function checkinTaskLine(t) {
@@ -3677,7 +4091,260 @@ async function viewRuntime(el) {
     </div>
     <div id="rtMsg" class="mt-3"></div>
   </section>
-  ${await sysPromptCard()}`;
+  ${await sysPromptCard()}
+  ${await historyTrimCard()}
+  ${await thinkTagsCard()}
+  ${await modelMapCard()}
+  ${await paramOverrideCard()}`;
+}
+
+// ── 参数覆盖（param_override）────────────────────────────────────
+//
+// 真实用途是**自动修掉上游不认的参数**，而不是审计：
+//   · 某平台不认 tools（回 400）    → 删掉它
+//   · 推理模型必须去掉 temperature → 按模型名条件匹配
+//   · 想给所有请求兜底 max_tokens   → 直接设
+//
+// ★ 为什么这里用 JSON 文本框而不是可视化表单：
+//   配置本身是「按路径操作的规则列表」（path + mode + conditions 嵌套），
+//   做成表单会变成一个规则编辑器 —— 工作量大、且很容易做出「界面能填但语义错」
+//   的东西。而它的实际用户是愿意写两行 JSON 的人，文本框 + 即时校验反而更准。
+//   校验失败**不会**写入配置，所以不会把服务搞挂。
+async function paramOverrideCard() {
+  let c = {};
+  try {
+    const r = await api('/api/param_override');
+    c = (r && r.cfg) || {};
+  } catch (_) {}
+  const on = c.enabled === true;
+  // 复原成用户能看懂、能直接改的 JSON
+  const draft = {};
+  if (c.direct && typeof c.direct === 'object') Object.assign(draft, c.direct);
+  const pretty = Object.keys(draft).length ? JSON.stringify(draft, null, 2) : '';
+  return `<section class="card mt-3">
+    <div class="card-t"><b>参数覆盖</b>
+      <span class="faint small ml-2">自动修掉上游不认的请求参数</span></div>
+    <div class="faint small" style="margin-bottom:12px">
+      两种写法都支持：<br>
+      · <b>直接设置</b>：<span class="mono">{"max_tokens": 8000, "temperature": 0.2}</span><br>
+      · <b>有序操作</b>：<span class="mono">{"operations": [{"path":"tools","mode":"delete",
+        "conditions":[{"path":"model","mode":"contains","value":"reasoner"}]}]}</span><br>
+      支持的 mode：<span class="mono">set / delete / replace / prepend / append / trim_space / to_lower / to_upper</span>。
+      条件 mode：<span class="mono">full / prefix / suffix / contains / gt / gte / lt / lte</span>。
+      路径用点分，<span class="mono">a.b.0</span> 里数字段是数组下标。
+      <br>⚠ 对「客户端/网页协议」类平台（OrcaTerm、MonkeyCode、豆包等）**哪些参数有意义取决于该平台的
+      adapter**：它们不是 OpenAI 透传，请求要重新翻译成上游自己的协议。例如 OrcaTerm 的对话走 agent
+      协议，实测 <span class="mono">max_tokens</span> 对它无效（AutoClaw 那类则会转发）。这类平台最稳的用法是
+      用 <span class="mono">delete</span> 去掉上游不认的字段。
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:8px">
+      <input type="checkbox" id="poOn" ${on ? 'checked' : ''} class="w-auto"> 启用
+    </label>
+    <textarea id="poText" rows="8" class="q mono"
+      placeholder='{&#10;  "max_tokens": 8000&#10;}'>${esc(pretty)}</textarea>
+    <div class="row mt-2">
+      <button class="btn pri" onclick="paramOverrideSave()">校验并保存</button>
+      <button class="btn gh" onclick="paramOverrideClear()">清空规则</button>
+    </div>
+    <div id="poMsg" class="mt-2"></div>
+  </section>`;
+}
+
+async function paramOverrideSave() {
+  const box = $('#poMsg');
+  const txt = (($('#poText') || {}).value || '').trim();
+  let cfg;
+  if (!txt) {
+    // 空文本 = 没有规则。允许保存（等于关闭），但不静默清掉 enabled。
+    cfg = {};
+  } else {
+    try {
+      cfg = JSON.parse(txt);
+    } catch (e) {
+      // ★ 前端先拦一次：语法错的 JSON 交给后端只会得到一句泛泛的解析失败。
+      if (box) box.innerHTML = `<span class="c-err">JSON 语法错误：${esc(e.message)}（未保存）</span>`;
+      return;
+    }
+    if (typeof cfg !== 'object' || cfg === null || Array.isArray(cfg)) {
+      if (box) box.innerHTML = `<span class="c-err">顶层必须是一个对象（形如 {"max_tokens": 8000}，未保存）</span>`;
+      return;
+    }
+  }
+  cfg.enabled = !!($('#poOn') && $('#poOn').checked);
+  // 规则条数：直接设置的键数 + operations 条数 —— 让用户确认自己写了多少条
+  const directN = Object.keys(cfg).filter((k) => k !== 'operations' && k !== 'enabled').length;
+  const opsN = Array.isArray(cfg.operations) ? cfg.operations.length : 0;
+  const r = await post('/api/param_override', { cfg }).catch((e) => ({ ok: false, message: e.message }));
+  if (box) {
+    box.innerHTML = (r && r.ok)
+      ? `<span class="c-ok">✔ 已保存并立即生效（直接设置 ${directN} 条、操作 ${opsN} 条，${cfg.enabled ? '已启用' : '未启用'}）</span>`
+      : `<span class="c-err">保存失败：${esc((r && r.message) || '未知错误')}</span>`;
+  }
+}
+
+async function paramOverrideClear() {
+  if (!confirm('清空所有参数覆盖规则？（不影响其他配置）')) return;
+  const t = $('#poText'); if (t) t.value = '';
+  const on = $('#poOn'); if (on) on.checked = false;
+  const box = $('#poMsg');
+  const r = await post('/api/param_override', { cfg: { enabled: false } })
+    .catch((e) => ({ ok: false, message: e.message }));
+  if (box) {
+    box.innerHTML = (r && r.ok)
+      ? '<span class="c-ok">✔ 规则已清空并停用</span>'
+      : `<span class="c-err">清空失败：${esc((r && r.message) || '未知错误')}</span>`;
+  }
+}
+
+// ── 历史裁剪（history_trim）──────────────────────────────────────
+//
+// 为什么要有入口：这个功能默认就是**开着的**（日志里能看到
+// `history_trim：已开启（工具结果上限 2000 字符）`），但面板上没有任何地方能查看
+// 或调整它 —— 用户只会在账单上感觉到「token 少花了」，却不知道是谁做的、怎么关。
+// 一个默认生效、影响每条请求、又完全不可见的功能，是排查问题时的黑洞。
+async function historyTrimCard() {
+  let c = {};
+  try {
+    const r = await api('/api/history_trim');
+    c = (r && r.cfg) || {};
+  } catch (_) {}
+  const on = c.enabled !== false;
+  return `<section class="card mt-3">
+    <div class="card-t"><b>历史裁剪</b>
+      <span class="faint small ml-2">压缩过长的工具结果，省 token（默认开启）</span></div>
+    <div class="faint small" style="margin-bottom:12px">
+      智能体会把工具输出（读文件、跑命令）原样塞进下一轮历史。一个 5000 行的文件读上几次，
+      历史里就堆了几万字符，**每一轮都要重新付费**。开启后超长的工具结果会被截断到上限长度，
+      正文与 system 不动。改完立即生效，存 <span class="mono">data/history_trim.json</span>。
+    </div>
+    <div class="row" style="gap:14px;align-items:center">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="htOn" ${on ? 'checked' : ''} class="w-auto"> 启用
+      </label>
+      <label style="display:flex;align-items:center;gap:6px">工具结果上限
+        <input class="q mono" id="htMax" style="width:110px" value="${esc(String(c.maxToolLength || 2000))}">
+        <span class="faint small">字符</span>
+      </label>
+    </div>
+    <div class="row mt-2">
+      <button class="btn pri" onclick="historyTrimSave()">保存</button>
+    </div>
+    <div id="htMsg" class="mt-2"></div>
+  </section>`;
+}
+
+async function historyTrimSave() {
+  const box = $('#htMsg');
+  const cfg = {
+    enabled: !!($('#htOn') && $('#htOn').checked),
+    maxToolLength: Math.max(200, Number(($('#htMax') || {}).value) || 2000),
+  };
+  const r = await post('/api/history_trim', { cfg }).catch((e) => ({ ok: false, message: e.message }));
+  if (box) {
+    box.innerHTML = (r && r.ok)
+      ? `<span class="c-ok">✔ 已保存（${cfg.enabled ? '开启' : '关闭'}，上限 ${cfg.maxToolLength} 字符）</span>`
+      : `<span class="c-err">保存失败：${esc((r && r.message) || '未知错误')}</span>`;
+  }
+}
+
+// ── 思考标签（think_tags）──────────────────────────────────────
+//
+// 有些模型把思考写进正文的 <think>…</think> 里。智能体会把正文存进历史并在下一轮
+// 原样发回 —— 不处理等于每轮都为同一段思考重复付费。
+async function thinkTagsCard() {
+  let mode = null;
+  try {
+    const r = await api('/api/think_tags');
+    mode = r && r.mode;
+  } catch (_) {}
+  const opt = (v, label, desc) =>
+    `<option value="${v}" ${String(mode || '') === v ? 'selected' : ''}>${label}${desc ? ' —— ' + desc : ''}</option>`;
+  return `<section class="card mt-3">
+    <div class="card-t"><b>思考标签处理</b>
+      <span class="faint small ml-2">模型把思考写进正文时怎么办</span></div>
+    <div class="faint small" style="margin-bottom:12px">
+      部分模型会在正文里输出 <span class="mono">&lt;think&gt;…&lt;/think&gt;</span>。智能体会把正文
+      存进历史并在下一轮原样发回，不处理就是**每轮都为同一段思考重复付费**；
+      而直接删掉又可能让某些客户端以为回答被截断。
+    </div>
+    <div class="row">
+      <select class="q" id="ttMode" style="width:auto">
+        ${opt('', '不处理', '原样保留')}
+        ${opt('strip', '剥掉', '从正文移除（省 token）')}
+        ${opt('to_content', '转成 reasoning_content', '保留但移到思考字段')}
+      </select>
+      <button class="btn pri" onclick="thinkTagsSave()">保存</button>
+    </div>
+    <div id="ttMsg" class="mt-2"></div>
+  </section>`;
+}
+
+async function thinkTagsSave() {
+  const box = $('#ttMsg');
+  const sel = $('#ttMode');
+  const mode = sel ? sel.value : '';
+  const r = await post('/api/think_tags', { mode: mode || null }).catch((e) => ({ ok: false, message: e.message }));
+  if (box) {
+    box.innerHTML = (r && r.ok)
+      ? `<span class="c-ok">✔ 已保存（${mode ? esc(mode) : '不处理'}）</span>`
+      : `<span class="c-err">保存失败：${esc((r && r.message) || '未知错误')}</span>`;
+  }
+}
+
+// ── 模型名重定向（model_map）──────────────────────────────────
+//
+// 两个真实用途：① 客户端写死了某个模型名，想让它落到别的模型；
+// ② 上游改名了，不想改客户端配置。另有「保留上游模型名」开关：
+// Claude Code 会读回模型名来推算上下文窗口，看到上游真名会算错窗口大小。
+async function modelMapCard() {
+  let c = {};
+  try {
+    const r = await api('/api/model_map');
+    c = (r && r.cfg) || {};
+  } catch (_) {}
+  const map = c.mapping && typeof c.mapping === 'object' ? c.mapping : {};
+  const lines = Object.entries(map).map(([k, v]) => `${k} = ${v}`).join('\n');
+  return `<section class="card mt-3">
+    <div class="card-t"><b>模型名重定向</b>
+      <span class="faint small ml-2">把客户端请求的模型名换成另一个</span></div>
+    <div class="faint small" style="margin-bottom:12px">
+      每行一条 <span class="mono">客户端名 = 实际模型</span>。适合「客户端里写死的名字想落到别的模型」
+      或「上游改了模型名但不想动客户端配置」。
+    </div>
+    <textarea id="mmText" rows="4" class="q mono"
+      placeholder="claude-sonnet-5-5 = gpt-5.5&#10;my-fast-model = glm-5.3-flash">${esc(lines)}</textarea>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:var(--sp-2)">
+      <input type="checkbox" id="mmKeep" ${c.keep_upstream_name ? 'checked' : ''} class="w-auto">
+      响应里保留上游的模型名
+      <span class="faint small">（关掉则还原成客户端请求的名字，Claude Code 靠它推算上下文窗口）</span>
+    </label>
+    <div class="row mt-2">
+      <button class="btn pri" onclick="modelMapSave()">保存</button>
+    </div>
+    <div id="mmMsg" class="mt-2"></div>
+  </section>`;
+}
+
+async function modelMapSave() {
+  const box = $('#mmMsg');
+  const txt = ($('#mmText') || {}).value || '';
+  const mapping = {};
+  for (const line of String(txt).split('\n')) {
+    const s = line.trim();
+    if (!s || s.startsWith('#')) continue;
+    const i = s.indexOf('=');
+    if (i <= 0) continue;
+    const k = s.slice(0, i).trim();
+    const v = s.slice(i + 1).trim();
+    if (k && v) mapping[k] = v;
+  }
+  const cfg = { mapping, keep_upstream_name: !!($('#mmKeep') && $('#mmKeep').checked) };
+  const r = await post('/api/model_map', { cfg }).catch((e) => ({ ok: false, message: e.message }));
+  if (box) {
+    box.innerHTML = (r && r.ok)
+      ? `<span class="c-ok">✔ 已保存（${Object.keys(mapping).length} 条重定向）</span>`
+      : `<span class="c-err">保存失败：${esc((r && r.message) || '未知错误')}</span>`;
+  }
 }
 
 // ★ 2026-10-28（对齐 magpie system-prompt 插件）：自定义系统提示词注入。
@@ -3799,10 +4466,32 @@ async function viewLogs(el) {
   if (!r || !r.ok) { box.innerHTML = '<div class="note errnote">' + esc((r && r.message) || '读取失败') + '</div>'; return; }
   const ls = r.lines || [];
   if (!ls.length) { box.innerHTML = '<div class="faint">没有匹配的日志行（换个关键词或级别）</div>'; return; }
-  box.innerHTML = ls.map((l) => {
-    const cls = l.includes(' ERROR ') ? ' class="c-err"' : (l.includes(' WARN ') ? ' class="c-warn"' : '');
-    return '<div' + cls + '>' + esc(l) + '</div>';
-  }).join('')
+  // ★ 逐行着色（2026-11 换皮）：旧实现只给整行套一个 c-err / c-warn 颜色，
+  //   暗色主题下 INFO 行是默认正文色、WARN 行是暗黄，几乎分不出差别 ——
+  //   实测截图里整屏日志看起来是一片灰，扫视时找不到「哪几行是警告」。
+  //
+  //   现在把一行拆成「时间戳 / 级别 / 模块 / 正文」四段分别上色：
+  //   · 时间戳压暗（它是定位用的，不该抢注意力）
+  //   · 级别做成小徽章（ERROR 红 / WARN 黄 / INFO 蓝灰），一眼能扫到
+  //   · 模块名用等宽暗色（aigw_server::tasks 这类，扫视时用来分区）
+  //   · 正文保持正常亮度（真正要读的东西）
+  //
+  //   日志行格式固定：`2026-11-05T05:10:24.391234Z  INFO aigw_server::tasks: 消息`
+  const fmtLine = (raw) => {
+    // 时间戳：到第一个空格
+    const m = raw.match(/^(\S+)\s+(\w+)\s+(\S+?):\s?([\s\S]*)$/);
+    if (!m) return `<div class="log-row">${esc(raw)}</div>`;
+    const [, ts, lvl, mod, msg] = m;
+    const lv = lvl.toUpperCase();
+    const cls = lv === 'ERROR' ? 'err' : lv === 'WARN' ? 'warn' : lv === 'INFO' ? 'info' : 'dbg';
+    return `<div class="log-row log-${cls}">
+      <span class="log-ts">${esc(ts)}</span>
+      <span class="log-lv">${esc(lv)}</span>
+      <span class="log-mod">${esc(mod)}</span>
+      <span class="log-msg">${esc(msg)}</span>
+    </div>`;
+  };
+  box.innerHTML = ls.map(fmtLine).join('')
     + '<div class="faint mt-2">── 共 ' + ls.length + ' 行 · 日志文件约 '
     + Math.round((r.file_size || 0) / 1024) + ' KiB（尾部 256 KiB 窗口内查找）──</div>';
   box.scrollTop = box.scrollHeight;
@@ -3967,12 +4656,12 @@ function keysCard() {
             : '<span class="faint">不限制（全部模型）</span>') + '</td>'
           + '<td class="faint">' + esc(k.note || '—') + '</td>'
           + '<td>' + (k.key_broken ? pill('err', '密文解不开') : k.enabled ? pill('ok', '启用') : pill('mut', '停用')) + '</td>'
-          + '<td>'
-            + '<button class="btn sm" onclick="keyEdit(\'' + att(k.id) + '\')">改白名单</button> '
-            + '<button class="btn sm" onclick="keyToggle(\'' + att(k.id) + '\', ' + (k.enabled ? 'false' : 'true') + ')">' + (k.enabled ? '停用' : '启用') + '</button> '
-            + '<button class="btn sm" onclick="keyRotate(\'' + att(k.id) + '\')" title="换一把新密钥，旧的立刻失效">轮换</button> '
-            + '<button class="btn sm" onclick="keyDelete(\'' + att(k.id) + '\')">删除</button>'
-          + '</td></tr>').join('')
+          + '<td><div class="acts">'
+            + '<button class="btn sm" onclick="keyEdit(\'' + att(k.id) + '\')">改白名单</button>'
+            + '<button class="btn sm" onclick="keyToggle(\'' + att(k.id) + '\', ' + (k.enabled ? 'false' : 'true') + ')">' + (k.enabled ? '停用' : '启用') + '</button>'
+            + '<button class="btn sm" onclick="keyRotate(\'' + att(k.id) + '\')" title="换一把新密钥，旧的立刻失效">轮换</button>'
+            + '<button class="btn sm danger" onclick="keyDelete(\'' + att(k.id) + '\')">删除</button>'
+          + '</div></td></tr>').join('')
       + `</tbody></table>`
     : '<div class="empty mt-3">还没有访问密钥：不建也能正常用（走面板令牌 / 本机回环免鉴权）</div>';
   return `<section class="card">
@@ -4021,11 +4710,11 @@ function combosCard() {
             + '<td>' + esc(comboStrategyTxt(c.strategy)) + (c.strategy === 'round-robin' ? ' <span class="faint small">粘 ' + (c.sticky_limit || 1) + ' 轮</span>' : '') + '</td>'
             + '<td>' + effCell + '</td>'
             + '<td>' + (c.enabled ? pill('ok', '启用') : pill('mut', '停用')) + '</td>'
-            + '<td>'
-              + '<button class="btn sm" onclick="comboEdit(\'' + att(c.id) + '\')">编辑</button> '
-              + '<button class="btn sm" onclick="comboToggle(\'' + att(c.id) + '\', ' + (c.enabled ? 'false' : 'true') + ')">' + (c.enabled ? '停用' : '启用') + '</button> '
-              + '<button class="btn sm" onclick="comboDelete(\'' + att(c.id) + '\')">删除</button>'
-            + '</td></tr>';
+            + '<td><div class="acts">'
+              + '<button class="btn sm" onclick="comboEdit(\'' + att(c.id) + '\')">编辑</button>'
+              + '<button class="btn sm" onclick="comboToggle(\'' + att(c.id) + '\', ' + (c.enabled ? 'false' : 'true') + ')">' + (c.enabled ? '停用' : '启用') + '</button>'
+              + '<button class="btn sm danger" onclick="comboDelete(\'' + att(c.id) + '\')">删除</button>'
+            + '</div></td></tr>';
         }).join('')
       + '</tbody></table>'
     : '<div class="empty mt-3">还没有模型链。建一条之后，客户端填 <code class="mono">combo:&lt;名字&gt;</code> 当模型名即可</div>';
@@ -4371,7 +5060,7 @@ document.querySelectorAll('.navbtn').forEach((b) => b.addEventListener('click', 
 (async () => {
   document.getElementById('foot').textContent = `BUILD ${BUILD} · JS就绪`;
   try {
-    const h = await api('/api/health');
+    const h = await apiHealth();
     document.getElementById('foot').textContent = `BUILD ${BUILD} · ${h.milestone}`;
   } catch (_) { /* health 失败保留 JS就绪 标记 */ }
   route();

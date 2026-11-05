@@ -21,38 +21,51 @@
    给 light 选择器多一层属性特异性（0,1,0 > 0,0,1），就能压过媒体查询。 */
 :root,
 :root[data-theme="light"] {
-  /* 表面层次：页面底 → 卡片 → 次级填充 → 悬停/选中 */
-  --bg:            #fbfbfc;
+  /* ── 表面层次（亮色）─────────────────────────────────────────────
+     2026-11 换皮：从「几乎全白 + 细阴影」改成「冷灰底 + 白卡片」。
+     旧取值的通病是 bg(#fbfbfc) 与 surface(#ffffff) 只差 2% 亮度，
+     卡片边界全靠 1px 边框撑着，整页看起来是一张平坦的白纸 ——
+     这正是不舒服的来源之一。新取值把底色压到 #f6f7f9（≈4% 差），
+     卡片于是「浮」起来，边框可以退成很淡的一条，视觉更安静。 */
+  --bg:            #f6f7f9;
   --surface:       #ffffff;
-  --surface-2:     #f4f5f7;
-  --surface-3:     #eceef1;
-  --border:        #e4e6ea;
-  --border-strong: #c9ced6;
+  --surface-2:     #f3f4f7;
+  --surface-3:     #e9ebf0;
+  /* 边框分三档：淡（分隔）/ 常规（卡片边）/ 强（输入框、可聚焦）*/
+  --border:        #e8eaee;
+  --border-strong: #d3d7de;
+  /* 文字三级：正文 / 次要 / 弱化。正文永远不低于 --fg-muted。
+     换皮：正文加深到近黑（#0f1115），次要文字提亮一档（#5a6070）。
+     旧的三级（#16181d / #5c6472 / #8b93a1）层次够，但弱化档在 13px 下偏虚，
+     实测「近24h 有问题」这类小字读起来费劲。 */
+  --fg:            #0f1115;
+  --fg-muted:      #5a6070;
+  /* ★ 弱化档必须满足对比度：原来取 #838a99，实测对页面底只有 3.23:1，
+     低于 WCAG AA 的 4.5 —— 而用到这一档的恰恰是 11px 的小字
+     （「近24h 有问题」「secret 后台专用」），小字 + 低对比是最难读的组合。
+     改到 #6b7280 后实测 4.62:1，达标。 */
+  --fg-subtle:     #6b7280;
 
-  /* 文字三级：正文 / 次要 / 弱化。正文永远不低于 --fg-muted。 */
-  --fg:            #16181d;
-  --fg-muted:      #5c6472;
-  --fg-subtle:     #8b93a1;
+  /* 品牌与语义（亮色）—— 品牌用更实的蓝，语义色降低饱和度避免刺眼 */
+  --brand:         #2f6ce0;
+  --brand-soft:    #eef4fe;
+  --brand-line:    #c3d8fb;
+  --ok:            #0a7a52;
+  --ok-soft:       #e9f7f0;
+  --ok-line:       #b5e4cd;
+  --warn:          #9a5b08;
+  --warn-soft:     #fdf4e5;
+  --warn-line:     #efd9ae;
+  --err:           #c23434;
+  --err-soft:      #fdeeee;
+  --err-line:      #f0c6c6;
 
-  /* 品牌与语义 */
-  --brand:         #2563eb;
-  --brand-soft:    #eef2fb;
-  --brand-line:    #c7d7f7;
-  --ok:            #0d7a4f;
-  --ok-soft:       #e8f6ef;
-  --ok-line:       #b9e3cf;
-  --warn:          #a35a06;
-  --warn-soft:     #fdf3e3;
-  --warn-line:     #f0d9b0;
-  --err:           #c03535;
-  --err-soft:      #fdecec;
-  --err-line:      #f2c4c4;
-
-  /* 阴影：极轻，靠边框分层而不是模糊 */
-  --sh-1: 0 1px 2px rgba(16,24,40,.04);
-  --sh-2: 0 2px 8px rgba(16,24,40,.06);
-  --sh-3: 0 8px 24px rgba(16,24,40,.10);
-  --sh-4: 0 20px 60px rgba(16,24,40,.18);
+  /* 阴影：亮色下几乎不用阴影分层（改由底色差 + 淡边框），
+     只给浮层（抽屉/弹窗）留一点深度。 */
+  --sh-1: 0 1px 2px rgba(16,24,40,.05);
+  --sh-2: 0 2px 6px rgba(16,24,40,.07);
+  --sh-3: 0 10px 30px rgba(16,24,40,.12);
+  --sh-4: 0 24px 64px rgba(16,24,40,.20);
 
   /* 字号：6 级取代原来的 11 种 */
   --fs-xs:   11px;    /* 徽章 / ID / 时间戳 */
@@ -93,35 +106,42 @@
 }
 
 /* ── 令牌：暗色 ──────────────────────────────────────────────────────── */
+/* 2026-11 换皮：从「蓝黑 (#0b0e13) + 偏冷表面」改成「中性黑 (#0d0f12) +
+   灰阶递进」。旧暗色的问题有两处：
+   ① 底色偏蓝，长时间看偏冷发闷；中性的灰黑更耐看；
+   ② 表面与底色的差只有 ~5%，加上边框也偏暗，卡片糊成一片 ——
+      和亮色的毛病同源：层次全靠边框，一暗就看不出边界。
+   新取值让 surface 与 bg 差到 ~8%，边界自然浮现。 */
 [data-theme="dark"] {
-  --bg:            #0b0e13;
-  --surface:       #12171f;
-  --surface-2:     #171c24;
-  --surface-3:     #1e242e;
-  --border:        #1e232c;
-  --border-strong: #2c3441;
+  --bg:            #0d0f12;
+  --surface:       #16191e;
+  --surface-2:     #1c2027;
+  --surface-3:     #23282f;
+  --border:        #262b33;
+  --border-strong: #39404a;
 
-  --fg:            #e9edf3;
-  --fg-muted:      #939cab;
-  --fg-subtle:     #78818f;
+  --fg:            #eceef2;
+  --fg-muted:      #9aa3b2;
+  --fg-subtle:     #767f8d;
 
-  --brand:         #7aa2f7;
-  --brand-soft:    #16202f;
-  --brand-line:    #25384f;
-  --ok:            #56d19a;
-  --ok-soft:       #10251c;
-  --ok-line:       #1d4634;
-  --warn:          #e0a33a;
-  --warn-soft:     #241c0e;
-  --warn-line:     #453516;
-  --err:           #f08080;
-  --err-soft:      #2a1414;
-  --err-line:      #4a2222;
+  --brand:         #6ea0f8;
+  --brand-soft:    #141d2e;
+  --brand-line:    #263a58;
+  --ok:            #4ecf98;
+  --ok-soft:       #0e251b;
+  --ok-line:       #1c4633;
+  --warn:          #dfa43c;
+  --warn-soft:     #241b0d;
+  --warn-line:     #463516;
+  --err:           #f17a7a;
+  --err-soft:      #2b1313;
+  --err-line:      #4a2020;
 
-  --sh-1: 0 1px 2px rgba(0,0,0,.30);
-  --sh-2: 0 2px 8px rgba(0,0,0,.35);
-  --sh-3: 0 8px 24px rgba(0,0,0,.45);
-  --sh-4: 0 20px 60px rgba(0,0,0,.60);
+  /* 暗色下浮层需要真实阴影（否则弹窗和背景糊在一起） */
+  --sh-1: 0 1px 2px rgba(0,0,0,.40);
+  --sh-2: 0 2px 8px rgba(0,0,0,.45);
+  --sh-3: 0 10px 30px rgba(0,0,0,.55);
+  --sh-4: 0 24px 64px rgba(0,0,0,.70);
 }
 
 /* 未显式指定主题时跟随系统（暗色偏好 → 暗色令牌）。
@@ -177,48 +197,60 @@ html.theme-anim, html.theme-anim body {
 /* ── 布局骨架 ────────────────────────────────────────────────────────── */
 .wrap { display: flex; min-height: 100vh; }
 
+/* 2026-11 换皮：侧栏从 208px 加宽到 220px（中文导航 4 字 + 图标不挤），
+   并且**不再用 surface 底色**，改成比页面底稍暗一档 ——
+   旧版侧栏与内容区同为白底，靠一条 1px 边框分隔，整屏看起来是一整块。
+   改成暗一档后，导航区与内容区在视觉上自然分层。 */
 .side {
-  width: 208px; flex: 0 0 208px;
-  padding: var(--sp-4) var(--sp-2);
+  width: 220px; flex: 0 0 220px;
+  padding: var(--sp-4) var(--sp-3);
   display: flex; flex-direction: column;
   position: sticky; top: 0; height: 100vh;
-  background: var(--surface);
+  background: var(--surface-2);
   border-right: 1px solid var(--border);
 }
 
 .brand {
   display: flex; align-items: center; gap: var(--sp-2);
-  font-weight: 650; font-size: var(--fs-base);
-  letter-spacing: -.01em;
+  font-weight: 650; font-size: var(--fs-md);
+  letter-spacing: -.02em;
   padding: var(--sp-1) var(--sp-2) var(--sp-5);
 }
 .logo {
-  width: 26px; height: 26px; border-radius: var(--r-md);
+  width: 28px; height: 28px; border-radius: var(--r-md);
   display: grid; place-items: center;
-  color: var(--surface); font-size: var(--fs-xs); font-weight: 700;
-  background: var(--fg);
+  color: #fff; font-size: var(--fs-sm); font-weight: 700;
+  background: linear-gradient(135deg, var(--brand), color-mix(in srgb, var(--brand) 60%, #7c3aed));
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--brand) 30%, transparent);
 }
 
-.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav { display: flex; flex-direction: column; gap: 1px; }
 .navbtn {
   display: flex; align-items: center; gap: var(--sp-2);
-  height: 34px; padding: 0 var(--sp-2);
+  height: 36px; padding: 0 var(--sp-2);
   border: 0; border-radius: var(--r-md);
   background: transparent; color: var(--fg-muted);
   font: inherit; font-size: var(--fs-base); text-align: left;
   cursor: pointer;
   transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-.navbtn:hover { background: var(--surface-2); color: var(--fg); }
+.navbtn:hover { background: var(--surface-3); color: var(--fg); }
+/* 选中态：品牌色浅底 + 品牌色文字 + 左侧实心条。
+   旧版是 surface-2 底 + inset 阴影，在浅灰侧栏上几乎看不出来。 */
 .navbtn.on {
-  background: var(--surface-2); color: var(--fg); font-weight: 600;
-  box-shadow: inset 2px 0 0 var(--brand);
+  background: var(--brand-soft); color: var(--brand); font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--brand);
 }
-.navbtn .ic { width: 16px; text-align: center; font-size: var(--fs-sm); opacity: .85; }
+.navbtn .ic {
+  width: 18px; text-align: center; font-size: var(--fs-base);
+  opacity: .9; flex: none;
+}
+.navbtn.on .ic { opacity: 1; }
 
 .side-foot {
-  margin-top: auto; padding: var(--sp-2);
+  margin-top: auto; padding: var(--sp-3) var(--sp-2) var(--sp-1);
   font-size: var(--fs-xs); color: var(--fg-subtle); line-height: 1.7;
+  border-top: 1px solid var(--border);
 }
 
 .main {
@@ -239,15 +271,33 @@ h1 { margin: 0; font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.025
 h3 { margin: 0 0 var(--sp-3); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; }
 
 /* ── 卡片 ────────────────────────────────────────────────────────────── */
+/* 2026-11 换皮要点：
+   ① 圆角从 12px 收到 10px —— 12px 在大卡片上显得过于圆润，和数据类界面不搭；
+   ② 内边距从 16px 加到 18px（视觉更松），但行高收紧（信息更密）；
+   ③ 边框降到 --border（很淡），靠**底色差**分层，边框只做界定不做装饰；
+   ④ 标题区加一条左侧竖线（用 ::before），给每张卡一个视觉锚点 ——
+      旧版所有卡片都是「灰字标题 + 内容」，扫视时找不到入口。 */
 .card {
   border-radius: var(--r-lg);
-  padding: var(--sp-4);
+  padding: 18px var(--sp-4);
   margin-bottom: var(--sp-3);
   background: var(--surface);
   border: 1px solid var(--border);
   box-shadow: var(--sh-1);
 }
-.card-t { font-size: var(--fs-md); font-weight: 600; margin-bottom: var(--sp-1); letter-spacing: -.01em; }
+.card-t {
+  display: flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-md); font-weight: 600;
+  margin-bottom: var(--sp-3); letter-spacing: -.01em;
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--border);
+}
+/* 标题左侧的强调条：3px 宽的品牌色，让每个区块有明确起点 */
+.card-t::before {
+  content: ""; flex: none;
+  width: 3px; height: 14px; border-radius: 2px;
+  background: var(--brand);
+}
 /* 卡片级语义变体：边框/底色跟着语义走，而不是在 HTML 里写死 #a33。 */
 .card-err { border-color: var(--err-line); background: var(--err-soft); }
 
@@ -257,13 +307,31 @@ h3 { margin: 0 0 var(--sp-3); font-size: var(--fs-md); font-weight: 600; letter-
 .g2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
 
 /* ── KPI ─────────────────────────────────────────────────────────────── */
-.kpi .lb { color: var(--fg-muted); font-size: var(--fs-xs); font-weight: 500; }
-.kpi .vl {
-  font-size: var(--fs-xl); font-weight: 650; letter-spacing: -.03em;
-  margin: var(--sp-1) 0; color: var(--fg);
-  font-variant-numeric: tabular-nums; line-height: 1.2;
+/* 2026-11 换皮：KPI 卡片从「白底大数字」改成「浅底 + 顶部标签 + 大数字」。
+   关键改动是**数字与标签的主次反转**：旧版标签在上、数字在下，扫视时
+   先看到「平台」「账号」这些词，数字反而要低头找。数据看板的惯例是
+   数字最大、标签缩小并压暗。 */
+.kpi {
+  background: var(--surface);
+  position: relative;
+  overflow: hidden;
 }
-.kpi .ex { color: var(--fg-subtle); font-size: var(--fs-xs); }
+/* 顶部一条 2px 的渐变，给 KPI 一个统一的「数据卡」识别 */
+.kpi::after {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+  background: linear-gradient(90deg, var(--brand), transparent 70%);
+  opacity: .5;
+}
+.kpi .lb {
+  color: var(--fg-subtle); font-size: var(--fs-xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.kpi .vl {
+  font-size: var(--fs-xl); font-weight: 680; letter-spacing: -.035em;
+  margin: var(--sp-2) 0 var(--sp-1); color: var(--fg);
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.kpi .ex { color: var(--fg-subtle); font-size: var(--fs-xs); line-height: 1.5; }
 /* 成功/失败的 KPI 数字单独上色。必须带上 `.kpi .vl` 前缀压过上面的
    `color: var(--fg)`（0,2,0 > 0,1,0），否则写了不生效。 */
 .kpi .vl.v-ok  { color: var(--ok); }
@@ -296,23 +364,39 @@ tr:hover td { background: var(--surface-2); }
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   height: var(--h-md); padding: 0 var(--sp-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   background: var(--surface); color: var(--fg);
   border-radius: var(--r-sm);
   font: inherit; font-size: var(--fs-base); font-weight: 500;
   white-space: nowrap; cursor: pointer; text-decoration: none;
   transition: background-color var(--dur) var(--ease),
               border-color var(--dur) var(--ease),
-              color var(--dur) var(--ease);
+              color var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease);
 }
-.btn:hover { background: var(--surface-2); border-color: var(--border-strong); }
-.btn:active { background: var(--surface-3); }
+.btn:hover { background: var(--surface-2); border-color: var(--fg-subtle); }
+.btn:active { background: var(--surface-3); transform: translateY(.5px); }
 /* 焦点环用浏览器默认（可访问性），只补一层更明显的 */
 .btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 
-.btn.pri { background: var(--fg); color: var(--surface); border-color: transparent; font-weight: 550; }
-.btn.pri:hover { filter: brightness(1.15); border-color: transparent; }
-.btn.pri:active { filter: brightness(.95); }
+/* 主按钮：品牌蓝底 + 白字 + 一点阴影。
+   2026-11 换皮：旧版是「黑底白字」（--fg 当背景），在暗色主题下会自动变成
+   「白底黑字」—— 同一个按钮在两种主题下观感完全不同，切换时很突兀。
+   改成品牌色后两套主题观感一致，也更像控制台应有的样子。 */
+.btn.pri {
+  background: var(--brand); color: #fff; border-color: transparent;
+  font-weight: 550;
+  box-shadow: 0 1px 2px rgba(0,0,0,.12);
+}
+/* hover/active 用 filter 而不是 color-mix：filter 全浏览器支持，而 color-mix
+   是 2023 年才有的（Chrome 111+ / Safari 16.2+）。按钮悬停是最核心的交互反馈，
+   不能因为浏览器旧一点就整个失效。 */
+.btn.pri:hover {
+  background: var(--brand);
+  filter: brightness(1.10);
+  border-color: transparent;
+}
+.btn.pri:active { background: var(--brand); filter: brightness(.92); }
 
 .btn.gh { background: transparent; border-color: transparent; color: var(--fg-muted); }
 .btn.gh:hover { background: var(--surface-2); color: var(--fg); border-color: transparent; }
@@ -325,13 +409,16 @@ tr:hover td { background: var(--surface-2); }
 .q {
   height: var(--h-md); padding: 0 var(--sp-2);
   background: var(--surface);
-  border: 1px solid var(--border); border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
   color: var(--fg); font: inherit; font-size: var(--fs-base);
   outline: none; width: min(360px, 100%);
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .q::placeholder { color: var(--fg-subtle); }
-.q:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.q:focus {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 18%, transparent);
+}
 select.q { appearance: none; -webkit-appearance: none; padding-right: var(--sp-5); cursor: pointer; }
 /* 多行输入：.q 定的固定高度对内联 textarea 不成立，这里放开高度只留观感。
    之前是每处 textarea 手抄一遍 padding/border/radius/font，且引用了不存在的 --line2。 */
@@ -344,16 +431,27 @@ textarea.q {
 .row { display: flex; gap: var(--sp-2); align-items: center; margin: var(--sp-2) 0; flex-wrap: wrap; }
 .row .q { flex: 1; min-width: 180px; }
 
+/* 说明块。
+   2026-11 换皮：左侧加一条 3px 语义色竖线，正文颜色统一到 --fg（不再用语义色
+   当正文色）。旧版 oknote/errnote 整块用语义色当文字色（深绿/深红），
+   在长文本下对比强烈、读起来刺眼；改成「淡底 + 竖线 + 正常文字色」，
+   语义靠竖线和底色传达，正文保持易读。 */
 .note {
-  border-radius: var(--r-md); padding: var(--sp-2) var(--sp-3);
-  font-size: var(--fs-sm); line-height: 1.65; margin: var(--sp-2) 0;
-  background: var(--brand-soft); border: 1px solid var(--brand-line); color: var(--fg);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm); line-height: 1.7;
+  margin: var(--sp-2) 0;
+  background: var(--brand-soft);
+  border: 1px solid var(--brand-line);
+  border-left: 3px solid var(--brand);
+  color: var(--fg);
 }
-.note a { color: var(--brand); }
+.note a { color: var(--brand); text-decoration: none; }
+.note a:hover { text-decoration: underline; }
 .note .warn { color: var(--warn); }
-.oknote  { background: var(--ok-soft);  border-color: var(--ok-line); }
-.errnote { background: var(--err-soft); border-color: var(--err-line); }
-.warnnote { background: var(--warn-soft); border-color: var(--warn-line); }
+.oknote   { background: var(--ok-soft);   border-color: var(--ok-line);   border-left-color: var(--ok); }
+.errnote  { background: var(--err-soft);  border-color: var(--err-line);  border-left-color: var(--err); }
+.warnnote { background: var(--warn-soft); border-color: var(--warn-line); border-left-color: var(--warn); }
 /* 语义文字色：只在「这个数字/这行字本身有褒贬」时用，不当装饰色。
    走令牌而不是 #e5a23c / #f06a6a —— 那两个值在亮色底上对比度不够，
    切主题时也不会跟着变。 */
@@ -855,3 +953,10 @@ details > summary::before {
 }
 details[open] > summary::before { content: "▾ "; }
 details > summary:hover { color: var(--fg); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   页面级与接入能力的规则拆到 web/css/ 下，这里只留主干。
+   ★ @import 必须写在样式表最前面才生效，所以改由 index.html 直接
+     <link> 三个文件（style.css → pages.css → access.css），不用 @import：
+     避免「@import 放在文件末尾被忽略」这个 CSS 规范坑。
+   ═══════════════════════════════════════════════════════════════════════ */

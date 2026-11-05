@@ -1,0 +1,85 @@
+import { Card, Kpi, Loading, ErrorBox, useAsync } from '../components';
+import { api, type Usage } from '../api';
+
+const fmt = (n: number) => Number(n || 0).toLocaleString('en-US');
+const ms = (v: number | undefined) => v == null ? '—' : v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms';
+
+/** 零依赖 SVG 面积图（与旧版 trendSVG 同形状，但作为 React 组件可复用）。 */
+function Trend({ values }: { values: number[] }) {
+  if (!values.length) return <div className="faint small">暂无样本</div>;
+  const w = 760, h = 160, max = Math.max(1, ...values);
+  const pts = values.map((v, i) => `${(i / Math.max(1, values.length - 1)) * w},${h - (v / max) * (h - 12)}`);
+  const d = `M0,${h} L${pts.join(' L')} L${w},${h} Z`;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="trend-svg" role="img" aria-label="请求趋势">
+      <defs>
+        <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--brand)" stopOpacity="0.35" />
+          <stop offset="100%" stopColor="var(--brand)" stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      <path d={d} fill="url(#trendFill)" stroke="var(--brand)" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+export function UsagePage() {
+  const us = useAsync<Usage>(() => api.get('/api/usage'), []);
+  const hist = useAsync<{ recent: Array<{ ts?: number; total_tokens?: number; tokensOut?: number }> }>(
+    () => api.get('/api/requests?limit=60'), [],
+  );
+  if (us.error) return <ErrorBox message={us.error} onRetry={us.reload} />;
+  if (us.loading || !us.data) return <Loading />;
+
+  const d = us.data;
+  const realReq = Math.max(0, d.requests - d.cancelled);
+  const rate = realReq ? Math.round((d.success / realReq) * 100) : 100;
+  const rows = d.byPlatform?.rows ?? [];
+  const last = rows.slice(0, 8);
+  const maxOut = Math.max(1, ...last.map((r) => r.requests));
+  const trend = (hist.data?.recent ?? []).map((r) => r.total_tokens ?? r.tokensOut ?? 0).reverse();
+
+  return (
+    <>
+      <div className="grid g4 mb-3">
+        <Kpi label="请求数" value={fmt(d.requests)} />
+        <Kpi label="成功" value={fmt(d.success)} tone="ok" />
+        <Kpi label="失败" value={fmt(d.failed)} tone={d.failed ? 'err' : undefined} hint={`另有 ${fmt(d.cancelled)} 次客户端取消`} />
+        <Kpi label="成功率" value={`${rate}%`} tone={rate >= 90 ? 'ok' : 'warn'} />
+      </div>
+
+      <div className="grid g2">
+        <Card title="首字节 TTFB">
+          <div className="vl">{ms(d.ttfb?.p50)}</div>
+          <div className="faint small">p95 {ms(d.ttfb?.p95)} · {fmt(d.ttfb?.samples ?? 0)} 次流式样本</div>
+        </Card>
+        <Card title="整轮耗时">
+          <div className="vl">{ms(d.latency?.p50)}</div>
+          <div className="faint small">p95 {ms(d.latency?.p95)} · {fmt(d.latency?.samples ?? 0)} 次样本</div>
+        </Card>
+      </div>
+
+      <Card title="输出 tokens 趋势" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>最近 {trend.length} 条</span>}>
+        <Trend values={trend} />
+      </Card>
+
+      <Card title="平台输出榜">
+        {last.length === 0 ? <div className="faint small">暂无数据</div> : last.map((r) => (
+          <div className="rk-row" key={r.key}>
+            <span className="rk-name mono">{r.key}</span>
+            <div className="rk-bar"><i style={{ width: `${Math.round((r.requests / maxOut) * 100)}%` }} /></div>
+            <span className="rk-num">{fmt(r.requests)}</span>
+          </div>
+        ))}
+      </Card>
+
+      <Card title="token 用量">
+        <div className="mini-grid">
+          <div className="mini"><b>输入</b><span className="mono">{fmt(d.tokensIn)}</span></div>
+          <div className="mini"><b>输出</b><span className="mono">{fmt(d.tokensOut)}</span></div>
+          <div className="mini"><b>合计</b><span className="mono">{fmt(d.tokensIn + d.tokensOut)}</span></div>
+        </div>
+      </Card>
+    </>
+  );
+}

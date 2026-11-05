@@ -1,0 +1,96 @@
+/* React 版控制台的样式入口。
+   令牌、布局、组件、页面级规则全部复用现有三份 CSS —— 由 index.html 的三条
+   <link> 在运行时引入（不能写成 CSS @import：PostCSS 会把 /style.css 当磁盘
+   绝对路径解析，构建时报 ENOENT: C:\style.css）。这里只补新框架引入的类。 */
+
+/* ── 顶栏（新框架新增：原来只有 .hd 里的 h1 + 一小排按钮）── */
+.topbar {
+  display: flex; align-items: center; gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky; top: 0; z-index: 20;
+}
+.topbar-ttl { display: flex; align-items: baseline; gap: var(--sp-3); min-width: 0; }
+.topbar-ttl h1 { margin: 0; font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.02em; }
+.topbar-ttl .sub { color: var(--fg-muted); font-size: var(--fs-sm); margin: 0; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
+
+.status-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--fs-xs); color: var(--fg-muted);
+  padding: 3px 9px; border: 1px solid var(--border);
+  border-radius: var(--r-full); background: var(--surface-2);
+}
+.dot-live {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft);
+}
+
+/* ── 侧栏分组标签（参考项目 nav-group-label）── */
+.nav-group { margin-bottom: var(--sp-3); }
+.nav-group-label {
+  font-size: 10px; font-weight: 600; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--fg-subtle);
+  padding: 0 var(--sp-2) var(--sp-1);
+}
+
+.view-wrap { padding: var(--sp-4) var(--sp-5) var(--sp-6); max-width: 1680px; }
+
+/* ── 表格 / 列表辅助 ── */
+.table-scroll { overflow-x: auto; }
+.detail-meta { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-sm); color: var(--fg-muted); }
+.model-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.loading { padding: var(--sp-5); text-align: center; }
+.task-ledger { display: flex; flex-direction: column; gap: 4px; }
+.task-ledger-row {
+  display: grid; grid-template-columns: 160px 130px 90px 1fr;
+  gap: var(--sp-2); align-items: baseline;
+  font-size: var(--fs-xs); padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.task-ledger-row:last-child { border-bottom: 0; }
+.task-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 日志容器 */
+.log-box { max-height: 68vh; overflow: auto; }
+
+/* 运行配置表单 */
+.runtime-grid { display: flex; flex-direction: column; gap: var(--sp-2); }
+.runtime-row {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4);
+  padding: var(--sp-2) 0; border-bottom: 1px solid var(--border);
+}
+.runtime-row:last-child { border-bottom: 0; }
+.runtime-label { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.runtime-label b { font-size: var(--fs-sm); font-family: var(--mono); }
+.preset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--sp-2); }
+.preset-chip {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border);
+  border-radius: var(--r-md); background: var(--surface-2);
+}
+
+/* 图表 */
+.trend-svg { width: 100%; height: 180px; display: block; }
+
+/* React 版列表不用绝对定位（旧版虚拟滚动靠 absolute）；这里用普通流 + 内部滚动 */
+.src-row.static { position: static; height: auto; min-height: 32px; padding: 4px var(--sp-3); }
+.src-list-vp { max-height: 62vh; overflow-y: auto; }
+
+/* 小工具 */
+.p-3 { padding: var(--sp-3); }
+.mb-3 { margin-bottom: var(--sp-3); }
+.mt-2 { margin-top: var(--sp-2); }
+.mt-3 { margin-top: var(--sp-3); }
+.ml-2 { margin-left: var(--sp-2); }
+.ml-auto { margin-left: auto; }
+.fs-xs { font-size: var(--fs-xs); }
+.fs-sm { font-size: var(--fs-sm); }
+.small { font-size: var(--fs-sm); }
+.w-auto { width: auto; }
+.faint { color: var(--fg-muted); }
+.mono { font-family: var(--mono); }
+.c-ok { color: var(--ok); }
+.c-err { color: var(--err); }
+.c-warn { color: var(--warn); }

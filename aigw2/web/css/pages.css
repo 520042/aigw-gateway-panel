@@ -1,0 +1,352 @@
+/* aigw v2 · 页面级样式：总览洞察 / 表格操作列 / 日志 / 说明块。
+   由 web/style.css 末尾 @import 引入；规则本身不依赖引入顺序。 */
+
+/* ═══════════════════════════════════════════════════════════════════════
+   中文排版基线（2026-11 换皮新增）
+   ───────────────────────────────────────────────────────────────────────
+   旧版最影响观感的问题之一是**中英混排的空格与字重不统一**：
+   `token 88,145 in / 24,298 out`、`apk-accio · 0 个模型 · 国际` 这类行里，
+   英文/数字与中文之间时有时无空格，数字字重也没统一，扫视时很乱。
+
+   CSS 没法自动插空格（那是文案的事），但能做三件让混排更整齐的事：
+   ① 给正文一个稳定的字距与行高（中文在 1.55 行高下偏挤，提到 1.65）；
+   ② 数字统一用 tabular-nums（等宽数字），表格与 KPI 才能对齐；
+   ③ 给 .mono 一个略小的字号补偿 —— 等宽字体在同样 px 下看起来比中文大。
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* 中文正文行高：1.55 → 1.65。中文方块字没有西文的上下留白，
+   同样的行高在中文下看起来更挤。 */
+body { line-height: 1.65; letter-spacing: .005em; }
+
+/* 数字与 ID 一律等宽，保证纵向对齐 */
+.mono, .kpi .vl, table td, .vl {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* 等宽字体视觉上比中文大，同字号下显得跳；压 0.5px 让它与正文齐平 */
+.mono { font-size: .96em; }
+
+/* 长串英文/URL 不撑破容器（平台说明里常见） */
+.note, .faint, td { overflow-wrap: anywhere; }
+
+/* 小字正文最低可读性：11px 以下在 1080p 上几乎看不清，
+   统一抬到 11px 并把字重提到 500。 */
+.fs-xs, .small { font-size: max(11px, var(--fs-xs)); }
+
+/* 表格行高与斑马纹：数据密集时靠斑马纹比靠边框更易追踪 */
+tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
+tbody tr:hover td { background: var(--surface-3); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   总览页「深入一层」区块（2026-11 换皮新增）
+   ───────────────────────────────────────────────────────────────────────
+   旧版总览只有 4 个 KPI + 一张小卡，1080p 下下半屏全空。这里给延迟分位和
+   平台排行一套紧凑的样式，让总览页真正「一眼看清现在怎么样」。
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── 延迟分位：2×2 小格 ── */
+.lat-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2);
+}
+.lat {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+}
+.lat-k {
+  font-size: var(--fs-xs); color: var(--fg-subtle);
+  font-weight: 500; letter-spacing: .02em;
+}
+.lat-v {
+  font-size: var(--fs-md); font-weight: 650; color: var(--fg);
+  font-variant-numeric: tabular-nums; letter-spacing: -.02em;
+}
+
+/* ── 平台排行：名称 + 进度条 + 数字 + 成功率 ── */
+.rk-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1.2fr) minmax(60px, 2fr) auto auto;
+  align-items: center; gap: var(--sp-2);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.rk-row:last-child { border-bottom: 0; }
+.rk-name {
+  font-size: var(--fs-sm); color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rk-bar {
+  height: 5px; border-radius: 3px;
+  background: var(--surface-3); overflow: hidden;
+}
+.rk-bar > i {
+  display: block; height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--brand), var(--ok));
+  /* 只给 width 挂过渡（铁律①：不写 all） */
+  transition: width 300ms var(--ease);
+}
+.rk-num {
+  font-size: var(--fs-sm); color: var(--fg-muted);
+  font-variant-numeric: tabular-nums; text-align: right;
+  min-width: 34px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   表格操作列与表单（2026-11 换皮新增）
+   ───────────────────────────────────────────────────────────────────────
+   实测问题：账号表的「操作」列塞了 6 个按钮（检查/积分/限额/改名/停用/删除），
+   在 250px 宽度里会折行，且所有按钮长得一样 —— 点错「删除」没有视觉差别。
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* 操作按钮组：横向紧密排列、不折行、右侧留白 */
+.acts {
+  display: flex; gap: 4px; align-items: center;
+  flex-wrap: nowrap; justify-content: flex-end;
+}
+.acts .btn.sm { padding: 0 8px; font-size: var(--fs-xs); height: 24px; }
+
+/* 危险操作：删除类按钮用错误色描边，与普通按钮区分开，
+   避免在一排长得一样的按钮里点错。 */
+.btn.danger {
+  color: var(--err); border-color: var(--err-line);
+}
+.btn.danger:hover {
+  background: var(--err-soft); border-color: var(--err);
+}
+
+/* 运行配置页：数字型输入框不该占满 500px。
+   实测问题：`max_inflight` 这种「范围 1-16」的输入框宽 500px，标签与输入框
+   之间空一大片，一行看不到「范围」提示。收窄到 120px 后三者能排在一行。 */
+.rt-num { width: 120px !important; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   日志视图：逐行分段着色（2026-11 换皮新增）
+   ───────────────────────────────────────────────────────────────────────
+   旧实现只给整行一个颜色，暗色下 INFO/WARN 几乎分不出来，整屏像一片灰。
+   现在拆成「时间戳 / 级别徽章 / 模块 / 正文」四段，扫视时能立刻定位警告与错误。
+   ═══════════════════════════════════════════════════════════════════════ */
+.log-row {
+  display: grid;
+  /* 时间戳固定宽、级别固定宽、模块自适应、正文吃掉剩余 */
+  /* 时间戳 178px（够放下带微秒的 ISO 时间）、级别 46px、模块**按内容宽**、余下给正文。
+     ★ 模块列必须用 `fit-content(170px)` 而不是 `minmax(0,170px)`：
+       后者在有多余空间时会把这一列拉到上限 170px，于是 `tasks`（5 个字符）
+       后面留了 100 多像素空白 —— 亮色下实测特别明显，正文像是从页面中间才开始。
+       `fit-content(N)` 是「内容需要多宽就多宽，最多 N」，正是这里要的语义。 */
+  grid-template-columns: 178px 46px fit-content(170px) 1fr;
+  gap: var(--sp-2);
+  align-items: baseline;
+  padding: 2px var(--sp-1);
+  border-radius: 4px;
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+.log-row:hover { background: var(--surface-2); }
+
+.log-ts {
+  color: var(--fg-subtle);
+  font-family: var(--mono);
+  font-size: .95em;
+  white-space: nowrap;
+}
+.log-lv {
+  font-family: var(--mono);
+  font-size: .92em;
+  font-weight: 650;
+  letter-spacing: .03em;
+  text-align: center;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.log-mod {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: .95em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.log-msg {
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+/* 级别配色：徽章底色 + 文字色，保证暗亮两套都醒目 */
+.log-info  .log-lv { background: var(--brand-soft); color: var(--brand); }
+.log-warn  .log-lv { background: var(--warn-soft);  color: var(--warn); }
+.log-err   .log-lv { background: var(--err-soft);   color: var(--err); }
+.log-dbg   .log-lv { background: var(--surface-3);  color: var(--fg-muted); }
+
+/* WARN / ERROR 整行左侧加一条细边，纵向扫视时更容易串成一条线 */
+.log-warn { box-shadow: inset 2px 0 0 var(--warn-line); }
+.log-err  { box-shadow: inset 2px 0 0 var(--err-line); }
+
+/* 窄屏下把时间戳和模块压掉，只留级别与正文（否则一行挤成三行） */
+@media (max-width: 900px) {
+  .log-row { grid-template-columns: 46px 1fr; }
+  .log-ts, .log-mod { display: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   长说明块的可读性（2026-11 换皮新增）
+   ───────────────────────────────────────────────────────────────────────
+   实测问题：面板里有 100+ 处 .note，其中不少是 5 行以上的密集说明
+   （平台接入注意事项、字段从哪取、失败怎么排查）。这些内容本身有价值，
+   但整段挤在一起时，用户只会跳过 —— 而那恰恰是最需要看的部分。
+
+   样式层面能做三件事（不改文案）：
+   ① 段内行高再放宽一点，长段落不糊成一片；
+   ② 用 <br> 分隔的行之间留一点空隙（原生的 br 完全没有间距）；
+   ③ .mono / <code> 给一点底色，让「从哪取哪个字段」这类关键信息跳出来。
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* 长段落专用：行高更松，应对密集说明 */
+.note {
+  /* 只在 note 内放宽行高（body 的 1.65 对列表/表格已经够，说明文字需要更松） */
+  line-height: 1.75;
+}
+/* <br> 分隔的多行说明：给一点行间呼吸，否则视觉上是一整块 */
+.note br { line-height: 2.1; }
+
+/* 行内代码 / 等宽关键信息：浅底 + 细边，让「取哪个字段」跳出来。
+   注意只作用于 note 内的 code，避免影响日志/表格里的 mono 排版。 */
+.note code,
+.note .mono {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: .94em;
+}
+/* 暗色下 6% 太淡，提到 9% */
+[data-theme="dark"] .note code,
+[data-theme="dark"] .note .mono {
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+}
+
+/* note 里的列表：收紧缩进，与正文对齐 */
+.note ul, .note ol { margin: var(--sp-2) 0; padding-left: 1.3em; }
+.note li { margin: 2px 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   WB 任务面板（账号运维归位）
+   ───────────────────────────────────────────────────────────────────────
+   原来这些动作藏在「接入源 → ⋯ 管理操作」菜单里，作用对象却是账号与积分。
+   现在移到「模型与用量」页顶部，做成一个常驻任务面板：左边日常任务
+   （一键 + 自动开关），右边活动单次操作。
+   ═══════════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════════
+   WB 任务中心（2026-11-06 对齐 Agent2API 签到中心）
+   ───────────────────────────────────────────────────────────────────────
+   三个页签：签到中心（动作）/ 定时签到（HH:MM + 逐平台范围）/ 签到记录
+   （筛选 + 分页）。布局与令牌沿用上面的 .wb-task-*，只补新结构。
+   ═══════════════════════════════════════════════════════════════════════ */
+.wb-tabs {
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px; margin: 0 0 var(--sp-3) 0;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.wb-tab {
+  appearance: none; border: 0; cursor: pointer;
+  padding: 6px 14px; border-radius: calc(var(--r-md) - 2px);
+  font: inherit; font-size: var(--fs-sm); font-weight: 600;
+  color: var(--fg-muted); background: transparent;
+}
+.wb-tab:hover { color: var(--fg); background: var(--surface-3); }
+.wb-tab.on { color: var(--brand); background: var(--surface); box-shadow: var(--sh-1); }
+.wb-task-panel .wb-tabs .ml-auto { margin-left: auto; padding-right: 6px; }
+.wb-tab-body { min-height: 180px; }
+.wb-center-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: var(--sp-3); }
+.wb-task-panel .wb-task-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.wb-task-panel .wb-task-acts .note { margin-top: var(--sp-3); }
+
+/* 定时签到：行式设置卡 */
+.wb-sched-summary {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-3);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.wb-sched-row {
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface-2); padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+.wb-sched-line {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2);
+  padding: 6px 0; border-bottom: 1px solid var(--border);
+}
+.wb-sched-line:last-child { border-bottom: 0; }
+.wb-set-k { min-width: 80px; font-size: var(--fs-xs); color: var(--fg-muted); }
+.wb-sched-line input[type="time"] { width: 130px; }
+.wb-set-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.wb-set-head .faint { margin-right: auto; }
+.wb-range { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 4px; }
+
+/* 签到记录：筛选条 + 明细表 + 页脚 */
+.wb-rec-filters {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.wb-rec-filters .q { width: auto; min-width: 130px; }
+.wb-rec-filters input.q { flex: 1 1 220px; }
+.wb-record-table { width: 100%; font-size: var(--fs-sm); }
+.wb-record-table th { text-align: left; white-space: nowrap; }
+.wb-record-table td { vertical-align: top; }
+.wb-record-table td:nth-child(6) { max-width: 360px; overflow-wrap: anywhere; }
+.wb-rec-foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2);
+  padding-top: var(--sp-2);
+}
+.wb-rec-foot .faint { margin-right: auto; }
+
+@media (max-width: 900px) {
+  .wb-center-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+  .wb-tabs { flex-wrap: wrap; }
+  .wb-task-panel .wb-tabs .ml-auto { width: 100%; margin-left: 0; padding: 3px 6px; }
+  .wb-rec-filters .q { flex-basis: 100%; }
+}
+
+.wb-task-panel { border-left: 3px solid var(--brand); }
+.wb-task-col {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+}
+.wb-task-h {
+  display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap;
+  font-size: var(--fs-sm); font-weight: 600;
+  padding-bottom: var(--sp-2); margin-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+.wb-task-row {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.wb-task-row:last-child { border-bottom: 0; }
+.wb-task-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wb-task-info b { font-size: var(--fs-sm); }
+.wb-task-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+@media (max-width: 760px) {
+  .wb-task-row { flex-direction: column; align-items: flex-start; }
+}
+
+/* 自动签到的逐平台勾选 */
+.wb-platforms { display: flex; flex-direction: column; gap: 3px; }
+.wb-plat {
+  display: flex; align-items: center; gap: 7px;
+  font-size: var(--fs-sm); cursor: pointer;
+  padding: 2px 4px; border-radius: 4px;
+}
+.wb-plat:hover { background: var(--surface-3); }
