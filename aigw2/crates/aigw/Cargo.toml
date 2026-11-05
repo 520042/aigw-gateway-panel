@@ -26,4 +26,5 @@ rand = { workspace = true }
 windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Registry",
+    "Win32_System_Console",
 ] }

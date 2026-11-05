@@ -13,9 +13,11 @@
 #
 # ⚠ 另一个实测坑（本机专属，2026-10-23 验证）：动作里**直接写 aigw.exe 会被任务计划程序拒绝**，
 #   LastTaskResult = 0x80070005 (E_ACCESSDENIED)，事件日志 TaskScheduler/Operational 101+203 报
-#   「无法启动任务…中的操作 …\aigw.exe」。同一份 XML 只把 Command 换成 cmd.exe 包一层就正常起来了
-#   （LastResult=0x41301 运行中，/api/health=200）。已排除路径/ACL/Zone.Identifier/会话/uiAccess 清单，
-#   根因未定位，所以脚本固定用「cmd.exe /c "<exe>" --port N」这种包装写法，不要改回直接 Exec。
+#   「无法启动任务…中的操作 …\aigw.exe」。根因未定位，所以动作必须保留一层包装，不要改回直接 Exec。
+#   2026-11-05 把包装从 cmd.exe 换成 powershell.exe -WindowStyle Hidden（见 Actions 段注释），
+#   解决「每次登录弹命令窗」；实测包装仍然必要、服务照常 200。
+#   exe 侧还有一层兜底：服务模式调 FreeConsole() 主动脱离控制台；--doctor / --install
+#   这类需要看输出的 CLI 模式不受影响。
 #
 # ⚠ 本文件必须以 UTF-8 with BOM 保存：PowerShell 5.1 读无 BOM 的 UTF-8 会按 ANSI 解码，
 #   中文注释变乱码进而引发「Unexpected token」语法错误（实测踩过）。
@@ -51,12 +53,16 @@ function Show-Status {
   $act = @($t.Actions)[0]
   $cmd = $act.Execute
   $argStr = $act.Arguments
-  $wrapped = $cmd -match "cmd\.exe$"
+  # 包装层现在可以是 powershell.exe（隐藏窗口，当前方案）或 cmd.exe（旧方案）；
+  # 两者都算「包了一层」，只有 Execute 直接指向 aigw.exe 才是危险的直写形式。
+  $wrappedBy = if ($cmd -match 'powershell\.exe$') { 'PowerShell Hidden 包装（无命令窗，正常）' }
+    elseif ($cmd -match 'cmd\.exe$') { 'cmd.exe 包装（旧方案，会弹命令窗，建议重跑本脚本）' }
+    else { '' }
   $wd = $act.WorkingDirectory
   $enabled = if ($t.State -eq "Disabled") { "已禁用" } else { "已启用" }
   Write-Host "任务 $TaskName：$enabled"
   Write-Host "  命令      : $cmd $argStr"
-  Write-Host "  启动方式  : $(if ($wrapped) { 'cmd.exe 包装（本机直接 Exec 会被拒，正常）' } else { '直接 Exec（本机可能 0x80070005，建议重跑本脚本）' })"
+  Write-Host "  启动方式  : $(if ($wrappedBy) { $wrappedBy } else { '直接 Exec（本机可能 0x80070005，建议重跑本脚本）' })"
   Write-Host "  工作目录  : $(if ($wd) { $wd } else { '(未设置)' })"
   Write-Host "  电池不打断: $(-not $t.Settings.DisallowStartIfOnBatteries)"
   Write-Host "  空闲不打断: $(-not $t.Settings.IdleSettings.StopOnIdleEnd)"
@@ -76,7 +82,12 @@ if ($Uninstall) {
 if (-not (Test-Path $exe)) { throw "找不到 $exe，先跑 build-deploy.ps1 部署" }
 
 $user = "$env:USERDOMAIN\$env:USERNAME"
-$sid = (whoami /user /fo csv | ConvertFrom-Csv | Select-Object -Last 1)."SID"
+# ★ 不要用 `whoami /user`：在 Git Bash / MSYS 下 PATH 里的 /usr/bin/whoami 会抢在
+#   Windows 的 whoami.exe 前面，而它不认 /user 参数 → 报 "extra operand '/user'"，
+#   $sid 变成空 → XML 的 UserId 非法 → schtasks /Create 直接失败（实测踩过）。
+#   改用 .NET 直接拿当前 Windows 身份的 SID，纯进程内调用，不依赖 PATH 上的外部命令。
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if (-not $sid) { throw "取不到当前用户的 SID" }
 $xmlPath = Join-Path $env:TEMP "aigw-service-$TaskName.xml"
 
 # 说明几点：
@@ -111,7 +122,8 @@ $xml = @"
     </IdleSettings>
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
+    <!-- ★ Hidden=true：计划任务本身不再显示命令窗（配合 exe 内的 FreeConsole 双保险） -->
+    <Hidden>true</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
@@ -142,9 +154,17 @@ $xml = @"
   </Triggers>
   <Actions Context="Author">
     <Exec>
-      <!-- 必须用 cmd.exe 包一层：本机直接 Exec aigw.exe 会 E_ACCESSDENIED (0x80070005)，详见文件头说明 -->
-      <Command>C:\Windows\System32\cmd.exe</Command>
-      <Arguments>/c "$exe" --port $Port</Arguments>
+      <!-- ★ 2026-11-05 改：原来用 `cmd.exe /c aigw.exe`，每次登录都会弹一个黑色命令窗
+           且一直挂在任务栏（用户明确要求去掉）。
+           现在改用 powershell.exe -WindowStyle Hidden 包一层：
+             · PowerShell 自身以隐藏窗口启动，派生的 aigw.exe 继承隐藏属性；
+             · exe 内服务模式还会调 FreeConsole() 双保险（CLI 模式不受影响）；
+             · 本机实测：Register/Start 后 /api/health=200、LastTaskResult=0x41301(运行中)，
+               且进程树里 aigw.exe 直接挂在 powershell 下，不再有 cmd.exe 控制台。
+           注意仍保留「包一层」而不用直接 Exec aigw.exe：文件头记录的 E_ACCESSDENIED
+           (0x80070005) 是 schtasks /XML 直写 exe 时的本机现象，包装层不能省。 -->
+      <Command>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Command>
+      <Arguments>-NoProfile -WindowStyle Hidden -Command "&amp; '$exe' --port $Port"</Arguments>
       <WorkingDirectory>$dest</WorkingDirectory>
     </Exec>
   </Actions>
@@ -156,7 +176,7 @@ $xml = @"
 schtasks /Create /TN $TaskName /XML $xmlPath /F | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "schtasks /Create 失败（exit $LASTEXITCODE）" }
 Remove-Item $xmlPath -ErrorAction SilentlyContinue
-Write-Host "已注册任务 $TaskName（登录时启动，命令：cmd.exe /c ""$exe"" --port $Port）" -ForegroundColor Green
+Write-Host "已注册任务 $TaskName（登录时启动，隐藏窗口：powershell -WindowStyle Hidden → aigw.exe --port $Port）" -ForegroundColor Green
 Show-Status | Out-Null
 
 if ($Run) {
