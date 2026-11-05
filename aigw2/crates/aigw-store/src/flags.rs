@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Flags {
     /// 被停用的模型名（裸名）。
     #[serde(default)]
@@ -17,14 +17,56 @@ pub struct Flags {
     /// 被停用的平台 id（文件 spec 无法就地改写，停用状态记在这里）。
     #[serde(default)]
     pub disabled_platforms: Vec<String>,
-    /// wb 族每日自动签到开关。默认关：自动去上游领积分是主动写操作
+    /// 自动签到总开关。默认关：自动去上游领积分是主动写操作
     /// （第三方服务可见、可能触发风控），必须由用户在面板里显式开启。
     #[serde(default)]
     pub daily_checkin: bool,
-    /// wb 族每日成长任务自动完成开关（对齐 workbuddy2api 17 任务闭环）。
+    /// 每日 WB 任务自动完成开关（对齐 workbuddy2api 17 任务闭环）。
     /// 同样默认关：事件链上报也是对上游的主动写操作。
     #[serde(default)]
     pub daily_growth: bool,
+    /// 自动执行的**本地小时**（0-23）。默认 9（早上 9 点）。
+    ///
+    /// ★ 为什么需要自定义：旧实现是「每 12 小时跑一次」，执行时刻随启动时间漂移，
+    ///   用户既不知道今天几点会跑，也没法挑一个上游不拥挤的时段。
+    ///   存小时而不是完整 cron：这些任务是一天一次的粒度，分钟级没有意义，
+    ///   而且上游对同一账号当天重复签到本来就幂等，几点领不影响结果。
+    #[serde(default = "default_run_hour")]
+    pub run_hour: u8,
+    /// 自动执行的分钟（0-59）。默认 0。
+    ///
+    /// ★ 2026-11-06：参考项目的「定时签到」用的是 `<input type="time">`，
+    ///   「自定义签到时间」不能只让用户选整点。小时与分钟分开存，是为了
+    ///   老 flags.json 里只有 run_hour 时仍能按 09:00 正确启动（serde default 0）。
+    #[serde(default)]
+    pub run_minute: u8,
+    /// 参与自动签到的平台 id 集合。空集 = 沿用 `daily_checkin` 总开关（兼容旧配置）。
+    ///
+    /// ★ 为什么要按平台分别设：WB / Lobster / 小浣熊是三套独立上游，用户可能只想
+    ///   自动签其中一家（比如小浣熊活动经常变，不想每天自动打）。
+    ///   非空时 `daily_checkin` 不再作为唯一依据，改由这里逐平台判定。
+    #[serde(default)]
+    pub checkin_platforms: Vec<String>,
+}
+
+/// 默认执行时刻：早上 9 点（本地时间）。避开 0 点上游批量任务高峰。
+fn default_run_hour() -> u8 { 9 }
+
+impl Default for Flags {
+    fn default() -> Self {
+        Self {
+            disabled_models: Vec::new(),
+            disabled_platforms: Vec::new(),
+            daily_checkin: false,
+            daily_growth: false,
+            // ★ 必须手写 Default：derive(Default) 会把 u8 置 0，
+            //   与 serde 的 `default = "default_run_hour"`（9）不一致 ——
+            //   新建 flags.json 与从磁盘读入会拿到不同的默认时刻。
+            run_hour: default_run_hour(),
+            run_minute: 0,
+            checkin_platforms: Vec::new(),
+        }
+    }
 }
 
 pub struct FlagStore {
@@ -214,6 +256,61 @@ impl FlagStore {
         self.persist_now();
         on
     }
+
+    /// 自动任务在一天里的执行秒数（北京时间 00:00 起算）。
+    /// 非法分钟一律回落默认 9:00，绝不把 60+ 传给调度计算。
+    pub fn run_time(&self) -> (u8, u8) {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let h = if g.run_hour <= 23 { g.run_hour } else { default_run_hour() };
+        let m = if g.run_minute <= 59 { g.run_minute } else { 0 };
+        (h, m)
+    }
+
+    pub fn run_hour(&self) -> u8 {
+        self.run_time().0
+    }
+
+    pub fn run_minute(&self) -> u8 {
+        self.run_time().1
+    }
+
+    /// 一次性写 HH:MM，避免小时、分钟分两次落盘产生「改到一半」的中间态。
+    pub fn set_run_time(&self, hour: u8, minute: u8) -> (u8, u8) {
+        let h = if hour <= 23 { hour } else { default_run_hour() };
+        let m = if minute <= 59 { minute } else { 0 };
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.run_hour = h;
+        g.run_minute = m;
+        drop(g);
+        self.persist_now();
+        (h, m)
+    }
+
+    pub fn set_run_hour(&self, hour: u8) -> u8 {
+        let m = self.run_minute();
+        self.set_run_time(hour, m).0
+    }
+
+    /// 自动签到的平台集合（克隆出来，避免把锁暴露给调用方）。
+    pub fn checkin_platforms(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .checkin_platforms
+            .clone()
+    }
+
+    /// 整组替换自动签到平台（面板一次性提交勾选项）。
+    pub fn set_checkin_platforms(&self, ids: Vec<String>) -> Vec<String> {
+        let mut v: Vec<String> = ids.into_iter().filter(|s| !s.is_empty()).collect();
+        v.sort();
+        v.dedup();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.checkin_platforms = v.clone();
+        drop(g);
+        self.persist_now();
+        v
+    }
 }
 
 #[cfg(test)]
@@ -269,6 +366,35 @@ mod tests {
         st2.set_daily_checkin(false);
         let st3 = FlagStore::open(tmp.path());
         assert!(!st3.daily_checkin());
+    }
+
+    #[test]
+    fn run_time_defaults_and_persists_minutes() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let st = FlagStore::open(tmp.path());
+            assert_eq!(st.run_time(), (9, 0), "老配置/新装的默认必须是 09:00");
+            assert_eq!(st.set_run_time(7, 30), (7, 30));
+            assert_eq!(st.run_hour(), 7);
+            assert_eq!(st.run_minute(), 30);
+        }
+        let st2 = FlagStore::open(tmp.path());
+        assert_eq!(st2.run_time(), (7, 30), "自定义 HH:MM 必须落盘");
+
+        // 旧配置只有 run_hour、没有 run_minute：按整点执行，不能回退成 0 点。
+        std::fs::write(
+            tmp.path().join("flags.json"),
+            r#"{"disabled_models":[],"disabled_platforms":[],"daily_checkin":false,"daily_growth":false,"run_hour":6,"checkin_platforms":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(FlagStore::open(tmp.path()).run_time(), (6, 0));
+    }
+
+    #[test]
+    fn run_time_rejects_invalid_values() {
+        let st = FlagStore::empty();
+        assert_eq!(st.set_run_time(99, 99), (9, 0));
+        assert_eq!(st.run_time(), (9, 0));
     }
 
     #[test]

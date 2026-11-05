@@ -211,6 +211,103 @@ where
     }
 }
 
+/// 每天在**指定北京时间 HH:MM** 跑一次的调度循环。
+///
+/// ★ 2026-11-06：面板按参考项目换成 `<input type="time">`，所以调度目标
+///   从「小时」细化到「分钟」。旧调用方仍可传整点闭包；新调用方传 (h,m)。
+///
+/// ★ 为什么不用固定 24h 周期：用户要的是「每天 9 点执行」，而固定周期会从
+///   「进程启动时刻」起算，重启一次时刻就变一次；面板上显示的执行时间
+///   也无法预期。这里每次都重新算「距离下一个目标时刻还有多久」，
+///   与启动时刻无关，重启、休眠恢复后都会对齐到同一个钟点。
+///
+/// ★ 时区：沿用项目既有口径（aigw-pool::quota_hold_secs），按 UTC+8 / 北京时间。
+///   不引 chrono（项目刻意的零依赖约束）。面板上标注「北京时间」，
+///   避免其它时区的用户误以为是本地时间。
+///
+/// ★ 冷启动不立即跑：首次先等到下一个目标时刻。签到/成长任务都是
+///   「当天一次」的写操作，进程重启就立刻打一遍上游没有必要，也徒增风控。
+pub fn daily_at_hour_loop<F, Fut, H>(
+    name: &'static str,
+    health: Arc<TaskHealth>,
+    mut hour_fn: H,
+    retry: std::time::Duration,
+    body: F,
+) -> impl std::future::Future<Output = ()> + Send
+where
+    F: FnMut() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<String, String>> + Send,
+    H: FnMut() -> u8 + Send,
+{
+    daily_at_time_loop(name, health, move || (hour_fn(), 0), retry, body)
+}
+
+/// 每天在指定 `(小时, 分钟)` 跑一次。`time_fn` 每轮重新读：面板改了 HH:MM，
+/// 下一轮就按新钟点算，不用重启。
+pub fn daily_at_time_loop<F, Fut, T>(
+    name: &'static str,
+    health: Arc<TaskHealth>,
+    mut time_fn: T,
+    retry: std::time::Duration,
+    mut body: F,
+) -> impl std::future::Future<Output = ()> + Send
+where
+    F: FnMut() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<String, String>> + Send,
+    T: FnMut() -> (u8, u8) + Send,
+{
+    use futures_util::FutureExt;
+    async move {
+        health.declare(name);
+        loop {
+            // ★ 每轮重新读 time_fn：面板改了执行时刻，下一轮就按新钟点算，不用重启。
+            let (h, m) = time_fn();
+            let target = (h.min(23) as i64) * 3600 + (m.min(59) as i64) * 60;
+            let wait = secs_until_target(target);
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            let started = std::time::Instant::now();
+            let fut = std::panic::AssertUnwindSafe(body()).catch_unwind();
+            let next_retry = match fut.await {
+                Ok(Ok(msg)) => {
+                    health.mark_ok(name, msg.clone());
+                    tracing::info!("后台任务 {} 完成：{}", name, msg);
+                    None
+                }
+                Ok(Err(e)) => {
+                    health.mark_err(name, e.clone());
+                    tracing::warn!("后台任务 {} 失败：{}（{} 秒后重试）", name, e, retry.as_secs());
+                    Some(retry)
+                }
+                Err(_) => {
+                    health.mark_err(name, "任务 panic 已被隔离（详见日志）");
+                    tracing::error!("后台任务 {} 发生 panic，已隔离并继续调度", name);
+                    Some(retry)
+                }
+            };
+            if let Some(r) = next_retry {
+                // 失败重试仍保留，但不能因此把「每天的时刻」推走：
+                // 重试完继续按钟点算下一次，而不是在重试后加 24h。
+                tokio::time::sleep(r.saturating_sub(started.elapsed())).await;
+            }
+        }
+    }
+}
+
+/// 距离下一个「北京时间 HH:MM」还有多少秒（至少 1 秒，避免 0 间隔忙循环）。
+fn secs_until_target(target_secs: i64) -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let local = now + 8 * 3600; // 北京时间（UTC+8）
+    let into_day = local.rem_euclid(86400);
+    let mut delta = target_secs.rem_euclid(86400) - into_day;
+    // 今天这个点已经过了（或正好是这一秒）→ 等明天，不立刻跑。
+    if delta <= 0 { delta += 86400; }
+    (delta as u64).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +412,54 @@ mod tests {
         );
         // panic 要被记成一次失败（不能当没事发生）
         assert_eq!(h2.snapshot()["panicky"]["err_runs"], json!(1));
+    }
+
+    /// 「距离下一个目标钟点」的计算：必须落在 (0, 86400] 之间，
+    /// 且目标时刻已过时返回「明天」，而不是负数或 0（会变成忙循环）。
+    #[test]
+    fn secs_until_target_is_always_positive_and_within_a_day() {
+        for h in 0u8..24 {
+            let s = secs_until_target((h as i64) * 3600);
+            assert!(s > 0, "hour={h} 不能为 0（会忙循环）");
+            assert!(s <= 86400, "hour={h} 不该超过一天：{s}");
+        }
+    }
+
+    /// 自定义时刻要真的参与计算：目标 0 点与目标 23 点的等待秒数应当不同。
+    ///
+    /// ★ 差值不是 23 小时：两者跨天补 86400 后，等待时间之和 = 86400 + 23h
+    ///   （当 0 点已过而 23 点未过时是互补的 1 小时）。实测第一版把断言写成
+    ///   「差 23 小时」直接挂了 —— 这里改成验证更本质的性质：不同目标给出
+    ///   不同结果，且两者都在 (0, 86400] 内。
+    #[test]
+    fn different_target_hours_give_different_waits() {
+        let a = secs_until_target(0);
+        let b = secs_until_target(23 * 3600);
+        assert_ne!(a, b, "不同时刻不能算出同一个等待时间");
+        assert!((1..=86400).contains(&a));
+        assert!((1..=86400).contains(&b));
+    }
+
+    /// 分钟必须进入下一次执行时刻：同一小时内 09:00 与 09:30 相差 1800 秒
+    /// （若目标已过则是补集 84600 秒，仍不能相等）。
+    #[test]
+    fn minute_offset_changes_the_wait() {
+        let a = secs_until_target(9 * 3600);
+        let b = secs_until_target(9 * 3600 + 30 * 60);
+        assert_ne!(a, b, "HH:MM 的分钟不能被调度器忽略");
+        let d = (a + 86400 - b) % 86400;
+        assert!(
+            d == 30 * 60 || d == 86400 - 30 * 60,
+            "09:00 与 09:30 的等待差只能是 30 分钟或跨天补集 23.5 小时，得到 {d}"
+        );
+    }
+
+    /// 非法/超界目标也只按一天内的合法时刻处理，绝不让等待时间越过一天。
+    #[test]
+    fn out_of_range_target_is_normalized() {
+        for target in [-60, 86400, 90000, i64::MAX] {
+            let s = secs_until_target(target);
+            assert!((1..=86400).contains(&s), "target={target} 得到 {s}");
+        }
     }
 }

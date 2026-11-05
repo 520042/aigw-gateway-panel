@@ -438,6 +438,32 @@ fn legacy_dir() -> Option<PathBuf> {
 ///
 /// 文件日志不可用（只读盘、权限不足）时**退回只写 stdout**：日志缺失是降级，
 /// 不该让服务起不来。
+/// 服务模式下隐藏控制台窗口（仅 Windows 生效）。
+///
+/// ★ 为什么需要：计划任务 Aigw2Service 的动作是 `cmd.exe /c aigw.exe`，
+///   而 aigw.exe 是控制台程序 —— 每次登录都会闪一个黑色命令窗，且窗口会
+///   一直挂在任务栏（用户反馈「不要每次启动都出现命令窗」）。
+///
+/// ★ 为什么用 FreeConsole 而不是编译期 `#![windows_subsystem = "windows"]`：
+///   那个属性是全局的，会把 `--doctor` / `--install` 这些**需要看输出**的
+///   CLI 模式也一起变成没有控制台，诊断信息全部消失。这里只在「真正起服务」
+///   的分支调用，CLI 模式保留 stdout。
+///
+/// ★ 日志不受影响：`init_tracing` 用 Tee 同时写落盘文件与 stdout，而
+///   Tee 对 stdout 写入失败是静默忽略的（见 rotlog::TeeWriter::write），
+///   FreeConsole 之后文件日志照常写入，面板「日志」页仍然能看。
+#[cfg(windows)]
+fn detach_console_for_service() {
+    // SAFETY: FreeConsole 无参数、无指针，失败也只是保持现状（窗口仍在），
+    // 不影响后续任何逻辑。
+    unsafe {
+        windows_sys::Win32::System::Console::FreeConsole();
+    }
+}
+
+#[cfg(not(windows))]
+fn detach_console_for_service() {}
+
 fn init_tracing(dd: &std::path::Path) {
     let level = log_level_from_env();
     match aigw_store::rotlog::Tee::new(dd) {
@@ -571,6 +597,11 @@ async fn main() {
         let _code = run_doctor(specs, &cli.only).await;
         return;
     }
+
+    // ★ 到这里才是「真正起服务」：隐藏计划任务带出来的命令窗。
+    //   CLI 模式（--doctor / --install / --uninstall / --purge）都在上面提前返回，
+    //   它们的输出需要保留控制台。详见 detach_console_for_service 的注释。
+    detach_console_for_service();
 
     // settings：旧版 settings.json 只读导入占位符键（@lobster → lobster_server）
     let mut settings: std::collections::BTreeMap<String, String> = Default::default();
@@ -902,7 +933,8 @@ async fn main() {
         });
     }
     // wb 族每日自动签到：默认关（自动去上游领积分是对第三方的写操作，须用户在
-    // 面板「账号 → 自动签到」显式开启）。开启后启动即跑一轮、每 12 小时一轮。
+    // 面板「模型与用量 → WB 任务」显式开启）。开启后启动即跑一轮，
+    // 之后每天在「定时签到」里设置的北京时间 HH:MM 执行一轮。
     // 不用 24h：周期从启动时刻起算会漂移，12h 保证每个日历日至少落一次；
     // 当天已领过时上游回 code=2「今日已领取」，多跑无副作用。
     // ★ 单账号失败不报 Err：Err 会触发 30 分钟高频重试，凭据过期时等于拿失效
@@ -911,21 +943,35 @@ async fn main() {
         let tasks = state.tasks.clone();
         let st2 = state.clone();
         state.tasks.declare("daily_checkin");
+        // ★ 2026-11-05：从「每 12 小时」改成「每天指定钟点」。
+        //   用户在面板里可以选 0-23 点，存 flags.run_hour；循环每轮重新读，
+        //   改了时间不用重启就生效（下一轮对齐到新钟点）。
         tokio::spawn(async move {
-            aigw_server::supervise_loop_now(
+            let hour_src = st2.clone();
+            aigw_server::daily_at_time_loop(
                 "daily_checkin",
                 tasks,
-                std::time::Duration::from_secs(12 * 3600),
+                move || hour_src.flags.run_time(),
                 std::time::Duration::from_secs(30 * 60),
                 move || {
                     let st3 = st2.clone();
                     async move {
-                        if !st3.flags.daily_checkin() {
-                            return Ok(
-                                "自动签到未开启（面板账号页「自动签到」可打开），跳过".to_string()
-                            );
+                        let cfg = aigw_server::checkin_auto_config(&st3);
+                        // 逐平台模式：非空集合才过滤；总开关关了就整体跳过。
+                        let per = cfg["per_platform"].as_bool().unwrap_or(false);
+                        let ids: Vec<String> = cfg["checkin_platforms"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                        if !cfg["daily_checkin"].as_bool().unwrap_or(false) {
+                            return Ok("自动签到未开启（「WB 任务」页可开启），跳过".to_string());
                         }
-                        let v = aigw_server::checkin_all(&st3, true).await;
+                        if per && ids.is_empty() {
+                            return Ok("已勾选平台为空，自动签到跳过".to_string());
+                        }
+                        let v = aigw_server::record_checkin(
+                            &st3, "schedule", if per { Some(ids.as_slice()) } else { None },
+                        ).await;
                         Ok(aigw_server::summarize_checkin(&v))
                     }
                 },
@@ -985,23 +1031,25 @@ async fn main() {
             }
         });
     }
-    // ★ 2026-10-26（P0）：wb 族成长任务自动完成（对齐 workbuddy2api 17 任务闭环）。
-    // 同样默认关（对上游做写操作），由面板开关显式打开，周期 12h。
+    // ★ 2026-10-26（P0）：wb 族 WB 任务自动完成（对齐 workbuddy2api 17 任务闭环）。
+    // 同样默认关（对上游做写操作），由面板开关显式打开；2026-11-05 起按
+    // 「每天指定钟点」调度（与签到共用 run_hour），不再是每 12 小时漂移一次。
     {
         let tasks = state.tasks.clone();
         let st5 = state.clone();
         state.tasks.declare("daily_growth");
         tokio::spawn(async move {
-            aigw_server::supervise_loop_now(
+            let hour_src = st5.clone();
+            aigw_server::daily_at_time_loop(
                 "daily_growth",
                 tasks,
-                std::time::Duration::from_secs(12 * 3600),
+                move || hour_src.flags.run_time(),
                 std::time::Duration::from_secs(30 * 60),
                 move || {
                     let st6 = st5.clone();
                     async move {
                         if !st6.flags.daily_growth() {
-                            return Ok("自动成长任务未开启（面板账号页可打开），跳过".to_string());
+                            return Ok("自动 WB 任务未开启（「模型与用量」页可打开），跳过".to_string());
                         }
                         let mut lines: Vec<String> = Vec::new();
                         // ★ 按 **signer == "wb"** 枚举，不写死平台 id：
@@ -1045,6 +1093,15 @@ async fn main() {
                                 )
                                 .await;
                                 let ok = r.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                                aigw_server::task_records::append(
+                                    st6.data_dir.as_deref(),
+                                    vec![aigw_server::task_records::from_summary(
+                                        "schedule", "growth:all", &platform, &acc_id, ok,
+                                        &format!("领取 {} 项 +{} 积分",
+                                            r.get("claimed").and_then(|x| x.as_i64()).unwrap_or(0),
+                                            r.get("credit").and_then(|x| x.as_i64()).unwrap_or(0)),
+                                    )],
+                                );
                                 let credit = r.get("credit").and_then(|x| x.as_i64()).unwrap_or(0);
                                 let claimed = r.get("claimed").and_then(|x| x.as_i64()).unwrap_or(0);
                                 lines.push(format!(

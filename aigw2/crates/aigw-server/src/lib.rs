@@ -47,6 +47,8 @@ pub mod backup;
 pub mod gongyi;
 pub mod errresp;
 pub mod errlog;
+pub mod client_import;
+pub mod task_records;
 pub(crate) mod sesskey;
 pub mod tasks;
 pub mod streamhead;
@@ -91,6 +93,7 @@ pub(crate) use sesskey::{fnv1a, key_id, session_key};
 #[allow(unused_imports)]
 pub use tasks::{supervise_loop_now, TaskStat};
 pub use tasks::{supervise_loop, TaskHealth};
+pub use tasks::{daily_at_hour_loop, daily_at_time_loop};
 #[allow(unused_imports)]
 pub(crate) use streamhead::{sniff_stream_head, sniff_stream_head_within};
 pub use stream::{anthropic_stream, responses_stream};
@@ -366,6 +369,7 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/combos", get(combos_list).post(combos_action))
         .route("/api/auth", post(auth_action))
         .route("/api/checkin", get(checkin_status_all).post(checkin_claim_all))
+        .route("/api/task-records", get(task_records_view))
         // ★ 2026-10-26（P3）：运行时配置热更新（并发/超时/重试/限流）。
         .route("/api/runtime", get(runtime_get).post(runtime_set))
         // ★ 2026-10-28（对齐 magpie system-prompt 插件）：自定义系统提示词注入。
@@ -2327,6 +2331,13 @@ async fn checkin_status_all(State(st): State<AppState>) -> Json<Value> {
     Json(v)
 }
 
+async fn task_records_view(
+    State(st): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    Json(task_records::query(st.data_dir.as_deref(), &params))
+}
+
 /// POST /api/checkin：
 ///   - 空 body / {} / 无 action → 立刻全部领取（旧前端只发 {}，行为保持不变）
 ///   - {"action":"schedule","enabled":true|false} → 开/关每日自动签到（存 flags.json）
@@ -2348,7 +2359,55 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
     };
     let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("claim");
     match action {
-        "claim" => Json(checkin_all(&st, true).await).into_response(),
+        "claim" => {
+            Json(record_checkin(&st, "manual", None).await).into_response()
+        }
+        // ★ 自动任务配置的读写（面板「WB 任务」区用）。
+        //   GET 语义 = 不传 set_* 时只回当前配置，方便面板渲染；
+        //   POST 带 set_* 时逐项更新并落盘，返回更新后的完整配置。
+        "records" => {
+            let mut p = HashMap::new();
+            for k in ["range", "outcome", "task", "q", "limit", "offset"] {
+                if let Some(v) = req.get(k).and_then(|x| x.as_str()) {
+                    p.insert(k.to_string(), v.to_string());
+                } else if let Some(v) = req.get(k).and_then(|x| x.as_u64()) {
+                    p.insert(k.to_string(), v.to_string());
+                }
+            }
+            Json(task_records::query(st.data_dir.as_deref(), &p)).into_response()
+        }
+        "config" => {
+            if let Some(s) = req.get("set_time").and_then(|v| v.as_str()) {
+                if let Some((h, m)) = s.trim().split_once(':') {
+                    if let (Ok(h), Ok(m)) = (h.parse::<u8>(), m.parse::<u8>()) {
+                        st.flags.set_run_time(h, m);
+                    }
+                }
+            } else if let Some(h) = req.get("set_run_hour").and_then(|v| v.as_u64()) {
+                st.flags.set_run_hour(h.min(23) as u8);
+            }
+            if let Some(m) = req.get("set_run_minute").and_then(|v| v.as_u64()) {
+                let (h, _) = st.flags.run_time();
+                st.flags.set_run_time(h, m.min(59) as u8);
+            }
+            if let Some(on) = req.get("set_daily_checkin").and_then(|v| v.as_bool()) {
+                st.flags.set_daily_checkin(on);
+            }
+            if let Some(on) = req.get("set_daily_growth").and_then(|v| v.as_bool()) {
+                st.flags.set_daily_growth(on);
+            }
+            if let Some(arr) = req.get("set_platforms").and_then(|v| v.as_array()) {
+                let ids: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                st.flags.set_checkin_platforms(ids);
+            }
+            Json(json!({
+                "ok": true,
+                "cfg": checkin_auto_config(&st),
+                "platforms": CHECKIN_PLATFORMS.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
+                "records_endpoint": "/api/task-records",
+            }))
+            .into_response()
+        }
         // ★ 2026-10-26（P0）：成长任务一键完成。对齐 workbuddy2api 17 任务闭环：
         //   读清单 → 接受 → 事件链点亮（桌面指纹 /v2/report）→ 逐个领奖。
         "growth" => {
@@ -2400,6 +2459,28 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
                 };
                 all.push(json!({"account": acc_id, "result": r}));
             }
+            task_records::append(
+                st.data_dir.as_deref(),
+                all.iter()
+                    .map(|a| {
+                        let r = a.get("result").cloned().unwrap_or(Value::Null);
+                        let ok = r.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let detail = r
+                            .get("message")
+                            .and_then(|x| x.as_str())
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or(if ok { "执行完成" } else { "执行失败" });
+                        task_records::TaskRecord::new(
+                            "manual",
+                            &format!("growth:{}", single.as_deref().unwrap_or("all")),
+                            &platform,
+                            a.get("account").and_then(|x| x.as_str()).unwrap_or(""),
+                            if ok { "success" } else { "failed" },
+                            detail,
+                        )
+                    })
+                    .collect(),
+            );
             Json(json!({"ok": true, "platform": platform, "accounts": all})).into_response()
         }
         "schedule" => {
@@ -2417,11 +2498,11 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
             let message = if on {
                 // ★ 开启的同时立刻领一轮：用户点「开」就是同意现在领。否则后台要等
                 //   12 小时才第一次真跑，台账一直停在「未开启…跳过」，像开关没生效。
-                let v = checkin_all(&st, true).await;
+                let v = record_checkin(&st, "manual", None).await;
                 let s = summarize_checkin(&v);
                 st.tasks.mark_ok("daily_checkin", s.clone());
                 format!(
-                    "已开启每日自动签到：已立即领取一次，之后每 12 小时自动领取（开关存 flags.json，重启保持；当天已领过时上游回「今日已领取」，无副作用）。本次结果：{s}"
+                    "已开启每日自动签到：已立即领取一次，之后每天在「定时签到」里设置的北京时间 HH:MM 自动领取（开关存 flags.json，重启保持；当天已领过时上游回「今日已领取」，无副作用）。本次结果：{s}"
                 )
             } else {
                 "已关闭每日自动签到：后台任务不再请求上游".to_string()
@@ -2447,7 +2528,7 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
                 "ok": true,
                 "daily_growth": on,
                 "message": if on {
-                    "已开启每日自动成长任务：后台每 12 小时跑一轮（开关存 flags.json，重启保持）"
+                    "已开启每日自动成长任务：后台每天在「定时签到」里设置的北京时间 HH:MM 跑一轮（开关存 flags.json，重启保持）"
                 } else {
                     "已关闭每日自动成长任务：后台不再上报事件链"
                 },
@@ -2574,10 +2655,36 @@ async fn run_single_growth(
     }
 }
 
+/// 可自动签到的平台清单（面板据此渲染勾选框）。
+///
+/// ★ 单一来源：checkin_all 里实际打的就是这四类上游，不要把清单抄到前端去
+///   —— 抄两份的结果就是「面板能勾，但后台根本没签」（之前 wb 国际版就漏过）。
+pub const CHECKIN_PLATFORMS: &[(&str, &str)] = &[
+    ("wb-gateway", "WorkBuddy 国内站"),
+    ("wb-gateway-intl", "WorkBuddy 国际站"),
+    ("codebuddy", "CodeBuddy"),
+    ("lobster", "Lobster AI"),
+    ("apk-raccoon", "商汤小浣熊"),
+];
+
+/// 默认（未配置平台集合时）沿用总开关：全部可签到平台都参与。
 pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
+    checkin_selected(st, claim, None).await
+}
+
+/// 按平台集合执行签到。`Some(ids)` 时只签这些平台；`None` = 全部（旧行为）。
+///
+/// ★ 为什么要这个参数：自动签到要能按平台分别开关，而手动「立即签到」仍应
+///   一次签全部 —— 两种语义共用一个实现，避免逻辑漂移。
+pub async fn checkin_selected(st: &AppState, claim: bool, only: Option<&[String]>) -> Value {
+    let enabled = |id: &str| match only {
+        None => true,
+        Some(ids) => ids.iter().any(|x| x == id),
+    };
     let http = aigw_relay::auth_login::auth_http();
     let mut results: Vec<Value> = Vec::new();
     for &platform in WB_CREDIT_PLATFORMS {
+        if !enabled(platform) { continue; }
         let Some(base) = aigw_relay::wb::wb_checkin_base(platform) else { continue };
         for (acc_id, secret) in st.accounts.secrets_for(platform) {
             let dom = st.accounts.domain_of(platform, &secret);
@@ -2611,7 +2718,7 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
     // 协议移植自 lobsterai2api DailyCheckin（slot → context → check_in → 复核）。
     // 幂等：已签到/活动未投放回 ok=true，不会重复领取；claim=false 时
     // 直接复用 claim 调用做状态查询（上游幂等，无副作用），简化模型。
-    if claim {
+    if claim && enabled("lobster") {
         for (acc_id, secret) in st.accounts.secrets_for("lobster") {
             let r = aigw_relay::lobster_checkin::daily_checkin(&http, &secret).await;
             results.push(json!({
@@ -2628,6 +2735,7 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
         //   · 必须带桌面客户端头 X-Client-Platform + X-Client-Version: v1.0.0
         //   · granted=true 才是真发了分；false = 今天已领过（幂等成功）
         //   同时回读积分余额，面板一次就能看到「领了多少 / 现在多少」。
+        if enabled("apk-raccoon") {
         for (acc_id, secret) in st.accounts.secrets_for("apk-raccoon") {
             let r = aigw_relay::raccoon_checkin::checkin_with_balance(&http, &secret).await;
             // 余额写进号池快照（供「快过期优先」选号用）
@@ -2641,6 +2749,7 @@ pub async fn checkin_all(st: &AppState, claim: bool) -> Value {
                 "ok": r.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
                 "data": r,
             }));
+        }
         }
     }
     json!({"ok": true, "claim": claim, "results": results, "count": results.len()})
@@ -2766,6 +2875,34 @@ pub async fn refresh_credits_all(st: &AppState) -> String {
     }
     msg += &rate_note;
     msg
+}
+
+/// 后台每日签到入口：执行完立刻把逐账号结论写进「签到记录」台账。
+/// claim / schedule 两条手动路径也走这里，避免三处各写一份记录逻辑。
+pub async fn record_checkin(st: &AppState, source: &str, only: Option<&[String]>) -> Value {
+    let v = checkin_selected(st, true, only).await;
+    if let Some(results) = v.get("results").and_then(|x| x.as_array()) {
+        task_records::append(
+            st.data_dir.as_deref(),
+            task_records::from_checkin(source, results),
+        );
+    }
+    v
+}
+
+/// 自动任务配置的统一读取口：面板、后台循环、/api/checkin?action=config 都用它，
+/// 避免三处各读一次 flags 时口径漂移。
+pub fn checkin_auto_config(st: &AppState) -> Value {
+    let ids = st.flags.checkin_platforms();
+    json!({
+        "daily_checkin": st.flags.daily_checkin(),
+        "daily_growth": st.flags.daily_growth(),
+        "run_hour": st.flags.run_hour(),
+        "run_minute": st.flags.run_minute(),
+        // 空集 = 沿用总开关（兼容旧配置）；非空时才启用逐平台过滤
+        "per_platform": !ids.is_empty(),
+        "checkin_platforms": ids,
+    })
 }
 
 pub fn summarize_checkin(v: &Value) -> String {
@@ -3221,7 +3358,44 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
         }
         "save" => {
             let platform = v.get("platform").and_then(|x| x.as_str()).unwrap_or("");
-            let secret = v.get("secret").and_then(|x| x.as_str()).unwrap_or("");
+            // ★ from_client=true：不用粘贴，直接从本机桌面客户端的数据文件里读凭据。
+            //   为什么做成服务端动作而不是让前端去读文件：前端是浏览器，碰不到
+            //   %APPDATA%；而且路径白名单必须在服务端守着（见 client_import 模块头）。
+            let from_client = v.get("from_client").and_then(|x| x.as_bool()).unwrap_or(false);
+            let secret_owned;
+            let secret = if from_client {
+                match client_import::import(platform) {
+                    client_import::ImportOutcome::Found { secret, label } => {
+                        secret_owned = secret;
+                        tracing::info!(platform = %platform, source = %label, "从本机客户端导入凭据");
+                        secret_owned.as_str()
+                    }
+                    client_import::ImportOutcome::Unsupported => {
+                        let list: Vec<&str> =
+                            client_import::SOURCES.iter().map(|s| s.platform).collect();
+                        return Json(json!({
+                            "ok": false,
+                            "supported": false,
+                            "message": format!(
+                                "{} 不支持从本机客户端导入。目前可导入的：{}",
+                                platform,
+                                list.join(" / ")
+                            ),
+                        }))
+                        .into_response();
+                    }
+                    client_import::ImportOutcome::Missing(why) => {
+                        return Json(json!({
+                            "ok": false,
+                            "supported": true,
+                            "message": why,
+                        }))
+                        .into_response();
+                    }
+                }
+            } else {
+                v.get("secret").and_then(|x| x.as_str()).unwrap_or("")
+            };
             if platform.is_empty() || secret.is_empty() {
                 return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "message": "缺 platform 或 secret"}))).into_response();
             }
@@ -4101,7 +4275,7 @@ fn platform_note(st: &AppState, plat: &str, models_count: usize) -> Value {
     let reason = if !enabled {
         "这个平台是停用的".to_string()
     } else if !routable {
-        "这个平台没有可用凭据（去「平台」页填 Key / 扫码 / 登录）".to_string()
+        "这个平台没有可用凭据（去「接入源」页填 Key / 扫码 / 登录）".to_string()
     } else if !st.platform_supported(s) {
         format!(
             "这个平台的协议是 {}，转发层只支持 openai 透传（改 format 或换一个 OpenAI 兼容地址）",
@@ -4499,6 +4673,21 @@ fn sse_response_timed(
         started: Instant,
         model: String,
         bytes: usize,
+        /// 攒下来的正文（只用于截断判定，结束时随 guard 一起丢弃）。
+        ///
+        /// ★ 为什么要攒：非流式路径有 `x-aigw-truncated` 响应头告诉客户端「这轮被
+        ///   腰斩了」，而流式**做不到** —— HTTP 头必须先于 body 发出，而截断判据
+        ///   （代码围栏没闭合、括号失衡、finish_reason=length）要等流结束才知道。
+        ///   这是协议层的硬限制，不是没实现。
+        ///   能做到的是**让它在日志里可见**：用户报「回答到一半停了」时，
+        ///   grep `truncated=true` 就能确认到底是上游腰斩，还是模型自己说完了。
+        ///
+        /// ★ 必须**封顶**（见 [`StreamEndGuard::TEXT_CAP`]）：客户端完全可能要求
+        ///   十万 token 的长文，那串正文一路 push 下去就是几十 MB 常驻内存，
+        ///   而它只服务于一个布尔判断。
+        text: String,
+        /// 最近一次见到的 finish_reason（长度别名表判它）。
+        finish: Option<String>,
     }
     impl StreamEndGuard {
         /// 经方法写入（而不是闭包里裸写字段）：裸写字段会被 capture 分析判成
@@ -4506,15 +4695,79 @@ fn sse_response_timed(
         fn add_bytes(&mut self, n: usize) {
             self.bytes += n;
         }
+        /// 攒正文的上限（字符数）。只为判一个布尔值，不需要留全文。
+        /// 判据看的是**结尾形态**，而 `finish_reason` 是单独存的，两者都不受截断影响。
+        const TEXT_CAP: usize = 64 * 1024;
+        /// 从一帧 SSE 里提取增量正文与 finish_reason。
+        ///
+        /// 容忍任何形状：不是 JSON、没有 choices、delta 里没有 content —— 一律安静
+        /// 跳过（这里绝不能因为解析失败而影响转发）。
+        fn feed(&mut self, chunk: &str) {
+            for line in chunk.split('\n') {
+                let Some(rest) = line.trim_start().strip_prefix("data:") else {
+                    continue;
+                };
+                let payload = rest.trim();
+                if payload.is_empty() || payload == "[DONE]" {
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+                    continue;
+                };
+                let first = || {
+                    v.get("choices")
+                        .and_then(|c| c.as_array())
+                        .and_then(|a| a.first())
+                };
+                if let Some(f) = first()
+                    .and_then(|c| c.get("finish_reason"))
+                    .and_then(|f| f.as_str())
+                {
+                    self.finish = Some(f.to_string());
+                }
+                if let Some(txt) = first()
+                    .and_then(|c| c.get("delta"))
+                    .and_then(|d| d.get("content"))
+                    .and_then(|x| x.as_str())
+                {
+                    if self.text.len() < Self::TEXT_CAP {
+                        let room = Self::TEXT_CAP - self.text.len();
+                        if txt.len() <= room {
+                            self.text.push_str(txt);
+                        } else {
+                            // 按字符边界切，避免把多字节字符切成半个（会 panic）
+                            let mut cut = room;
+                            while cut > 0 && !txt.is_char_boundary(cut) {
+                                cut -= 1;
+                            }
+                            self.text.push_str(&txt[..cut]);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     impl Drop for StreamEndGuard {
         fn drop(&mut self) {
+            // 截断判定：与非流式**共用同一套判据**（truncated 模块），
+            // 保证两条链路口径一致 —— 那边判为截断的，这边也要判为截断。
+            let truncated = crate::truncated::looks_truncated(
+                crate::truncated::TurnOutcome {
+                    finish: self.finish.as_deref(),
+                    text_len: self.text.chars().count(),
+                    think_len: 0, // 流式的思考内容不进 text，这里不参与判定
+                },
+                &self.text,
+            );
             tracing::info!(
                 target: "aigw::req",
                 model = %self.model,
                 ms = self.started.elapsed().as_millis() as i64,
                 bytes = self.bytes as i64,
+                truncated,
+                finish = self.finish.as_deref().unwrap_or("-"),
+                text_chars = self.text.chars().count() as i64,
                 "流式结束"
             );
         }
@@ -4524,6 +4777,8 @@ fn sse_response_timed(
         started,
         model: model.clone(),
         bytes: 0,
+        text: String::new(),
+        finish: None,
     };
     let mut seen = false;
     // ★ dead-store 这个 lint 看不到 Drop：`guard.bytes` 的最终值其实被
@@ -4535,6 +4790,11 @@ fn sse_response_timed(
     let wrapped = stream.map(move |chunk| {
         if let Ok(bytes) = &chunk {
             guard.add_bytes(bytes.len());
+            // 攒正文 + finish_reason：只用于流结束时的截断判定（见 guard 的注释）。
+            // 解析失败一律忽略 —— 这一层绝不能影响转发。
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                guard.feed(s);
+            }
             if !seen && !bytes.is_empty() {
                 seen = true;
                 let ttfb = started.elapsed().as_millis();
@@ -4551,6 +4811,27 @@ fn sse_response_timed(
         chunk
     });
     sse_response(Body::from_stream(wrapped))
+}
+
+/// 响应侧的通用后处理：三条协议入口（`/v1/chat/completions`、`/v1/messages`、
+/// `/v1/responses`）在把上游结果交出去之前都必须过这里。
+///
+/// ── 为什么必须集中成一处 ─────────────────────────────────────
+/// 这些处理此前是**在内联代码里逐条写的**，结果只有 chat 那条入口全都有，
+/// messages / responses 漏了 think_tags —— 而面板上「思考标签处理」写的是
+/// 「模型把思考写进正文时怎么办」，没有任何地方说明它只对一种协议生效。
+/// 同一个配置在不同协议下行为不同，是最难排查的一类不一致。
+///
+/// 放在 chat_core 返回**之后**、协议转换**之前**：此时还是 OpenAI 形状，
+/// 各处理函数都按这个形状写；转成 Anthropic/Responses 信封之后就认不出来了。
+fn postprocess_chat_response(mut v: serde_json::Value) -> serde_json::Value {
+    // ① 模型名还原：Claude Code 会读回模型名来推算上下文窗口，
+    //    看到上游真名会算错窗口大小。
+    aigw_relay::model_map::restore_global(&mut v);
+    // ② 剥掉模型写进正文的 <think>…</think>：智能体会把正文存进历史并在下一轮
+    //    原样发回，不剥等于每轮都为同一段思考重复付费。
+    aigw_relay::think_tags::apply_global(&mut v);
+    v
 }
 
 async fn chat_completions(
@@ -4594,15 +4875,11 @@ async fn chat_completions(
             //   非流式以前**一行都没有** —— 用户报「有时候能答有时候不能」时，
             //   日志里什么都查不到，只能靠猜。这里补一条与流式对齐的完成日志。
             log_done(&req_model, started);
-            // ★ 2026-10-28（对齐 magpie model-map）：把响应里的模型名还原成客户端
-            //   原本请求的名字。Claude Code 会读回模型名来推算上下文窗口，
-            //   看到上游真名会算错窗口大小。
-            let mut v = v;
-            aigw_relay::model_map::restore_global(&mut v);
-            // ★ 2026-10-28（对齐 magpie think-tags）：剥掉模型写进正文的
-            //   <think>…</think> 块。智能体会把正文存进历史并在下一轮原样发回，
-            //   不剥等于每轮都为同一段思考重复付费。
-            aigw_relay::think_tags::apply_global(&mut v);
+            // ★ 响应侧后处理统一走一个函数：三条协议入口（chat / messages /
+            //   responses）都必须走同一套，否则会出现「同一份配置在不同协议下行为
+            //   不一致」——实测踩过：think_tags 原本只在 chat 非流式里调用，
+            //   而面板上写着「对所有请求生效」。
+            let v = postprocess_chat_response(v);
             let truncated = crate::truncated::outcome_from_chat(&v)
                 .map(|(o, text)| crate::truncated::looks_truncated(o, text))
                 .unwrap_or(false);
@@ -5118,7 +5395,7 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
         if !st.all_specs().iter().any(|s| s.enabled) {
             return Err(ChatCoreErr::Local {
                 status: 503,
-                message: format!("未知模型 {model}：当前没有任何启用的平台（没有配置可用上游）。\n请到「平台」页启用至少一个平台，或到「接入源」里接入一个。"),
+                message: format!("未知模型 {model}：当前没有任何启用的平台（没有配置可用上游）。\n请到「接入源」页启用或接入至少一个平台。"),
                 code: None,
                 retry_after: None,
             });
@@ -5148,7 +5425,7 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
             return Err(ChatCoreErr::Local {
                 status: 404,
                 message: format!(
-                    "无法按 {model} 转发：平台 {plat} 不可用 —— {why}。\n处理办法：到「平台」页启用它/补凭据，或改用该平台上确实存在的模型（/v1/models?platform={plat} 可查）。"
+                    "无法按 {model} 转发：平台 {plat} 不可用 —— {why}。\n处理办法：到「接入源」页点开这个平台，启用它 / 补凭据，或改用该平台上确实存在的模型（/v1/models?platform={plat} 可查）。"
                 ),
                 code: Some("model_not_found".to_string()),
                 retry_after: None,
@@ -5156,7 +5433,7 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
         }
         return Err(ChatCoreErr::Local {
             status: 404,
-            message: format!("未知模型 {model}：没有启用的平台声明它（多平台下不再静默兜底）。\n可用「模型id@平台」指定，或到「模型」页开启该模型。"),
+            message: format!("未知模型 {model}：没有启用的平台声明它（多平台下不再静默兜底）。\n可用「模型id@平台」指定，或到「接入源」页点开对应平台，在「模型清单」里把这个模型启用。"),
             code: Some("model_not_found".to_string()),
             retry_after: None,
         });
@@ -5210,7 +5487,7 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
     if pool_accounts.is_empty() {
         return Err(ChatCoreErr::Local {
             status: 503,
-            message: format!("平台 {} 无可用账号（本服务端还没接入该平台的凭据），请到「账号」页登录或粘贴 Key 后重试", spec.id),
+            message: format!("平台 {} 无可用账号（本服务端还没接入该平台的凭据），请到「接入源」页登录或粘贴 Key 后重试", spec.id),
             code: None,
             retry_after: None,
         });
@@ -5234,7 +5511,7 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
             return Err(ChatCoreErr::Local {
                 status: 503,
                 message: format!(
-                    "平台 {} 无可用账号（本服务端还没接入该平台的凭据），请到「账号」页登录或粘贴 Key 后重试",
+                    "平台 {} 无可用账号（本服务端还没接入该平台的凭据），请到「接入源」页登录或粘贴 Key 后重试",
                     spec.id
                 ),
                 code: None,
@@ -5252,8 +5529,38 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
                     if let Some(e) = last_err {
                         return Err(e);
                     }
-                    // 全挡的原因不止一种，文案必须分开说：限制器触顶**不该去重新登录**
-                    // （登了也没用，窗口翻页才恢复），把用户支去「账号页重登」是误导。
+                    // 全挡的原因不止一种，文案必须分开说：
+                    //   ① **并发已满**（max_inflight）：账号完全健康，等几十毫秒就好，
+                    //      绝不能让人去重新登录 —— 实测 8 并发打免密车道时 5 个请求
+                    //      收到「账号全部不可用（凭据失效隔离）」，纯属误导；
+                    //   ② Token 限额触顶：窗口翻页才恢复，登了也没用；
+                    //   ③ 冷却 / 凭据隔离：这才该去重登。
+                    let full_n = st
+                        .pool
+                        .inflight_full_count(&remaining, &spec.id, &upstream_model);
+                    if full_n > 0 && full_n == remaining.len() {
+                        tracing::info!(
+                            "pool 并发已满：{} / {} 的 {} 路都在途（上限 {}），本次拒绝并建议重试",
+                            spec.id,
+                            upstream_model,
+                            full_n,
+                            st.pool.max_inflight_public()
+                        );
+                        return Err(ChatCoreErr::Local {
+                            status: 503,
+                            message: format!(
+                                "平台 {} 的「{}」并发已满（单账号上限 {} 路，{full_n} 个号都在途），\
+                                 账号本身是好的 —— 客户端稍后重试即可；\
+                                 需要更高并发可到「运行配置」调大「单账号并发」。",
+                                spec.id,
+                                upstream_model,
+                                st.pool.max_inflight_public(),
+                            ),
+                            code: None,
+                            // 并发满通常几十~几百毫秒就空出来，给一个短 retry_after
+                            retry_after: Some(1),
+                        });
+                    }
                     let hit = st.pool.token_hit_info(&remaining);
                     let (why, advice) = match hit {
                         Some((n, reset_s)) => {
@@ -5264,12 +5571,12 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
                             };
                             (
                                 format!("冷却、凭据隔离或 Token 限额触顶（{n} 个号触顶）"),
-                                format!("触顶的号窗口翻页后自动恢复（{left}内），无需重新登录；也可到「账号」页调整或清除限额。"),
+                                format!("触顶的号窗口翻页后自动恢复（{left}内），无需重新登录；也可到「模型与用量」页调整或清除限额。"),
                             )
                         }
                         None => (
                             "冷却中或凭据失效隔离".to_string(),
-                            "若长期如此请到「账号」页重新登录该平台。".to_string(),
+                            "若长期如此请到「接入源」页点开该平台重新登录。".to_string(),
                         ),
                     };
                     tracing::warn!("pool 全挡：{} 的账号均处于 {} 中", spec.id, why);
@@ -5365,7 +5672,16 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
             if waited >= ACQUIRE_WAIT {
                 return Err(ChatCoreErr::Local {
                     status: 429,
-                    message: "provider busy: 该账号在途请求已达上限（2 路），请稍后重试".to_string(),
+                    // ★ 上限值必须**现读**，不能写死「2 路」。
+                    //   实测踩过：把 max_inflight 调到 1 之后并发请求仍报
+                    //   「已达上限（2 路）」—— 文案与真实配置不一致，
+                    //   用户按这个数字去调参会被误导（他以为已经调小了但报错没变）。
+                    message: format!(
+                        "provider busy: 该账号在途请求已达上限（{} 路），已等 {} 秒仍未空出，请稍后重试；\
+                         需要更高并发可到「运行配置」调大「单账号并发」",
+                        st.pool.max_inflight_public(),
+                        ACQUIRE_WAIT.as_secs(),
+                    ),
                     code: None,
                     // 提示从固定 2 秒改成 5 秒：并发满通常是瞬时，2 秒偏乐观，
                     // 客户端会密集重试继续撞同一个满号。
@@ -6189,6 +6505,9 @@ async fn messages_completions(
     match chat_core(&st, oa).await {
         Ok(ChatCoreOut::Json(v)) => {
             log_done(&model, started);
+            // 与非流式 chat 走同一套后处理（模型名还原 + 剥 think 标签）——
+            // 否则「思考标签处理」这项配置在 messages 协议下会静默失效。
+            let v = postprocess_chat_response(v);
             Json(openai_to_anthropic(&v, &model)).into_response()
         }
         Ok(ChatCoreOut::Stream(stream)) => {
@@ -6272,6 +6591,8 @@ async fn responses_completions(
     match chat_core(&st, oa).await {
         Ok(ChatCoreOut::Json(v)) => {
             log_done(&model, started);
+            // 同上：responses 协议也要过同一套后处理。
+            let v = postprocess_chat_response(v);
             Json(openai_to_responses(&v, &model)).into_response()
         }
         Ok(ChatCoreOut::Stream(stream)) => {
@@ -10338,6 +10659,21 @@ stream_dialect = "sse_delta"
         assert!(body.contains("nobody-knows"), "body={body}");
         assert!(body.contains("model_not_found"), "body={body}");
         assert!(body.contains("invalid_request_error"), "body={body}");
+        // ★ 文案里指的页面名必须真实存在。
+        //   实测踩过：这里原本写「到『模型』页开启该模型」，而面板上根本没有名为
+        //   「模型」的 tab（真实名称是「接入源」与「模型与用量」），用户照着找会
+        //   找不到。同类「文案指错地方」的坑在 Accio / AutoClaw 那几轮也出现过 ——
+        //   错误文案指错方向，比没有文案更浪费时间。
+        assert!(
+            body.contains("接入源"),
+            "要指向真实存在的页面（接入源）：body={body}"
+        );
+        assert!(
+            !body.contains("「模型」页")
+                && !body.contains("「平台」页")
+                && !body.contains("「账号」页"),
+            "不能引用面板上不存在的 tab：body={body}"
+        );
     }
 
     #[tokio::test]
