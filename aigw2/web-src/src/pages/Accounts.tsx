@@ -105,13 +105,44 @@ export function Accounts() {
     try {
       const r = await api.post('/api/checkin', payload) as {
         ok?: boolean; message?: string;
-        results?: Array<{ ok?: boolean }>;
+        /** claim 响应：逐账号结果（判据与后端 summarize_checkin 同源）。 */
+        results?: Array<{ ok?: boolean; data?: { ok?: boolean; granted?: boolean; claimed?: boolean; code?: number; message?: string; status?: string; msg?: string } }>;
         accounts?: Array<{ result?: { ok?: boolean; message?: string } }>;
       };
-      const detail = r.message
-        ?? (r.accounts?.length ? r.accounts.map((a) => a.result?.message ?? '').filter(Boolean).join('；') : '')
-        ?? '';
-      setMsg(r?.ok ? `✔ ${label}已执行${detail ? '：' + detail : ''}` : `✗ ${r?.message ?? '执行失败'}`);
+      // ★ 「已执行」三个字不够：用户要的是「成几个、几个是今天已领过、
+      //   失败几个失败在哪」。判据对齐 task_records::from_checkin：
+      //   code=2/10001 与「已签/已领」文案是幂等跳过，不算成功也不算失败。
+      const summarize = (): string => {
+        const rows = r.results ?? [];
+        if (!rows.length) {
+          const g = r.accounts?.length
+            ? r.accounts.map((a) => a.result?.message ?? '').filter(Boolean).join('；')
+            : '';
+          return g;
+        }
+        let okN = 0, alreadyN = 0, failN = 0, firstErr = '';
+        for (const row of rows) {
+          const d = row.data ?? {};
+          const text = [d.message, d.status, d.msg].find((x) => typeof x === 'string') ?? '';
+          const low = text.toLowerCase();
+          const already = d.code === 2 || d.code === 10001
+            || (row.ok && d.claimed === false)
+            || (row.ok && d.granted === false)
+            || low.includes('今日已') || low.includes('已领取') || low.includes('already');
+          if (already) alreadyN++;
+          else if (row.ok && (d.ok !== false)) okN++;
+          else {
+            failN++;
+            if (!firstErr) firstErr = text.slice(0, 60);
+          }
+        }
+        const parts = [`成功 ${okN}`];
+        if (alreadyN) parts.push(`今日已领 ${alreadyN}`);
+        if (failN) parts.push(`失败 ${failN}`);
+        return parts.join(' · ') + (firstErr ? `；首个失败：${firstErr}` : '');
+      };
+      const detail = r.message ?? summarize();
+      setMsg(r?.ok ? `✔ ${label}：${detail || '完成'}` : `✗ ${r?.message ?? '执行失败'}`);
     } catch (e) { setMsg('执行失败：' + (e instanceof Error ? e.message : String(e))); }
     finally { setBusy(false); }
   };
