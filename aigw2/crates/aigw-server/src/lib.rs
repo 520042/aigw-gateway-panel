@@ -3398,10 +3398,12 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
             //   %APPDATA%；而且路径白名单必须在服务端守着（见 client_import 模块头）。
             let from_client = v.get("from_client").and_then(|x| x.as_bool()).unwrap_or(false);
             let secret_owned;
+            let mut import_source = String::new();
             let secret = if from_client {
                 match client_import::import(platform) {
                     client_import::ImportOutcome::Found { secret, label } => {
                         secret_owned = secret;
+                        import_source = label.to_string();
                         tracing::info!(platform = %platform, source = %label, "从本机客户端导入凭据");
                         secret_owned.as_str()
                     }
@@ -3447,7 +3449,11 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
                 )
                     .into_response();
             }
-            let saved = st.login.save(platform, secret, &st.accounts);
+            let mut saved = st.login.save(platform, secret, &st.accounts);
+            // 来源只在这里有值（from_client 路径），前端弹窗用它说明凭据从哪读的。
+            if !import_source.is_empty() {
+                saved["source"] = json!(import_source);
+            }
             // 重新粘贴凭据覆盖了同一行 → 同上，清治理状态与粘性绑定。
             if saved.get("credential_replaced").and_then(|x| x.as_bool()).unwrap_or(false) {
                 if let Some(acc) = saved.get("account_id").and_then(|x| x.as_str()) {

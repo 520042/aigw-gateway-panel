@@ -194,14 +194,36 @@ function PlatformDetail({ p, onChanged }: { p: Platform; onChanged: () => void }
             const el = document.getElementById('cred-' + p.id) as HTMLInputElement | null;
             const v = el?.value.trim();
             if (!v) { alert('请先粘贴凭据'); return; }
-            api.post('/api/auth', { action: 'save', platform: p.id, secret: v })
-              .then(() => { alert('凭据已保存'); onChanged(); })
+            api.post<{ ok?: boolean; message?: string; credential_replaced?: boolean; verified?: boolean }>(
+              '/api/auth', { action: 'save', platform: p.id, secret: v },
+            )
+              .then((r) => {
+                // 区分「新增账号」与「替换已有凭据」：同名手填账号是 upsert，
+                // 保存后账号数不变是正常行为，必须说清，否则用户以为没存上。
+                const action = r.credential_replaced ? '已替换该平台的既有凭据' : '已作为新账号存入账号池';
+                const verified = r.verified === true ? '，验活通过'
+                  : r.verified === false ? '（注意：验活未通过，保存的凭据可能无效）' : '';
+                alert(`${action}${verified}`);
+                if (el) el.value = '';
+                onChanged();
+              })
               .catch((e: unknown) => alert('保存失败：' + (e instanceof Error ? e.message : String(e))));
           }}>保存凭据</button>
           {a.kind === 'one_click' && (
             <button className="btn" onClick={() => {
-              api.post('/api/auth', { action: 'save', platform: p.id, from_client: true })
-                .then((r: unknown) => { alert(JSON.stringify(r)); onChanged(); })
+              api.post<{ ok?: boolean; message?: string; source?: string; credential_replaced?: boolean; verified?: boolean }>(
+                '/api/auth', { action: 'save', platform: p.id, from_client: true },
+              )
+                .then((r) => {
+                  if (r.ok === false) { alert('导入失败：' + (r.message ?? '未知原因')); return; }
+                  const parts: string[] = [];
+                  if (r.source) parts.push(`来源：${r.source}`);
+                  parts.push(r.credential_replaced ? '已替换既有凭据' : '已作为新账号存入');
+                  if (r.verified === true) parts.push('验活通过');
+                  else if (r.verified === false) parts.push('⚠ 验活未通过，凭据可能无效');
+                  alert(`导入成功（${parts.join(' · ')}）`);
+                  onChanged();
+                })
                 .catch((e: unknown) => alert('导入失败：' + (e instanceof Error ? e.message : String(e))));
             }}>从本机客户端导入</button>
           )}
