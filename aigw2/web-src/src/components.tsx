@@ -51,7 +51,22 @@ export function ErrorBox({ message, onRetry }: { message: string; onRetry?: () =
   );
 }
 
-/** 异步数据状态的一处收敛：所有页面用同一个 hook，不再各写一遍 loading/error。 */
+/**
+ * 模块级快取：view 切换 = 卸载重挂，useAsync 每次挂载都会重新 fetch。
+ * 对轻接口（<10ms）无所谓；对「要读 6 倍日志窗口」的 /api/logs、要扫台账的
+ * /api/usage 来说，来回切两次页就是四趟白跑。挂载时命中未过期快取就先摆旧数据
+ * （不闪加载态），后台照常刷新一次（stale-while-revalidate）。
+ *
+ * ★ 缓存键必须含 **函数体**：多个页面都用 `[]` 做 deps（总览的 usage 与
+ *   账号页的 accounts 完全同键），只按 deps 做键会互相串数据 —— 账号页拿到
+ *   usage 的形状，`rows` 是 undefined，`.filter` 直接崩（实测过）。
+ *   `fn.toString()` 对同端点的内联箭头函数是稳定且互异的，够用。
+ *
+ * reload()（tick>0）绕过缓存强制重取；写入/轮询后都走它。
+ */
+const SNAPSHOT_TTL_MS = 15_000;
+const snapshotCache = new Map<string, { at: number; data: unknown }>();
+
 export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,10 +75,29 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []) {
 
   useEffect(() => {
     let alive = true;
-    setLoading(true);
+    // 缓存键：函数体 + deps。tick 不进键 —— reload 是「强制刷新」，永远直取。
+    const baseKey = fn.toString() + '|' + JSON.stringify(deps);
+    let seeding = false;
+    if (tick === 0) {
+      const hit = snapshotCache.get(baseKey);
+      if (hit && Date.now() - hit.at < SNAPSHOT_TTL_MS) {
+        setData(hit.data as T);
+        setError(null);
+        setLoading(false);
+        seeding = true;
+      }
+    }
+    if (!seeding) setLoading(true);
     fn()
-      .then((d) => { if (alive) { setData(d); setError(null); } })
-      .catch((e: unknown) => { if (alive) setError(e instanceof Error ? e.message : String(e)); })
+      .then((d) => {
+        if (!alive) return;
+        snapshotCache.set(baseKey, { at: Date.now(), data: d });
+        // 上限兜底：正常页面数 × 端点数远到不了 40，到了就整体清（都是可重取数据）
+        if (snapshotCache.size > 40) snapshotCache.clear();
+        setData(d);
+        setError(null);
+      })
+      .catch((e: unknown) => { if (alive && !seeding) setError(e instanceof Error ? e.message : String(e)); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
     // fn 每次渲染都是新闭包，依赖只认显式 deps + tick（与旧版 render() 语义一致）。
