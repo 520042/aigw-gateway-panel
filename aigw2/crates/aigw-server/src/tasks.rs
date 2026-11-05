@@ -294,7 +294,7 @@ where
 }
 
 /// 距离下一个「北京时间 HH:MM」还有多少秒（至少 1 秒，避免 0 间隔忙循环）。
-fn secs_until_target(target_secs: i64) -> u64 {
+pub(crate) fn secs_until_target(target_secs: i64) -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

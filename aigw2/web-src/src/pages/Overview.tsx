@@ -5,11 +5,57 @@ const fmt = (n: number) => Number(n || 0).toLocaleString('en-US');
 const ms = (v: number | undefined) =>
   v == null ? '—' : v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms';
 
+/** 平台 × 小时健康网格响应（/api/pulse）。 */
+interface PulseRow { platform: string; cells: Array<{ bucket: number; ok: number; fail: number }> }
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+const bucketLabel = (bucket: number) => {
+  const d = new Date((bucket * 3600 - 8 * 3600) * 1000);
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:00`;
+};
+
+/**
+ * 健康脉冲（借鉴 sub2api channel-monitor 的 RelayPulseMatrix，按我们台账裁剪）：
+ * 每行一个平台，每格一小时；颜色 = 成功率档位（0-10 分，scoreToBand 同思路）。
+ * 悬停 tooltip 给出该小时的具体数字。没流量的小时不画格子（时间轴上的空隙）。
+ */
+function Pulse({ rows, hours }: { rows: PulseRow[]; hours: number }) {
+  const nowBucket = Math.floor((Date.now() / 1000 + 8 * 3600) / 3600);
+  const band = (ok: number, fail: number): string => {
+    const total = ok + fail;
+    const score = total ? Math.round((ok / total) * 10) : 5;
+    return 'pulse-s' + Math.max(0, Math.min(10, score));
+  };
+  return (
+    <div className="pulse-scroll">
+      <table className="pulse-table">
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.platform}>
+              <td className="pulse-name mono" title={r.platform}>{r.platform}</td>
+              {r.cells.map((c) => {
+                const age = nowBucket - c.bucket;
+                return (
+                  <td key={c.bucket} className={'pulse-cell ' + band(c.ok, c.fail)}
+                    title={`${r.platform} · ${bucketLabel(c.bucket)}\n成功 ${c.ok} · 失败 ${c.fail}${age > hours ? '\n（超出窗口）' : ''}`}>
+                    {(c.ok + c.fail) > 0 ? '' : ''}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export function Overview({ health, platforms }: { health: Health | null; platforms: PlatformResponse | null }) {
   // 平台清单由框架层拉取一次传入（167KB，不该每次切页重取）；
   // 这里只拉轻量的账号与用量。
   const ac = useAsync<AccountsResponse>(() => api.get('/api/accounts'), []);
   const us = useAsync<Usage>(() => api.get('/api/usage'), []);
+  const pulse = useAsync<{ rows: PulseRow[] }>(() => api.get('/api/pulse?hours=48'), []);
 
   if (ac.error || us.error) {
     return <ErrorBox message={ac.error ?? us.error ?? ''} onRetry={() => { ac.reload(); us.reload(); }} />;
@@ -47,6 +93,12 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
             <br /><span className="faint">模型路由：清单匹配 或 <code>模型id@平台</code></span>
           </div>
         </div>
+      </Card>
+
+      <Card title="健康脉冲 · 近 48 小时" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>每格一小时 · 绿好红坏 · 悬停看数字</span>}>
+        {pulse.error ? <div className="faint small">加载失败：{pulse.error}</div>
+          : !pulse.data || pulse.data.rows.length === 0 ? <div className="faint small">最近 48 小时没有调用记录</div>
+            : <Pulse rows={pulse.data.rows} hours={48} />}
       </Card>
 
       <div className="grid g2 mt-3">

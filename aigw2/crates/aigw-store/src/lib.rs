@@ -34,7 +34,7 @@ pub use combos::{Combo, ComboStore};
 
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -786,6 +786,92 @@ impl Store {
     /// 窗口内按模型聚合：定位「哪个模型在烧额度」。
     pub fn usage_window_by_model(&self, from: f64, to: f64) -> serde_json::Value {
         self.usage_window_group(from, to, GroupBy::Model)
+    }
+
+    /// 平台 × 小时健康网格（面板「健康脉冲」用，2026-11-06 对齐 sub2api
+    /// channel-monitor 的 RelayPulseMatrix，但只取我们台账里有的两个字段）。
+    ///
+    /// 返回 `{"rows": [{platform, cells: [{h, ok, fail}]}], "from", "to"}`：
+    /// 每格是**北京时间**的自然小时（本地 8 点起算），只有发生过请求的 (平台，
+    /// 小时) 才会有条目 —— 空格由前端补成「没流量」，与 sub2api 的
+    /// is-empty 槽位同语义。
+    ///
+    /// 为什么独立成方法而不是让前端拉 5000 条自己算：台账 CAP=5000，
+    /// 前端聚合要把全表搬过网线再扔掉 90%；SQL GROUP BY 一次出来几 KB。
+    pub fn usage_pulse(&self, from: f64, to: f64) -> serde_json::Value {
+        match &self.backend {
+            Backend::Db(conn) => {
+                let mut out: std::collections::BTreeMap<String, Vec<Value>> =
+                    std::collections::BTreeMap::new();
+                {
+                    let c = conn.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Ok(mut stmt) = c.prepare(
+                        "SELECT platform,
+                                CAST((ts + 28800) / 3600 AS INTEGER) AS bucket,
+                                SUM(CASE WHEN ok<>0 THEN 1 ELSE 0 END),
+                                SUM(CASE WHEN ok=0 AND cancelled=0 THEN 1 ELSE 0 END)
+                         FROM usage_events
+                         WHERE ts >= ?1 AND ts <= ?2
+                         GROUP BY platform, bucket
+                         ORDER BY bucket DESC",
+                    ) {
+                        if let Ok(rows) = stmt.query_map((from, to), |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, i64>(2)?,
+                                r.get::<_, i64>(3)?,
+                            ))
+                        }) {
+                            for row in rows.flatten() {
+                                let (plat, bucket, ok, fail) = row;
+                                out.entry(plat).or_default().push(json!({
+                                    // bucket 是绝对小时；前端转回北京时间展示
+                                    "bucket": bucket,
+                                    "ok": ok.max(0),
+                                    "fail": fail.max(0),
+                                }));
+                            }
+                        }
+                    };
+                }
+                let rows: Vec<Value> = out
+                    .into_iter()
+                    .map(|(platform, cells)| json!({"platform": platform, "cells": cells}))
+                    .collect();
+                json!({"ok": true, "rows": rows, "from": from, "to": to})
+            }
+            // JSON 降级：内存里逐条聚合（降级模式本来就少用，不值得第二份 SQL）
+            Backend::Json { mem, .. } => {
+                let mut by: std::collections::BTreeMap<(String, i64), (i64, i64)> =
+                    std::collections::BTreeMap::new();
+                for e in mem.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+                    if e.ts < from || e.ts > to {
+                        continue;
+                    }
+                    let bucket = ((e.ts + 28800.0) / 3600.0).floor() as i64;
+                    let ent = by.entry((e.platform.clone(), bucket)).or_insert((0, 0));
+                    if e.ok {
+                        ent.0 += 1;
+                    } else if !e.cancelled {
+                        ent.1 += 1;
+                    }
+                }
+                let mut rows: Vec<(String, Vec<Value>)> = Vec::new();
+                for ((plat, bucket), (ok, fail)) in by {
+                    if let Some(r) = rows.iter_mut().find(|(p, _)| *p == plat) {
+                        r.1.push(json!({"bucket": bucket, "ok": ok, "fail": fail}));
+                    } else {
+                        rows.push((plat, vec![json!({"bucket": bucket, "ok": ok, "fail": fail})]));
+                    }
+                }
+                let rows: Vec<Value> = rows
+                    .into_iter()
+                    .map(|(platform, cells)| json!({"platform": platform, "cells": cells}))
+                    .collect();
+                json!({"ok": true, "rows": rows, "from": from, "to": to})
+            }
+        }
     }
 
     /// 窗口内按账号聚合：定位「哪个账号失败率高 / 已经被上游拉黑」。

@@ -370,6 +370,7 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/auth", post(auth_action))
         .route("/api/checkin", get(checkin_status_all).post(checkin_claim_all))
         .route("/api/task-records", get(task_records_view))
+        .route("/api/pulse", get(pulse_view))
         // ★ 2026-10-26（P3）：运行时配置热更新（并发/超时/重试/限流）。
         .route("/api/runtime", get(runtime_get).post(runtime_set))
         // ★ 2026-10-28（对齐 magpie system-prompt 插件）：自定义系统提示词注入。
@@ -2344,6 +2345,25 @@ async fn task_records_view(
     Json(task_records::query(st.data_dir.as_deref(), &params))
 }
 
+/// 平台 × 小时健康网格（北京时间）：GET /api/pulse?hours=24
+/// 总览页「健康脉冲」用。窗口最小 6 小时、最大 168 小时（7 天），
+/// 缺省 24。out = ok / fail / cancelled(不计) 的 SQL 侧聚合。
+async fn pulse_view(
+    State(st): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let hours = params
+        .get("hours")
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .map(|h| h.min(168.0))
+        .unwrap_or(24.0);
+    let now = aigw_store::now_unix();
+    let to = now + 3600.0; // 含当前进行中的小时
+    let from = (to - (hours * 3600.0)).max(0.0);
+    Json(st.store.usage_pulse(from, to))
+}
+
 /// POST /api/checkin：
 ///   - 空 body / {} / 无 action → 立刻全部领取（旧前端只发 {}，行为保持不变）
 ///   - {"action":"schedule","enabled":true|false} → 开/关每日自动签到（存 flags.json）
@@ -2900,6 +2920,14 @@ pub async fn record_checkin(st: &AppState, source: &str, only: Option<&[String]>
 /// 避免三处各读一次 flags 时口径漂移。
 pub fn checkin_auto_config(st: &AppState) -> Value {
     let ids = st.flags.checkin_platforms();
+    // 下次执行时刻（unix 秒）：借鉴 Agent2API 签到中心的「下次 HH:MM」倒计时，
+    // 用户不用对着表猜「它今天到底还跑不跑」。开关关闭时是 null。
+    let (h, m) = st.flags.run_time();
+    let target = (h as i64) * 3600 + (m as i64) * 60;
+    let wait = tasks::secs_until_target(target);
+    let next_run = st.flags.daily_checkin().then(|| {
+        aigw_store::now_unix() as i64 + wait as i64
+    });
     json!({
         "daily_checkin": st.flags.daily_checkin(),
         "daily_growth": st.flags.daily_growth(),
@@ -2908,6 +2936,7 @@ pub fn checkin_auto_config(st: &AppState) -> Value {
         // 空集 = 沿用总开关（兼容旧配置）；非空时才启用逐平台过滤
         "per_platform": !ids.is_empty(),
         "checkin_platforms": ids,
+        "next_run": next_run,
     })
 }
 

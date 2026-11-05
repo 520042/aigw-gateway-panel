@@ -315,6 +315,49 @@ tbody tr:hover td { background: var(--surface-3); }
   .wb-rec-filters .q { flex-basis: 100%; }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   健康脉冲（借鉴 sub2api channel-monitor RelayPulseMatrix，2026-11-06）
+   平台 × 小时网格；11 档成功率色（score0-10），色带从坏红到好绿。
+   ═══════════════════════════════════════════════════════════════════════ */
+.pulse-scroll { overflow-x: auto; max-height: 340px; }
+.pulse-table { border-collapse: separate; border-spacing: 2px; width: 100%; }
+.pulse-name {
+  font-size: var(--fs-xs); white-space: nowrap; text-align: right;
+  padding-right: var(--sp-2); color: var(--fg-muted);
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis;
+}
+.pulse-cell {
+  width: 22px; height: 16px; min-width: 22px;
+  border-radius: 3px; cursor: default;
+}
+/* 11 档色带（0=全挂 10=全好），同 sub2api 的 scoreToBand 分桶 */
+.pulse-s0  { background: #7f1d1d; }
+.pulse-s1  { background: #991b1b; }
+.pulse-s2  { background: #b91c1c; }
+.pulse-s3  { background: #dc2626; }
+.pulse-s4  { background: #ea580c; }
+.pulse-s5  { background: #d97706; }
+.pulse-s6  { background: #ca8a04; }
+.pulse-s7  { background: #a3a300; }
+.pulse-s8  { background: #65a30d; }
+.pulse-s9  { background: #4d9e0d; }
+.pulse-s10 { background: #16a34a; }
+
+/* 签到中心统计条（借鉴 Agent2API ck-stats，2026-11-06）：可点击跳对应页签 */
+.wb-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--sp-3); margin-bottom: var(--sp-3);
+}
+.wb-stat {
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface-2); padding: var(--sp-3);
+  cursor: pointer; min-width: 0;
+}
+.wb-stat:hover { border-color: var(--brand); }
+.wb-stat-label { font-size: var(--fs-xs); color: var(--fg-muted); }
+.wb-stat-value { font-size: var(--fs-lg); font-weight: 650; margin: 2px 0; }
+.wb-stat-foot { line-height: 1.5; }
+
 .wb-task-panel { border-left: 3px solid var(--brand); }
 .wb-task-col {
   min-width: 0;

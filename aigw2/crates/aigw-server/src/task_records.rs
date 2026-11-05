@@ -222,8 +222,20 @@ pub fn from_checkin(source: &str, results: &[Value]) -> Vec<TaskRecord> {
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
             let low = text.to_ascii_lowercase();
+            // ★ already 判据按上游实际回包逐家对齐（2026-11-06 对齐 Agent2API
+            //   checkin_records 的四档 outcome）：
+            //   · wb 族：code=2 / 10001 =「今日已领取」
+            //   · lobster：claimed=false + ok=true =「今天已签到（幂等跳过）」
+            //   · raccoon：granted=false + ok=true =「今天已领过」
+            //   · 通用：message 里出现幂等文案
             let already = matches!(code, Some(2) | Some(10001))
                 || d.get("already").and_then(|x| x.as_bool()) == Some(true)
+                || (transport
+                    && d.get("claimed").and_then(|x| x.as_bool()) == Some(false)
+                    && (low.contains("已签") || low.contains("幂等") || low.contains("未投放")))
+                || (transport
+                    && d.get("granted").and_then(|x| x.as_bool()) == Some(false)
+                    && biz_ok)
                 || low.contains("今日已")
                 || low.contains("已领取")
                 || low.contains("already");
@@ -292,6 +304,27 @@ mod tests {
         let r = json!({"platform":"p","account":"a","ok":false,
                        "data":{"code":10001,"message":"今天已签到"}});
         let rows = from_checkin("manual", &[r]);
+        assert_eq!(rows[0].outcome, "already");
+    }
+
+    /// lobster 的幂等回包：ok=true + claimed=false + 文案「今天已签到」。
+    /// 旧判据不看 claimed，会把它记成 success —— 台账天天显示「签到完成」，
+    /// 用户看不出这天到底是不是真的领到。
+    #[test]
+    fn lobster_claimed_false_is_already() {
+        let r = json!({"platform":"lobster","account":"a","ok":true,
+                       "data":{"ok":true,"claimed":false,"credit":0,
+                               "message":"今天已签到（幂等跳过）"}});
+        let rows = from_checkin("schedule", &[r]);
+        assert_eq!(rows[0].outcome, "already");
+    }
+
+    /// raccoon 的幂等回包：granted=false（今天已领过）。
+    #[test]
+    fn raccoon_granted_false_is_already() {
+        let r = json!({"platform":"apk-raccoon","account":"a","ok":true,
+                       "data":{"ok":true,"granted":false,"points":0}});
+        let rows = from_checkin("schedule", &[r]);
         assert_eq!(rows[0].outcome, "already");
     }
 

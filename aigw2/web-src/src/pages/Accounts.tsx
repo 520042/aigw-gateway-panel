@@ -149,6 +149,37 @@ export function Accounts() {
         </div>
 
         {tab === 'center' && (
+          <div className="wb-stats">
+            <div className="wb-stat" role="button" tabIndex={0} onClick={() => setTab('schedule')}
+              onKeyDown={(e) => { if (e.key === 'Enter') setTab('schedule'); }}>
+              <div className="wb-stat-label">下次自动执行</div>
+              <div className="wb-stat-value">
+                {currentCfg.daily_checkin && currentCfg.next_run
+                  ? <>{new Date(currentCfg.next_run * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</>
+                  : <span className="faint">未开启</span>}
+              </div>
+              <div className="wb-stat-foot faint fs-xs">
+                {currentCfg.daily_checkin
+                  ? `每天 ${hhmm(currentCfg.run_hour, currentCfg.run_minute)}（北京时间）· 点此调整`
+                  : '开启后按设定时刻自动执行 · 点此设置'}
+              </div>
+            </div>
+            <div className="wb-stat" role="button" tabIndex={0} onClick={() => setTab('records')}
+              onKeyDown={(e) => { if (e.key === 'Enter') setTab('records'); }}>
+              <div className="wb-stat-label">可操作账号</div>
+              <div className="wb-stat-value">{wbN}</div>
+              <div className="wb-stat-foot faint fs-xs">签到 / 任务 / 健康检查都作用在这些账号</div>
+            </div>
+            <div className="wb-stat" role="button" tabIndex={0} onClick={() => setTab('records')}
+              onKeyDown={(e) => { if (e.key === 'Enter') setTab('records'); }}>
+              <div className="wb-stat-label">签到记录</div>
+              <div className="wb-stat-value">查看</div>
+              <div className="wb-stat-foot faint fs-xs">逐账号执行台账 · 可筛选时间与结果</div>
+            </div>
+          </div>
+        )}
+
+        {tab === 'center' && (
           <div className="wb-tab-body">
             {wbN === 0 ? (
               <div className="faint">还没有 WorkBuddy 系账号 —— 到「接入源」页接入一个 wb-gateway / 国际版 / CodeBuddy 账号后，这里会出现签到与任务入口。</div>

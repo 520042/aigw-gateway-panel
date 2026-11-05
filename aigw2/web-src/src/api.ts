@@ -147,6 +147,8 @@ export interface AutoConfig {
   run_minute: number;
   per_platform: boolean;
   checkin_platforms: string[];
+  /** 下次自动执行（unix 秒）；总开关关闭时为 null/undefined。 */
+  next_run?: number | null;
 }
 
 export interface CheckinConfigResponse {
