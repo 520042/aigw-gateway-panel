@@ -474,6 +474,9 @@ code {
   font-family: var(--mono); font-size: var(--fs-sm);
   color: var(--brand); background: var(--surface-2);
   padding: 1px 5px; border-radius: var(--r-sm);
+  /* 长路径 / 长 token 不得撑破容器：数据目录那格（.kv 内）实测一段 327px 的
+     不可断行文本，1024px 窗口下把 .wrap 撑到 1061px（e2e 咬住）。 */
+  overflow-wrap: anywhere;
 }
 
 /* ── 进度条 ──────────────────────────────────────────────────────────── */

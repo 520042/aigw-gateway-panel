@@ -47,7 +47,11 @@ export interface Health {
   token_required: boolean;
   tasks: Record<string, TaskStat>;
   credits: { total: number; accounts: number };
-  db: { backend: string; events: number };
+  db: { backend: string; events: number; bytes?: number };
+  logs?: { files: number; bytes: number };
+  archives?: { files: number; bytes: number };
+  /** 最近一次落盘失败（各 Store 只 warn 不抛错，这里是唯一能看见它的地方）。 */
+  persist_error?: { file: string; s_ago: number; error: string } | null;
 }
 
 export interface TaskStat {
