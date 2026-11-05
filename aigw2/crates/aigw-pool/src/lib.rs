@@ -135,6 +135,10 @@ struct Inner {
     ///   「熔断」，选号彻底跳过，不再逐模型撞上游。
     ///   参数对齐参照缺省：窗口 2 分钟 / 阈值 10 次 / 冷却 5 分钟。
     ///   成功一次即清零（与 recent/health 同生命周期语义）。
+    ///   熔断达成时**原地保留** (start, count)——start 同时是熔断时刻，
+    ///   pick 的短路判据是「now - start < 冷却时长」，到期自动放行半开，
+    ///   下一次成功清零。永久保留阈值标记会把账号锁死（选不到 → 永远无法
+    ///   成功 → 永远清不掉），第一版就栽在这里。
     fail_streak: HashMap<String, (Instant, u32)>,
     /// account -> 积分余额快照（值, 记录时刻, **最早到期的资源包时刻** epoch 秒）。
     /// 供「快过期积分优先」选号用：积分少且久未刷新的号先消耗掉，
@@ -192,6 +196,10 @@ pub struct Pool {
     /// ★ 2026-10-28（对齐 magpie reserve）：选号策略。
     /// 0 = 默认（快过期优先 → 余额升序）；>0 = reserve/ceiling 的百分比阈值。
     ceiling: std::sync::atomic::AtomicU32,
+    /// ★ 测试时钟偏移（秒）。生产恒 0；熔断/冷却的测试用 `advance_clock_for_test`
+    ///   前拨，免得真实 sleep 300s。所有 Instant 判定统一经过 `Pool::now()`。
+    #[cfg(test)]
+    clock_offset: std::sync::atomic::AtomicU64,
 }
 
 /// 并发租约：Drop 自动归还在飞计数。
@@ -216,7 +224,32 @@ impl Pool {
             max_inflight: std::sync::atomic::AtomicU32::new(0),
             state_path: std::sync::Mutex::new(None),
             ceiling: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            clock_offset: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// 测试时钟：把「现在」前拨 N 秒（只影响此后写入/判定，不重写既有 Instant）。
+    /// 熔断/冷却到期路径的回归测试用——真实 sleep 300s 不现实。
+    #[cfg(test)]
+    pub fn advance_clock_for_test(&self, secs: f64) {
+        self.clock_offset
+            .fetch_add((secs * 1000.0) as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 统一的「现在」：真实时钟 + 测试偏移。**加法**：advance 前写入的
+    /// deadline（until = 真实T + 300s），advance(301s) 后 now = 真实+301s >
+    /// until → 到期放行，正是「时间流逝」的语义。用减法会把时钟拨回过去，
+    /// 之前写的 deadline 反而永远在未来，测试必挂（实测过）。
+    #[cfg(test)]
+    fn now(&self) -> Instant {
+        Instant::now() + Duration::from_millis(
+            self.clock_offset.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+    #[cfg(not(test))]
+    fn now(&self) -> Instant {
+        Instant::now()
     }
 
     /// ★ 2026-10-26（P3）：带持久化的构造。冷却/健康/积分快照落盘到
@@ -234,6 +267,8 @@ impl Pool {
             max_inflight: std::sync::atomic::AtomicU32::new(0),
             state_path: std::sync::Mutex::new(Some(data_dir.join("pool-state.json"))),
             ceiling: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            clock_offset: std::sync::atomic::AtomicU64::new(0),
         };
         let arc = Arc::new(pool);
         arc.restore();
@@ -491,7 +526,7 @@ impl Pool {
         accounts: &[String],
         model: &str,
     ) -> Option<String> {
-        let now = Instant::now();
+        let now = self.now();
         let now_epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -522,9 +557,16 @@ impl Pool {
             if g.waf.get(a).map(|t| *t > now).unwrap_or(false) {
                 continue;
             }
-            // 熔断账号：任何模型都跳过（breaker 是账号级短路，不是逐模型冷却）
-            if g.fail_streak.get(a).map(|(_, c)| *c >= BREAKER_THRESHOLD).unwrap_or(false) {
-                continue;
+            // 熔断账号：任何模型都跳过（breaker 是账号级短路，不是逐模型冷却）。
+            // 判据带时间窗：窗口起点起 BREAKER_COOLDOWN_SECS 内才短路，到期自动
+            // 放行（下一次真实成败决定去留）——不然熔断标记没有成功路径可清，
+            // 账号会被锁死。
+            if let Some((start, count)) = g.fail_streak.get(a).copied() {
+                if count >= BREAKER_THRESHOLD
+                    && now.duration_since(start) < Duration::from_secs_f64(BREAKER_COOLDOWN_SECS)
+                {
+                    continue;
+                }
             }
             let inflight_key = (platform.to_string(), a.clone(), model.to_string());
             if g.inflight
@@ -678,11 +720,19 @@ impl Pool {
     /// 或刚触顶的账号上——「限额防用量」的安全属性会被粘性整体绕过：
     /// 绑定过的号每请求都烧，限了等于没限。判据与 pick 共用 token_block_at。
     pub fn available(&self, account: &str, model: &str) -> bool {
-        let now = Instant::now();
+        let now = self.now();
         let now_epoch = epoch_secs();
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.waf.get(account).map(|t| *t > now).unwrap_or(false) {
             return false;
+        }
+        // 熔断窗口内（与 pick 同判据）：粘性路由也不许钉在熔断账号上
+        if let Some((start, count)) = g.fail_streak.get(account).copied() {
+            if count >= BREAKER_THRESHOLD
+                && now.duration_since(start) < Duration::from_secs_f64(BREAKER_COOLDOWN_SECS)
+            {
+                return false;
+            }
         }
         if token_block_at(&g, account, now_epoch).is_some() {
             return false;
@@ -754,7 +804,7 @@ impl Pool {
     ) {
         let _ = platform;
         let hint = retry_after.filter(|v| v.is_finite()).map(|v| v.clamp(1.0, COOL_CAP_SECS));
-        let now = Instant::now();
+        let now = self.now();
         {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if ok {
@@ -911,9 +961,9 @@ impl Pool {
                 };
                 let count = count + 1;
                 if count >= BREAKER_THRESHOLD {
-                    // 熔断标记保留（带阈值），pick 端按账号级短路；冷却到期后由
-                    // 成功/窗口过期自然清除。不 remove——否则 m2 这类没失败过的
-                    // 模型会立刻把号重新选进候选，熔断形同虚设。
+                    // 熔断达成：原地保留 (start=start_of_window, count>=阈值)。
+                    // start 即熔断时刻，pick 短路判据按 now - start < 冷却时长
+                    // 判定，到期自动放行半开；下一次成功把条目清掉。
                     g.fail_streak.insert(account.to_string(), (start, count));
                     // 账号级硬冷却：所有模型的 (账号,模型) 对一起冻，到期前不放半开探测
                     for (key, cs) in g.cooldown.iter_mut() {
@@ -2294,6 +2344,25 @@ mod reserve_tests {
         p.report("plat", "acc-a", "m1", true, ErrorClass::Transient);
         let (status2, _, _) = p.health_of("acc-a").expect("成功写健康结论");
         assert_eq!(status2, "ok");
+    }
+
+    /// 熔断必须是**半开的**：冷却到期后账号要能被重新选中（下一次真实成败
+    /// 决定去留）。第一版把阈值标记永久保留，账号被锁死——选不到 → 永远无法
+    /// 成功 → 永远清不掉。这里用 advance-clock 测试钩子验证到期放行。
+    #[test]
+    fn breaker_releases_after_cooldown() {
+        let p = Pool::new();
+        for _ in 0..BREAKER_THRESHOLD {
+            p.report("plat", "acc-a", "m1", false, ErrorClass::Transient);
+        }
+        assert_eq!(p.pick("plat", &["acc-a".into()], "m1"), None, "熔断期间不可选");
+        // 时间推进超过冷却时长
+        p.advance_clock_for_test(BREAKER_COOLDOWN_SECS + 1.0);
+        assert_eq!(
+            p.pick("plat", &["acc-a".into()], "m1"),
+            Some("acc-a".into()),
+            "冷却到期必须放行（半开），否则账号永久锁死"
+        );
     }
 
     /// 限流不计入熔断窗口：429 是上游在管节奏，解冻即好，不该升级成账号级熔断。
