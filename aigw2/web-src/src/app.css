@@ -73,6 +73,15 @@
 
 /* 图表 */
 .trend-svg { width: 100%; height: 180px; display: block; }
+/* 趋势图悬停提示：跟随竖线，按锚点 x 定位（借鉴 sub2api TokenUsageTrend 的
+   index-mode 交互；我们零依赖，CSS 实现） */
+.trend-tip {
+  position: absolute; top: 6px; transform: translateX(-50%);
+  background: var(--surface-3); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  font-size: var(--fs-xs); padding: 2px 8px; white-space: nowrap;
+  pointer-events: none; z-index: 5;
+}
 
 /* React 版列表不用绝对定位（旧版虚拟滚动靠 absolute）；这里用普通流 + 内部滚动 */
 .src-row.static { position: static; height: auto; min-height: 32px; padding: 4px var(--sp-3); }
