@@ -47,12 +47,18 @@
 ```bash
 cd aigw2
 
-# 首次：装 Rust（stable 即可，1.75+）
+# 首次：装 Rust（stable 即可，1.75+）和 Node.js 22+
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
+# 前台产物（web/index.html + web/app/）必须先生成；release 构建会把它嵌进二进制
+cd web-src && npm ci && npm run build && cd ..
 cargo build --release -p aigw
 ./target/release/aigw            # 默认 127.0.0.1:8800
 ```
+
+> Windows 一键部署直接跑 `build-deploy.ps1`：它会自动 `npm ci`（首次）→
+> `npm run build` → `cargo test` → `cargo build` → 部署 → 重启 → 健康检查，
+> 不需要手工构建前台。
 
 > **Windows 注意**：必须用 **msvc** 工具链。
 > `windows-sys 0.61+` 的 raw-dylib 在 gnu 工具链上要调 `dlltool.exe`：
@@ -386,7 +392,7 @@ AAD = purpose（跨用途冒充在解密时直接失败）
 cd aigw2
 
 cargo check --workspace --all-targets   # 必须零 error 零 warning
-cargo test  --workspace --no-fail-fast  # 855 项
+cargo test  --workspace --no-fail-fast  # 901 项（1 项显式忽略）
 cargo build --release -p aigw
 ```
 
@@ -403,17 +409,44 @@ cargo build --release -p aigw
 | `aigw-server` | axum 路由 + 门禁 + 协议转换 + rust-embed 前端 |
 | `aigw` | 二进制入口（CLI / 装配 / 安装器 / 体检 / doctor） |
 
-> ⚠️ `aigw-server/src/lib.rs` 目前 **13591 行**，其中约 54% 是内联 `mod tests`。
+> ⚠️ `aigw-server/src/lib.rs` 目前约 **1.47 万行**，其中约一半是内联 `mod tests`。
 > 拆分是已识别的待办（见 `../项目优化清单.md`），不是"还没想到"。
+
+### WB 任务中心
+
+「模型与用量」页顶部是统一任务中心，参考项目的高星签到中心结构：
+
+| 页签 | 内容 |
+|---|---|
+| 签到中心 | 一键签到、17 项 WB 日常任务、健康检查、活动单次动作 |
+| 定时签到 | `HH:MM`（北京时间）自定义时刻、每日签到 / 日常任务总开关、逐平台勾选、全选 / 清空、立即执行 |
+| 签到记录 | 真实落盘的逐账号执行台账（`data/task-records.json`），支持时间 / 结果 / 关键词筛选与分页 |
+
+- 可签到的 5 类平台全部支持自动一键签到，勾选范围与时刻一起持久化。
+- 调度器按北京时间每日 `HH:MM` 对齐，改时间后下一轮生效，不需重启；错过时点等到次日。
+- 台账只保存时间、来源、账号、平台、结果与可读说明；命中凭据标记或长随机串时自动隐去，
+  不写请求体、Cookie、Authorization 或上游原始响应。
+- 「接入源」页只保留接入动作，管理操作全部归位到此处。
 
 ### 改前端
 
-`web/*` 通过 `rust-embed` 在**编译期**嵌入二进制：
+前台是 **React 19 + Vite 7 + TypeScript**，源码在 `web-src/src/`，
+构建产物写到 `web/index.html` 与 `web/app/`。`aigw-server` 用
+`rust-embed` 把 `web/` 在 release 编译时嵌进二进制；debug 构建动态读盘：
 
 ```bash
-cargo build -p aigw    # 改完前端必须重新编译
-# 浏览器里 Ctrl+Shift+R 硬刷新
+cd web-src
+npm ci                # 首次
+npm run dev           # 本地开发：http://127.0.0.1:5173
+npm run build         # 产出 web/index.html + web/app/{app.js,app.css}
+
+cd ..
+cargo build -p aigw   # release 必须重新编译才能把新产物嵌进二进制
 ```
+
+> 一键路径：Windows 用 `build-deploy.ps1`，CI 用 `.github/workflows/build.yml`，
+> 两者都会先跑 `npm ci / npm run build`，避免只编 Rust 导致发布包白屏。
+> 浏览器里 Ctrl+Shift+R 硬刷新。
 
 ---
 

@@ -4,7 +4,19 @@
 
 /data
 
-# 本地验证脚本（bun 跑的端到端/界面回归，随本机环境而变，不入库）
+# React 控制台：依赖、TypeScript 增量缓存不入库；
+# web/app/ 是 npm run build 的产物，但 release 构建靠 rust-embed 编进二进制，
+# CI / build-deploy.ps1 都会先构建，所以也不需要把产物提交进仓库。
+# .mimosa/ 是安全扫描 hook 在子目录里留下的运行态，同样不入库。
+/web-src/node_modules/
+/web-src/*.tsbuildinfo
+/web/app/
+.mimosa/
+.auto/
+.zcode/
+.workbuddy/
+
+# 本地验证脚本（Node 跑的端到端/界面回归，随本机环境而变，不入库）
 /_e2e.js
 /_harness.js
 /_logincheck.js
@@ -12,6 +24,10 @@
 
 # 探针 / 界面回归的截图与输出（只在本机有意义）
 /_shot_*.png
+/_react_*.png
+/_v3_*.png
+/_wb_panel.png
+/_task_backup.xml
 /_smoke_run.ps1
 /_perm_probe.txt
 /_test_out*.txt

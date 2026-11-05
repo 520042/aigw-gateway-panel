@@ -3,10 +3,18 @@ __pycache__/
 *.pyo
 
 # 打包产物（体积大，不入库）
+# ★ 2026-10-29：Python 版已归档到 legacy/，路径前缀随之改变。
+#   旧写法只匹配根目录 aigw-panel/，移动后**全部失效** ——
+#   git status 会把 500 MB 构建产物当成「未跟踪的新文件」推上库。
 aigw-panel/build/
 aigw-panel/dist/
 aigw-panel/data/
 aigw-panel/__pycache__/
+legacy/aigw-panel/build/
+legacy/aigw-panel/dist/
+legacy/aigw-panel/data/
+legacy/aigw-panel/__pycache__/
+legacy/aigw-panel/app/__pycache__/
 **/__pycache__/
 
 # 凭据与本机数据 —— 绝不能提交
@@ -56,16 +64,34 @@ Thumbs.db
 cli-proxy/*.exe
 cli-proxy/cliproxy.zip
 cli-proxy/auths/
+legacy/cli-proxy/*.exe
+legacy/cli-proxy/cliproxy.zip
+legacy/cli-proxy/auths/
+legacy/cli-proxy/run.log
 
 # 本地反代的运行时数据（68 MB 二进制 + 凭据）
 aigw-panel/dist/data/
 aigw-panel/data/cliproxy/
+legacy/aigw-panel/dist/data/
+legacy/aigw-panel/data/cliproxy/
+legacy/aigw-panel/app/relays/
 
 # 打包产物里的运行数据（首次运行会在此生成）
 aigw-panel/dist/data/
+legacy/aigw-panel/dist/data/
+legacy/aigw-panel/aigw-panel.prev.exe
+legacy/aigw-panel/dist/backup-old/
+legacy/aigw-panel/dist/*.exe*
+legacy/aigw-panel/panel-*.log
 
 # Rust 重构产物
 aigw-panel-rs/target/
+legacy/aigw-panel-rs/target/
+
+# ★ cliproxy-src：第三方仓库的完整克隆，**不入本仓库**。
+#   原先是 gitlink（无 .gitmodules），clone 得到空目录且无历史；
+#   现改为「不登记、只留磁盘副本」，上游地址与 commit 记在 legacy/README.md。
+legacy/cliproxy-src/
 
 # 参考项目克隆（GitHub 拉取，不入库）
 _refs/
@@ -112,3 +138,14 @@ aigw2/crates/*/src/._*
 /zen_dbg.ps1
 /zen_test.ps1
 /.tmp_case.json
+
+# 2026-10-29 补：根目录遗留的探针截图 / 抓包碎片
+/_accio_now.png
+/_login_*.png
+/_e2e*.png
+/_fnames.txt
+/cgq.html
+/cgqr.img
+
+# 2026-11-06 补：metapi 备份提取笔记含明文 API Key / session token，绝不能入库。
+/metapi备份提取-*.md

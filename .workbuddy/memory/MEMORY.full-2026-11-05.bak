@@ -1,0 +1,1227 @@
+# 网关项目 · 长期记忆
+
+## 定位
+免费 AI 额度 → 本地 OpenAI 端点（`/v1` 暴露 chat/completions、models）的聚合面板。单 EXE 自洽，无外部网关。
+
+**主力 = `aigw2/`（Rust workspace，9 crates + 75 份 `providers/*.toml`）**，自 2026-10-16 起持续演进。
+`aigw-panel-rs/`（第一代 Rust）与 `aigw-panel/`（Python 原版）都是历史实现，只作对照，不再加功能。
+
+## 硬规则（被纠正过，必须遵守）
+- **UI 只显示「国内站 / 国际站」两行**（WorkBuddy/CodeBuddy 合并卡）。`apk-codebuddy`/`apk-codebuddy-cn` 是 `wb-gateway-intl`/`wb-gateway` 别名，不加 `gwlogin.PLATFORMS` 规格，不进 `api/login?action=platforms`。★ 云端旧摘要「4 行独立」是过期错误记录，2026-10-14 被当面纠正，以本段为准。
+- 绝不引入/提及 WorkBuddy Gateway（Go EXE，已彻底移除）。
+- 数据目录 = `%LOCALAPPDATA%\aigw2\data\`（aigw2 专用；`aigw-panel-rs\data`、`aigw-panel\data` 都是陈旧位，只在 import_legacy 时读）。
+- 安装位 `%LOCALAPPDATA%\aigw2\`（非 Downloads，火绒会拦）。
+- aigw2 铁律：**禁扫码 / 禁无头浏览器 / 禁 CDP·Chromium**。登录只允许「跳转链接+手动粘贴回调」「设备码」「API Key」「Cookie 粘贴」四种。
+
+## 构建 / 部署
+- 构建（aigw2；workdir 必须是 `aigw2/`）：`$env:PATH="$env:USERPROFILE\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR='C:/aigw-target'; cargo build --target x86_64-pc-windows-msvc -p aigw`
+- 产物 `C:\aigw-target\x86_64-pc-windows-msvc\debug\aigw.exe`（★ 不是 `C:\aigw-target\debug\aigw.exe`，那是旧版）
+- 部署：`taskkill /IM aigw.exe /F` → 拷 exe + `providers\*.toml` 到 `%LOCALAPPDATA%\aigw2\` → `schtasks /Run /TN Aigw2Service`（计划任务 BootTrigger + InteractiveToken，参数 `--port 8800`）
+- **改前端 `aigw2/web/app.js` 必须重新 cargo build**（rust-embed 内嵌），再 Ctrl+Shift+R
+- 测试：`cargo test --target x86_64-pc-windows-msvc`（2026-10-20 实测 **127 项全绿**：core 3 / crypto 20 / pool 16 / registry 10 / relay 19 / server 38 / store 21）
+- 实测接口一律用 node fetch：PowerShell `Invoke-WebRequest` 会把 UTF-8 当 GBK 解，中文全乱码（不是服务端 bug）
+
+## 模块地图（aigw2，当前主力）
+| crate / 文件 | 职责 |
+|---|---|
+| `crates/aigw-core` | `ErrorClass::from_status` / `refine_biz` 错误分类（StreamChunk 仍是死代码） |
+| `crates/aigw-registry` | `ProviderSpec` 声明式接入 + `load_dir_lenient` 加载 75 份 toml（坏文件只跳过不炸全表）+ `apply_settings` 解 `@占位符` |
+| `crates/aigw-crypto` | 签名：glm X-Sign / codearts SDK-HMAC-SHA256 / loomy / qoder / zcode |
+| `crates/aigw-store` | `accounts.rs` 凭据池 / `custom.rs` 自定义 API / `free.rs` 公益站 / `flags.rs` 逐模型·逐平台停用 / `atomic.rs` tmp+fsync+rename / `lib.rs` SQLite usage（DB 不可用降级 JSON 并读回历史） |
+| `crates/aigw-pool` | 号池六件套：InFlight 租约(≤2) / (账号,模型)冷却 / WafIpGate(401·403→账号级 30min) / RecentPick / 半开 / forget_account |
+| `crates/aigw-relay` | 出站 HTTP + 平台反代：`lib.rs` 通用 OpenAI 透传与流式 `tap_passthrough`；`doubao/yuanbao/kuku/metaso/glm/loomy/codearts` 专用；`auth_login.rs` 全部登录链路；`wb.rs` 每日签到；`proxy.rs` 出站代理 |
+| `crates/aigw-server` | axum 路由 + `guard` 门禁 + `AppState`（`spec_for_model`/`resolve_spec`、模型缓存、备份、usage API、rust-embed 前端） |
+| `crates/aigw` | bin：CLI（host/port/token/providers/install/purge）+ 启动装配 + `warm_models` 预热 |
+| `web/app.js` + `index.html` + `style.css` | 单页前端（5 视图：总览/接入源/账号/用量/关于），rust-embed 内嵌 |
+| `providers/*.toml` | 75 份平台规格（free-* 公益站 / api-* / apk-* / sub-* / web-* 等） |
+
+### aigw2 关键机制（改代码前必读）
+- **门禁** `guard`：Host 白名单 → Origin/Referer 白名单 → `/api/*` 令牌（`/v1/*` 不校验，SDK 直连）。回环监听时默认 token=None。
+- **路由** `spec_for_model`：`模型@平台` 显式 → 静态 models → 整表缓存索引 → 每平台 live 缓存兜底；**已取消「未知模型打到第一个启用平台」的静默兜底**，未知模型一律 503。
+- **凭据可用性** `platform_secret` / `platform_routable` / `platform_supported` / `platform_usable`：没凭据的平台模型不进 `/v1/models`。
+- **超时**：connect 10s / read 300s（kilo 流式实测首包 134s）/ 非流式总时长 180s / 拉模型清单 12s；`network_hint()` 把超时翻成人话。
+- **流式记账**：`tap_passthrough` 用 tokio mpsc 回传统计（旧版 std mpsc 阻塞 worker 会饿死线程池）；中途出错补发 error 帧 + `[DONE]`；下游断开记失败不记成功。
+
+### 历史实现：aigw-panel-rs（第一代 Rust，只作对照）
+| 文件 | 职责 |
+|---|---|
+| `handlers/api.rs` | barrel：`pub mod routers; pub use routers::*;` |
+| `handlers/api/routers/*.rs` | 14 域：util/overview/models/login/tencent/gwextra/accounts/router/catalog/settings/proxies/automation/wb/data（备份恢复） |
+| `handlers/v1.rs` | `/v1/chat/completions`+`/v1/messages`；`pooled_attempt!` 宏选号（非 async fn+闭包，Rust 无 lending closure） |
+| `install.rs` | ★ B1 自检安装（`--install/--uninstall/--purge`）：复制到 `%LOCALAPPDATA%\aigw-panel-rs\` + 桌面/开始菜单 `.lnk` + HKCU 自启 + MessageBox 反馈（对齐对方 NSIS setup.exe） |
+| `handlers/api/routers/data.rs` | ★ D 数据备份/恢复：`/api/data/backup`(POST) / `/api/data/backups`(GET 列) / `/api/data/restore`(POST ?ts=，防穿越校验) |
+| `server/pool.rs` | ★ S3 号池治理 |
+| `server/db.rs` | ★ S5 SQLite 存储 usage_events（WAL+NORMAL+busy_timeout，JSON 合并幂等，DB 不可用降级 JSON） |
+| `server/usage.rs` | UsageRecorder：DB 单条 INSERT，每 500 条批量 prune；DB 不可用回退 JSON 全量重写 |
+| `server/credits.rs` | 积分到期快照 + urgency_rank |
+| `server/balance.rs` | 数据驱动通用余额；`fetch_raw` 返原 JSON |
+| `server/login.rs` | 登录会话+账号池；`raw_rows()` 拿未脱敏 secret |
+| `server/tencent.rs`/`autocheckin.rs`/`cdp.rs` | 腾讯直连 / APP 自动签到 / CDP 浏览器(9333) |
+| `relay/*.rs` | 原生中继+网页反代；`relay::out_client()` 超时四项分设 |
+| `router/mod.rs` | 模型→上游 熔断/EWMA/亲和 |
+| `tray/mod.rs` | windows-sys 托盘；HKCU Run `AigwPanel` |
+
+## ★ S3 号池治理（server/pool.rs）
+`pooled_attempt!` 唯一选号入口。InFlight 租约(同(平台,账号,模型)≤2并发) / (账号,模型)冷却(min(30s·2^n,900s)×抖动[0.5,1.5)) / WafIpGate(401/403→账号级拉黑30min) / RecentPick(60s窗口选≥2次让位) / 半开(全挡放行最紧迫) / `forget_account`(删号清幽灵)。`classify`：401/403→Auth，429→Rate，其它→Transient。
+★ Loomy：HTTP 200 + `{"code":"100002"}` 假成功 → `loomy.rs::biz_err()` 识别(登录/失效/授权/token→401)。
+
+## ★ 超时四项（relay::out_client）
+connect(10s)+read(90s,覆盖TTFB与包间idle)+流式不设总时长+非流式总时长180s。`web.rs` 仍 no_proxy。
+
+## ★ 余额/积分/urgency_rank
+- 响应多是资源包列表：对 `Accounts[]` 按 `CapacityUnit==credits` 求和（单键递归只取首条必错）。
+- 到期优先级 CycleEndTime>ExpiredTime>DeductionEndTime；分桶 expired/d1/d3/d7/d14/d30/later/none；60s 缓存。
+- `urgency_score`：有到期日→days*1000；无到期日有余额→10^7-余额；都无→i64::MAX。只落盘不实时算。
+
+## ★ 模型清单
+实时拉+缓存，顺序：专用分支(wb/loomy/yuanbao)→通用实时→缓存→静态。静态不许覆盖 live。元宝模型：`POST {"agentId":"naQivTmsDa"}`+头 `X-Exp-Params: enableNewPcStyle=2`。
+
+## 前端（app/static 三处同步：源 / dist / 安装位）
+`default_static_dir()`：`<exe>/app/static`→`../../aigw-panel/app/static`→`../app/static`→`AIGW_STATIC_DIR`。路由 `/app.js`。
+改前端 bump `index.html ?v=`；★ CSS 注释禁止 `*/` 提前闭合（写完校验 `/*`==`*/` 计数+brace平衡）；JS `node --check` 查不出运行时错，需 `node test_views.js` + headless Edge 截图。
+
+## 关键坑（高频）
+- `list_accounts()` secret 脱敏 → 后台必须用 `login.raw_rows()`。
+- `now_local()` 须 +8h。
+- `/api/route` 契约须对象映射(api.rs describe_models)，不能 Vec<String>。
+- 分层：`api.rs`+`api/`子目录挂子模块；`routers/mod.rs` 的 `pub use` 是兼容层别删。
+- 单测断言别写死随机量上限（如 waf_left 只断言下限）。
+- 改前端 `node --check` 不够 → `node test_views.js`；JS 重名函数覆盖 → grep 验零重复。
+
+## 登录链路
+copilot 原生扫码：`_start_native_qrcode`→`_poll_native`(轮询 `/v2/plugin/auth/token?state=`)→token 落池(secret=accessToken)。poll 竞态无 gw_session 静默等下轮。anon-zen：method=anon 免登录。
+
+## 参考框架
+xiaofan6ya/workbuddy2api：① 按领域拆路由 ✅ ② pool 号池治理 ✅ ③ 积分到期面板 ✅。不照搬 MySQL/Redis、Python 栈、读桌面端 .info。
+
+## ★ v2 全量 Rust 重构（2026-10-16 立项，M0 已落地）
+- 用户指令：26 个 2api 仓库+本地项目全部拉取解析记录；**不要现有框架，全部用 Rust 重构**；先计划后执行。4 项决策已按推荐确认：A 静态 JS+rust-embed / 新建 aigw2 / 核心 15 平台优先 / 成本归因进 M6、订阅通道 backlog。
+- 文档：`网关项目/重构调研-2api项目全集.md`（26 仓库摘要+32 项算法提取矩阵+本地盘点+红黑榜）、`网关项目/重构计划-v2.md`（aigw2 workspace 9 crates + providers/*.toml 声明式接入 + M0-M6）。
+- **M0 骨架 ✅（2026-10-16 15:00）**：`aigw2/` workspace（aigw-core 错误分类+StreamChunk / aigw-registry 声明式 spec / aigw-server axum+rust-embed / aigw bin CLI）；providers/anon-zen.toml 首份 spec；19 测试全过；8801 起服端到端验证通过（health/models 契约/chat 501 占位/首页）。
+- **M1 引擎核 ✅（2026-10-16 15:40）**：7 crates（+store/pool/relay），35 测试全过；SQLite+旧数据只读幂等导入（28 条）；号池六件套（租约/冷却/WAF/RecentPick/半开/forget）；relay 超时四项+字节透传+SSE 归一解析；**真实对话打通**（pollinations 免密车道非流式+流式，anon-zen 已被上游收紧 403 FreeTierError 只能当错误路径用）。
+- **M2 声明式接入 ✅（2026-10-16 16:05）**：8 crates（+crypto），45 测试全过；registry 全字段（models_path/models_filter/upstream_kind/signer/biz_err）；glm 签名（SECRET=8a1317a7468aa3ad86e997d08f3f31cb，校验位算法）+chatglm adapter（parts 快照差分转 delta，assistant_id=65940acff94777010aa6b796）；AccountStore 导入旧 accounts.json（8 账号，明文 secret 后台专用）；**kilo 免密真实对话 ✓**（isFree 过滤 15 模型，cost:0）；web-glm 无凭据 401 门控 ✓（等用户登录 chatglm.cn）；4 spec：anon-zen/pollinations/kilo/web-glm。
+- **M3 透传批次 ✅（2026-10-16 16:35）**：11 spec 全载；`模型id@平台` 后缀路由（旧版语义）；settings 占位符（@lobster→lobster_server，旧 settings.json 只读导入）；Cookie 注入（AuthKind::Cookie→Cookie 头）；ModelsPolicy::None（无清单纯后缀路由）。元宝透传真实打到上游（405=需补 Referer/Origin，链路全通）；web-lobster 占位符门控 502。**批2 OAuth/批3 签名类/批4 wb+deepseek POW+豆包 CDP 待后续**（状态总表在 daily log）。
+- **M4 管理面 + M5 安装器 ✅（2026-10-16 17:45）**：/api/platforms+accounts+pool 三端点；web/ 四视图 SPA（总览/平台/账号/用量，玻璃基座，headless 6/6 命中）；bin --install/--uninstall/--purge（%LOCALAPPDATA%\aigw2 + .lnk + HKCU Run\Aigw2 直写注册表）。45 测试全过。
+- **★ v2 收官（2026-10-16 18:45）**：12 平台 spec（11 启用）+ 62 测试 + 单 EXE。**唯一剩余=wb-gateway 客户端仿真专项**（spec 已铺 enabled=false；WAF 要求完整头族：X-Agent-Purpose/risk_headers/X-Machine-ID/X-Device-Token(Turing Shield 缺失=11128)/会话头族 B3；workbuddy2api-master 一手全文在 _refs/；池内 JWT 27 天有效）。kilo 免费池上游波动属常态（错误透传已验证）。
+- **★★ 10-17~10-20 巨变（daily log 全天细节，此处蒸馏）**：
+  - **铁律反转（10-19 拍板）**：v2 禁扫码/禁无头浏览器/CDP/Chromium（10-16 的 cdp.rs/browser_dl.rs 已删）。全部登录=跳转（用户自己浏览器）+手动粘贴，或设备码/API Key。起因：擅自建 browser_dl 被面斥。
+  - **接入源 12→122**：gen_providers.py/2 从旧 catalog 批量生成（官方 API 24 / 订阅 8 / 客户端 27 / 公益站 64）；公益站=bubblevv 聚合源 JSON-LD、FreeStore 每日刷新已添加不丢；自定义 API=CustomStore+CherryStudio 式弹窗（OpenAI/Anthropic 双协议）。
+  - **★ 坑**：load_dir「任一非法即 Multi 空表」——新增 upstream_kind(doubao/yuanbao/kuku/metaso)/signer(loomy) 必须同步 registry 白名单，否则全表静默丢失（10-20 踩过，平台数从 122 掉到 47）。
+  - **登录引擎**（auth_login.rs，一手全落地）：设备码=wb族/MiniMax/Kimi(RFC8628 auth.kimi.com X-Msh 头)/Grok(OIDC)/Meta Muse/Cline(WorkOS)；PKCE 回调=Codex(1455)/Claude(54545)/Antigravity(51121)/Devin(headless)/Trae(回调直传 refreshToken→ExchangeToken)；跳转轮询=CodeArts(华为旧 ticket 1s×120→AK:SK)/Qoder(设备码+PKCE S256)/Lobster(OAuth)；save 即验活。
+  - **adapter**：doubao(samantha 旧端点)/metaso(匿名13发/IP 走代理可用)/yuanbao(建会话+仅流式)/kuku(BDUSS+STOKEN errno 11002=Quota)/codearts(SDK-HMAC-SHA256)/wb(每日签到)/proxy(出站代理三模式+CN直连热更新)；cline WorkOS 401 刷新双通道自愈；SSE 建连后错误发流内 error 帧。
+  - **参考项目全量解析**（10-19，3523 行/29 万字符，27 项目在 _refs/ 不入库）：Part C 能力总表→5 批落地（StickyRouter 粘性 1800s FNV-1a 兜底最后一条 user/donut+面积图/CodeArts/WorkOS 自愈/wb 签到）。sub2api 纠偏=OAuth 订阅号池化售卖网关，非机场转换。
+  - **真实端到端（10-20）**：秘塔 ✅（匿名+代理）、豆包 ✅（真实 Cookie 旧端点）；元宝 ❌ Cookie 过期需重登；WPS/纳米 ⚠ 仅验活不可对话。
+  - **运维**：构建产物在 **C:\aigw-target\debug\aigw.exe**（CARGO_TARGET_DIR 已改）；部署=taskkill→拷exe→同步providers→schtasks /Run Aigw2Service；前端改后必须 cargo build（rust-embed）+ Ctrl+Shift+R；代理 global 7890；accounts.json 明文勿泄。
+- **批2 登录引擎 ✅ + M6 可观测 ✅（2026-10-16 18:00）**：wb 族设备授权（/v2/plugin/auth/state→token，三头缺一被 APISIX 拦）+ MiniMax PKCE S256；AccountStore 双源持久化（v2 own 权威，add_account 落池）；/api/auth start/poll 真实拿到 copilot.tencent.com 服务端 state ✓；/api/requests 历史+平台归因。
+- **批3 签名器 ✅ + 批4 CDP 桥 ✅（2026-10-16 18:20，62 测试全过）**：ghfast zip 拉三仓库源码提全常量 → crypto/qoder.rs（COSY：指纹派生+自定义Base64+RSA 包裹+AES-CBC info+md5 五段签名，4 测）/loomy.rs（HMAC-SHA1 九行签名+AK 2thryby66wxi53sk，5 测）/zcode.rs（enc:v1 AES-256-GCM SHA256 派生，4 测）；relay/cdp.rs（tungstenite 版受控浏览器桥，Storage.getCookies+host 过滤，真实拉起 Edge ✓）；/api/auth 支持 spec.login_url 平台的 CDP 会话。**批3 踩坑**：rsa 0.9 加密方向 key.encrypt(rng,pad,data)、from_public_key_pem 需 pkcs8::DecodePublicKey、tempKey 是 16 字符 hex 非 32、json compact None→""。
+- **★ v2 构建三坑（写代码前必看）**：① 本机 rustup default=**windows-gnu**，新 workspace 从零编 windows-sys 0.61+（raw-dylib）报 dlltool not found → 项目根必须放 `rust-toolchain.toml` 固定 `stable-x86_64-pc-windows-msvc`（旧项目靠 C:/aigw-target 热缓存躲过，从零重编同样会挂）；② rust-embed 插值 folder 需 `features=["interpolate-folder-path"]`；③ `cargo test` 不产 bin，端到端前要 `cargo build`。
+- 协议基线（活跃）：Sark1tama/glm2api、qoder2api-hub、wangqi233/trae2api、Trae2api-cn、lobsterai2api、luawei1/cline2api、xingluoyuankong/loomy2api、dengyie/zcode2api、grok2api、AIClient2API、dsh、workbuddy2api、sub2api、doubao2api、TecentHelp2Api、ops120/zcode2api。
+- 关键提取：cline2api WorkOS 自愈+uTLS(rquest)；lobster 错误分类→冷却映射；dengyie 账号状态机；qoder COSY 签名+设备指纹派生；dsh 按 body 形状判流+Ed25519 升级；sub2api WS↔SSE 桥；TecentHelp 会话粘定 userid。
+- 本地有 LobsterAI2API 与 cli-proxy/cliproxy-src 克隆（CPA 生态）。
+- License 纪律：sub2api=LGPL、cherry-studio&dengyie=AGPL、AIClient2API=GPLv3 → 只参考机制不复制代码。
+- 2026-10-16 15:00 观察：旧版 aigw-panel.exe 进程已不存在（8800 空闲，非本次操作所致，taskkill 仅精确匹配 aigw.exe 验证实例）。
+
+## ★ UI 玻璃拟态设计系统（2026-10-16 起）
+- 主参考 dsh-our-free-model（毛玻璃+短动效+数据可视化）；用户判定原 UI 太朴素，已确认「原生重做设计系统」路线 + 试点先行。
+- 基座在 style.css 末尾段：`--glass-bg/--glass-bd/--glass-shadow/--blob1/2`（亮暗双份）+ `body` 双 radial 渐变光斑(fixed) + `.glass` 工具类（**定义必须在 .card/.mini/.todo-i 之后**，同特异性后者胜，加 `glass` 类即换肤）+ `.stat` KPI 玻璃卡 + `.pill` 药丸 + `.about-hero`/`.timeline`/`.tbl` + `viewIn` 入场动画（reduced-motion 全关）。
+- 试点 总览+关于 ✅（`?v=20261016f`）；其余 8 页待用户确认视觉方向后铺开（积分到期→donut 风险分布、用量→面积图/热力图）。
+- ★ 坑：给 section 加包裹层(.ov-anim/.about)后 `#view>section{margin-bottom:20px}` 选择器失效，需为 `.ov-anim>section` 单独补 margin；`.about>section` 不补（卡片自身 16px margin 已够）。
+
+## 进度
+S1 分层 ✅ / S2 积分+urgency ✅ / S3 号池 ✅ / S4 UI 9项 ✅ / S5 SQLite+响应体积(credits 分页) ✅ / S6 前端自动校验 ✅。
+B1 自检安装 ✅ / B2 双项目对标文档 ✅ / C 关于页 ✅ / D 数据备份恢复 ✅（均 2026-10-16 上午落地）。
+UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
+未做：远程扫码 qrscan；tasks.json 持久化；app/relays 原生替代未接线；**A 源接入声明化重构（B2 文档 P0，尚未实施代码）**；NSIS 安装器本机无 makensis 未编译（仅备用脚本）。
+
+## B1 安装模式要点（install.rs）
+- 本机无 makensis → 用 Rust 二进制 `--install` 自检安装（复制 exe+app/static+webpow 到 `%LOCALAPPDATA%\aigw-panel-rs\`、建桌面/开始菜单 `.lnk`(PowerShell COM WScript.Shell+BOM)、写 HKCU `Run\AigwPanel` 指向安装位 `--tray`、MessageBox 反馈后启动已装 exe）。
+- `--uninstall` 删快捷方式+自启（保留 data）；`--purge` 卸载+延迟 `cmd` 删整目录。
+- `set_autostart_for(exe_path, enable)` 抽出自 `tray/mod.rs`，供安装流程复用；值为 `"<exe>" --tray`。
+- 数据目录天然落在安装位 `data/`（重装/升级不丢数据）。
+- 可选 `installer/aigw-panel.nsi`（Unicode/用户级/装到 `$LOCALAPPDATA\aigw-panel-rs`）仅备用，本机无法编译验证。
+
+## D 数据备份恢复（data.rs）
+- `DATA_FILES` 8 文件：settings/accounts/panel.db/disabled_models/sites/checkins/tasks/notify。
+- 备份=目录快照复制到 `data/backups/<UTC时间戳>/`+`manifest.json`（零压缩依赖，避免损坏）；恢复=`is_safe_name` 防 `../` 穿越后拷回 `data/`，返回 `need_restart:true` 前端调 `/api/settings?action=shutdown` 重启。
+
+## 2026-10-21 关键变化（详见 memory/2026-10-21.md）
+- **账号健康可见**：号池 `Pool.health`（内存）记录每个账号最近一次真实请求结论（ok/auth/quota/rate），`/api/accounts` 每行带 `health`，`POST /api/accounts {action:verify}` 立即验活；前端账号表有「健康」列 + 「检查」按钮。面板终于能一眼看出哪个号过期。
+- **错误类别 → HTTP 状态码**：`aigw_relay::status_for_class()`（Auth 401 / Quota 402 / Rate 429 / Rejected 400 / Waf 403 / Transient 502），修正 metaso/kuku 把「限流」包成 502 导致 SDK 不退避的问题。
+- **同名模型择优路由**：`spec_for_model` 先用 `platform_usable`（可转发）再回落 `platform_routable`，避免 `@lobster` 这类占位地址平台抢到同名模型后返回 503。
+- **usage_prune 按 rowid 保留最近 N 条**（ts 是 REAL 秒，同秒多条会整组误删）；清理失败改为 `tracing::warn!`。
+- 测试基线 **150 项全绿**（core 3 / pool 21 / registry 18 / relay 24 / server 47 / store 23 / crypto）。
+
+## 2026-10-22 关键变化（详见 memory/2026-10-22.md）
+- **web-deepseek 原生 adapter 上线**：此前是「声明式空壳」，现在是 `upstream_kind="deepseek-web"` + `aigw2/crates/aigw-relay/src/deepseek.rs`（内嵌 `deepseek_sha3.wasm` + wasmi 解 POW）。协议 5 步：users/current 取 token → chat_session/create → create_pow_challenge → `X-Ds-Pow-Response`（base64 JSON，**answer 必须是整数**）→ chat/completion 的补丁式 SSE（`{v:…}` 快照 / `{p,o:APPEND,v}` / 无 p 的纯增量 / BATCH 取 accumulated_token_usage）。
+- 真机实测：非流式 2.58s 出「你好」；流式 reasoning_content 正常。测试基线 **215 项全绿**；exe 20,112,384 字节；/api/platforms 127 行。
+- 三个只在真机暴露的坑：① wasmi 参数要用 `wasmi::core::F64`（不是 f64）② POW answer 用 f64 序列化成 `69573.0` → 上游 HTTP 200 返回 `40301 INVALID_POW_RESPONSE`（2xx 无正文必须把原始 body 截进错误信息）③ 求解 1~2s 必须 `spawn_blocking`。
+- 构建提速：`[profile.dev.package.wasmi]`/`wasmi_core` 的 `opt-level = 3` 把 POW 从 14,855ms 降到 1,195ms（Node 21ms 是 JIT 待遇）。
+- cargo 一律用 `--offline`：git 全局 `http.proxy=127.0.0.1:7890`（Clash 未跑）会让 crates.io 拉取全失败。
+
+## 2026-10-22 补齐（详见 memory/2026-10-22.md 三节）
+- 「都做」收官：`apk-qwenwork` 是**路径写错**（OpenAI 形状，chat_path=/api/v1/chat/completions）；`apk-coze` 新增 coze adapter（v3 chat、模型名=bot_id、写 `<bot_id>@apk-coze`）；`sub-devin` 新增 devin adapter（会话型 Agent：POST /v1/sessions + 轮询 status_enum 到 finished，取最后 devin_message；每次请求消耗额度，需显式 `devin@sub-devin`）；`sub-meta` 本机不可达（curl 000）只能诚实标注需代理。
+- 数字：workspace **249 tests**、exe **21.47MB**、`/api/platforms` **127**。
+- 写文件教训：分段写大文件必须 `appendFileSync`（`writeFileSync` 会把已写好的段覆盖）；测试内联 toml 必须有 `stream_dialect`。
+
+## 2026-10-26 仓库治理与模块拆分
+- **源码入库**：此前约 90 份 `providers/*.toml`、`aigw-relay` 十个 adapter、`aigw-store` 六个模块（atomic/secret/keys/combos/rotlog/archive）全是未跟踪文件，只在工作区里存在。已一次性提交。`.gitignore` 新增 `_fuzz/` `_qr/` `_axtest/` `aigw2/_probe/` 与根目录探针碎片（`_t*.json` `r1.txt` `p.json` 等）。删掉过期的 `accounts.rs.bak`。
+- **spec 去重**：`api-bailian` 与 `api-dashscope` 同端点同 Key 同清单 → 删除前者（老配置 `@api-bailian` 要改 `@api-dashscope`），`gen_providers.py` 分支同步收紧。剩余 6 组同 base_url 但**语义不同**（官方 Key vs 订阅反代），不合并：codex/sub-codex、kimi-code/sub-kimi、apk-trae/web-trae、apk-qoder/web-qoder、apk-antigravity/sub-antigravity、wb-gateway/wb-gateway-intl。
+- **前端版本号**：`index.html` 的 `?v=` 已删（服务端本来就发 `Cache-Control: no-cache`），`app.js` 的 `BUILD` 是唯一版本号，现为 `v20261026a`。
+- **★ 新建模块**（aigw-server）：`net.rs`（host/origin/SSRF 判定纯函数，9 测）、`ratelimit.rs`（三档限流，7 测）。`lib.rs` 仍 16074 行，其余拆分（协议互转 / 流式状态机 / 路由域）尚未做。
+- **guard 性能**：每个 /v1 请求原本两次线性扫 KeyStore，现合成一次。
+- **测试基线**：workspace **335** 全绿（core 3 / crypto 21 / pool 29 / registry 13 / relay 151 / server 232 / store 82）；`cargo clippy` 未安装（需 `rustup component add clippy`），目前只能用 `cargo check` 当告警闸。
+- 环境：本机 `pwsh` 偶发启动失败（exit 3221225794），文件操作用 Node fs 更稳。
+
+## 2026-10-26 持续优化（第二轮）
+- **新增模块**：`dialect.rs`（三方协议互转 + 9 条用例）。`lib.rs` 16074 → 15421 行。
+- **/v1/models 三处过滤改 Cow**：无链/无 key/无 ?platform= 时零分配；白名单匹配不再逐条 `format!("{id}@{owner}")`。
+- **Retry-After 感知**：`RelayError::retry_after_hint()` 解析 JSON/文本两种形态，夹 [1,3600]；`Pool::report_with_hint` 采纳并夹 [1,900]，有提示不涨 strikes。
+- **在途已满换号**：`chat_core` 从「死等同一账号 15s」改为「等 1.5s → sticky.unbind + tried.push + 重选」，全平台无别号才退回 15s 预算。★ 换号必须解绑粘性，否则死循环。
+- 测试基线 **352**（core 3 / crypto 21 / pool 33 / registry 13 / relay 153 / server 243 / store 82）。
+- ★ 提交信息必须用 `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))`；Out-File utf8 会带 BOM 把中文打成问号。
+
+## 2026-10-26 第三轮（推理内容 / 并发 / 缓存）
+- **★ 上游 reasoning_content 之前被整体丢弃**（DeepSeek/GLM/Kimi/MiniMax 通用字段）：
+  - Anthropic 侧：新增 thinking 块（`thinking_index`/`thinking_open`），块顺序由 open_text_block 保证「先想再说」；
+  - Responses 侧：新增 `reasoning` item；★ 必须在**第一条正文 delta 之前** flush（`flush_reasoning` 幂等），否则正文已占 output_index 0，再插会让客户端 index 错乱；
+  - 非流式 `openai_to_anthropic`/`openai_to_responses` 同步支持（dialect.rs）。
+- **整表模型缓存改 `Arc<Value>`**：命中路径锁内只做引用计数 +1，过滤/序列化全在锁外（原实现在锁内深拷贝整表）。
+- 测试基线 **354**（core 3 / crypto 21 / pool 33 / registry 13 / relay 153 / server 247 / store 82）。
+
+## 2026-10-26 第四轮（阻塞 IO / 前端表驱动）
+- **async handler 里的阻塞 IO 全部移出**：`/api/backup`、`/api/backup/export`（read_dir+读文件+WAL checkpoint）、`/api/health`（rotlog/archive 扫目录 + panel.db metadata）都改走 `spawn_blocking`。备份/恢复异常回 `ok:false` / 500，不再假装成功。
+- **前端登录抽屉表驱动**：`srcDrawer` 开头的 17 行 `p.id === '...'`（25 个 id）收成 `LOGIN_UI` 表 + 反查表；分组例外收成 `GROUP_OVERRIDE`。交叉校验发现 `codebuddy`/`web-lobster` 无对应 spec（分别是 wb-gateway 多域承载、已并入 lobster），已在表内写明。
+- 前端改完必须 `cargo build -p aigw`（rust-embed）+ 刷新；BUILD 记 `v20261026b`。
+- 测试基线仍 **556**（本轮无新增用例，改的是行为与结构）。
+
+## 2026-10-26 第五轮（lib.rs 继续拆分）
+- **接口前导收敛**：`parse_action_body` / `bad_request` / `action_of` / `required_str` 四个 helper 替掉 10 个分发器里逐字重复的 10 处解析前导、9 处 action 提取、7 处缺 id 校验（旧代码 action 提取有的 trim 有的不 trim）。
+- **路由优先级收敛**：`AppState::pick_preferred(preferred, usable, pick)` 替掉 `spec_for_model` 里 6 处「先 preferred 再 usable」的重复循环。
+- **★ 新模块 `stream.rs`（820 行）**：AnthState / RespState / StreamToolCall / anthropic_stream / responses_stream。
+- 模块规模：lib 15198（生产 7619 + 测试 7579）/ stream 820 / dialect 949 / net 273 / ratelimit 324 / livecfg 235。
+- 测试基线 **560**。
+- ★ 坑：`git show | Out-File` 写出 UTF-16 不可用，取历史文件要用 node `child_process` 直接收 stdout；切代码区间前先核对「上边界是否真的是目标函数起点」。
+
+## 2026-10-26 第六轮（state / models 拆分）
+- **新增 `state.rs`（822 行）**：AppState + 12 个 with_* + 5 个 platform_* 判定 + spec_for_model / resolve_spec / fetch_live_models / warm_models。**`models.rs`（133 行）**：custom_to_spec / free_to_spec / ModelsEntry / models_ttl / 四个 TTL 常量 + WARM_WAIT_CAP。`scheme_ok` 迁入 net.rs。
+- lib.rs 生产代码 **9134 → 6706 行**（−26.6%）。模块：lib 14285 / state 822 / stream 820 / dialect 949 / models 133 / net 286 / ratelimit 324 / livecfg 235。
+- ★ 坑1：`warm_models` 返回 `impl Future + 'static` 却取 `&self` → 异步块捕获引用撑破 'static。改按值 `self`。
+- ★ 坑2：搬 AppState 时把 `#[derive(Clone)]` 留在原文件，AppState 不再 Clone → axum State extractor 全线失效，报 40+ 条 Handler trait 未满足（错误信息完全指向路由，根因在结构体）。
+- ★ 坑3：本仓库 .rs 文件是 **CRLF**，写替换串必须用 `\r?\n` 或按行数组 splice，否则静默不命中。
+- 测试基线 **560**。
+
+## 2026-10-26 第七轮（chat_core 拆分）
+- **`attempt_once`**：`chat_core` 换号循环体里 160 行的「流式/非流式两条分支 + 首帧体检 + 记账 + 自愈重试」抽成独立函数，`chat_core` **435 → 279 行**。
+- ★ 坑：`let account2 = account.clone()` 对 `&str` 是 Copy（仍是借用），抽成独立函数后 `tokio::spawn` 的 `'static` 要求立刻报 E0521。改 `to_string()`。
+- ★ 修：两条分支的凭据自愈重试返回口径不一致（`return ret` 是 `Result<CoreOut, CoreErr>`，本层要三元组）。统一成「只有成功才返回，失败落回原错误分类」。
+- ★ 坑：改动本仓库 `.rs` 必须按**行数组 splice**；多行 `String.replace` 在 CRLF 下静默不命中，而且很容易多删/少删一个 `}`。
+- 测试基线 **560**。
+
+## 2026-10-26 第八轮（store 锁 / auth 抽取）
+- **AccountsStore 落盘移出互斥锁**：`save_locked` → `save_snapshot`（要求调用方已放锁），7 处写方法统一成「改内存 → clone 快照 → drop 锁 → 落盘」。此前「一个账号重新登录」期间所有 `/v1` 转发都卡在 `platform_secret()` 的读锁上（DPAPI 逐条加密 + fsync 都在锁内）。
+- **`callback_warning`**：跳转登录的端口体检抽成纯函数 + 1 条用例。
+- ★ 教训：`custom.rs` 用批量 `splice` 改 6 处调用把文件写坏，只能 `git checkout` 回滚。**同构改动超过 3 处时，先改一处编译验证，再批量**。
+- 测试基线 **561**。
+
+## 2026-10-26 第九轮（custom 锁 / 方法教训）
+- **CustomStore 6 个写方法落盘移出锁**：`save_locked` → `save_snapshot`，与 AccountsStore 同口径。
+- ★★ **本仓库批量改写的正确姿势（踩了 3 次）**：
+  1. `.rs` 是 **CRLF**，多行 `String.replace` 必须先 `replace(/\r\n/g, "\n")` 归一化，否则静默不命中；
+  2. **不要用行号 splice 批量改**（前面插入一行就全错位，会写坏结构体字面量）；
+  3. 用**内容锚点**做替换（连同后续 return/表达式一起匹配），每处独立、可验证；
+  4. 同构改动先改 1 处编译验证，再批量。
+- 测试基线 **561**。
+
+## 2026-10-26 第十轮（补写闸门）
+- **★ 上一轮改造引入的真缺陷已被修掉**：Accounts/Custom 改成「取快照 → 放锁 → 落盘」后，并发写的**落盘顺序与内存更新顺序可能相反**，磁盘留下旧快照（内存对、重启后回退）。
+  `flags.rs` 的注释早就写明「必须在持锁期间落盘，防并发丢更新」——改造时没读到这层约束。
+- **修法**：内存锁管内存、`static SAVE_GATE` 管磁盘写序。读路径彻底解放，写落盘串行。
+- **★ 验证纪律**：新增并发测试后**先临时删掉修复跑一遍**，确认它真的会红（实测 `内存=r3 磁盘=r0`），再加回去。否则测试只是「恰好通过」。
+- 测试基线 **562**。
+
+## 2026-10-26 第十一轮（闸门必须覆盖取快照）
+- **发现**：上一轮的 SAVE_GATE 只包住「写盘」，仍有窗口：A 锁内取快照 v1 → 放锁被抢占 → B 取 v2 先写完 → A 写回 v1。
+- **修法**：各 Store 统一出口 `persist_now()` —— **闸门内取快照 + 写盘**。accounts / custom / keys 全部改走它。闸门实现提到 `atomic.rs`（OnceLock）供共用。
+- **★ 诚实记录**：把 persist_snapshot 改回「锁外取快照」后 keys 并发用例**仍然通过** → 该用例对「快照顺序」这一具体缺陷不敏感，只证明「大量并发写后磁盘==内存」。accounts 那条对「完全没有闸门」敏感（实测红）。
+- 测试基线 **564**。
+
+## 2026-10-26 第十二轮（三处 Store 接闸门 + 自造死锁）
+- **combos / free / flags 统一走 `persist_now()`**（闸门内取快照+写盘），与 accounts/custom/keys 同口径。flags 读路径（`is_model_disabled`，每次路由都问）不再陪写盘等磁盘。
+- **★★ 自造死锁**：free.rs 三处把 `save_locked(&rows)` 机械替换成 `persist_now()` 却**没 drop(rows)**；persist_now 在闸门内再 `inner.lock()` → 同线程二次加锁 = 立即死锁。
+  - 症状：`cargo test` 卡住、cargo 进程 CPU 0.5% 空转、`has been running for over 60 seconds` 刷屏。清进程/删 target 锁都没用。
+  - 定位：**cargo 没有超时**，只能从测试名 + 「卡住的是哪几组」反推；用 `node child_process` 直接跑 cargo 拿到完整输出比 pwsh 管道快且可靠。
+  - 纪律：`save_locked(&x)` → `persist_now()` 的机械替换**必然漏 drop**，逐处确认。
+- **前端 `modalShell(title, body)`**：全站 14 处弹窗同构（遮罩+标题+✕+内容区），已迁移 2 处（代理设置 / 网关信息），剩 5 处手写。
+- 测试基线 **564**。
+
+## 2026-10-26 第十三轮（前端弹窗统一）
+- **`modalShell(title, body, opts)` 覆盖全部弹窗**：手写 `<div class="modal-mask">` 从 8 处降到 1 处（只剩 modalShell 自身）。差异点收进 opts：`drawer` / `id` / `onMask` / `close` / `closable`。
+- 收益：关闭行为只有一处定义（过去漏写 `this.closest('.modal-mask').remove()` 会导致「点 ✕ 关不掉」）。
+- ★ 坑复现：一次改多处 + 行号 splice，前一处替换「未命中」会让后面全部错位 → 写坏文件。**逐处替换 + 每处 node --check** 才稳。
+- BUILD → `v20261026c`；前端改动后必须 `cargo build -p aigw`。
+- 测试基线 **564**。
+
+## 2026-10-26 第十四轮（backup 模块）
+- **新增 `backup.rs`（361 行）**：备份导出/恢复 + 脱敏白名单 + 文件名穿越校验 + .restore-pending 暂存通道 + base64 辅助。lib.rs 生产 6760 → 6440。
+- 模块文档把两条纪律放最前：①导出默认脱敏（白名单制，黑名单是失败开放）②恢复必须留退路（.bak-<ts> + DB 走暂存）。
+- ★ 可见性坑：搬走后测试仍在 lib.rs 引用这些辅助 → 需 `pub(crate)` + `pub(crate) use`；对外的 `pub use` 会报「cannot be re-exported outside」。
+- 测试基线 **564**。
+
+## 2026-10-26 第十五轮（Session::fail）
+- **`Session::fail(msg)`** 收敛 `start()` 19 个分支里手抄 18 遍的「status=error + message」。漏写 status 的那一处会让前端永远停在「等待授权中」。
+- ★ 尝试过抽 `fill_device_session` 辅助统一 Ok 侧，**放弃了**——各平台 state 拼法/文案差异本来就大，强行合并更难读。只收敛真正同构的失败侧。
+- ★ 又一次「测试插错位置」：插进 `raccoon_qr_poll` 函数体，吃掉收尾括号 → 4 个类型不匹配。**正确做法：先加 impl → 编译 → 再替换 → 编译 → 最后插测试（插在 `mod tests` 起始后第 2 行）**。
+- 测试基线 **565**。
+
+## 2026-10-26 第十六轮（start 分派拆分）
+- **`LoginEngine::start` 290 → 47 行**：244 行的 19 分支 if/else 链抽成自由函数 `start_dispatch(client, platform, specs, &mut sess)`。约定：不返回错误，失败就地 `sess.fail()`（要原样呈现给面板）。
+- ★ Rust 结构坑：把自由函数插进 `impl LoginEngine {` 内部（缩进 4 格）→ 编译报 `cannot find function`。自由函数必须在 impl 之外。
+- 测试基线 **565**。
+
+## 2026-10-26 第十七轮（poll 分派拆分）
+- **`LoginEngine::poll` 221 → 89 行**：凭据轮询分派抽成自由函数 `poll_secret(client, &sess) -> Result<String,String>`（136 行）。约定：**不修改会话状态**，只回答「拿到凭据了吗」。
+- 返回值沿用 `Ok("token\u{1}domain")` 哨兵拼接（wb 族要 domain，为一条分支改 Result 类型不划算）。
+- ★ 坑：抽出后函数尾是原赋值语句的 `};` → 缺返回值，编译报 `expected Result, found ()`。补 `secret_raw` 即好。
+- 测试基线 **565**。
+
+## 2026-10-26 第十八轮（验活逻辑抽取）
+- **`auth_action` 232 → 198 行**：`save` 分支里的 48 行验活逻辑抽成 `verify_after_save()`；「按平台类型选失败提示」抽成**纯函数** `verify_failure_hint(spec)` + 1 条用例。
+- 该 hint 的关键约束：扫码类平台（Loomy/小浣熊）**不收 Cookie**，落进兜底文案会把人往错方向带 —— 用例已锁住。
+- 测试基线 **566**。
+
+## 2026-10-26 第十九轮（候选账号抽取）
+- **`chat_core` 279 → 261 行**：候选账号判定抽成 `candidate_accounts(custom, accounts, spec)`，+1 用例锁住 anon / 普通无账号 / 秘塔匿名兜底三条来路。
+- ★ 秘塔兜底最易漏：没有它未登录用户会被判「无可用账号」503，而秘塔本可匿名用。
+- 顺带去掉了签名里没用上的 `st` 参数（只读两个 Store 不该拖整个 AppState）。
+- 测试基线 **567**。
+
+## 2026-10-26 第二十轮（公益站 / 错误响应拆分 + 硬冷却修复）
+- **新模块 `gongyi.rs`（639 行）**：公益站聚合全链路（host 准入 / slug / 多源回退 / JSON-LD 解析 / 单飞刷新）与 7 条用例。`errresp.rs`（374 行）：三种协议的错误响应 + `upstream_hint`，+4 条用例。
+  lib.rs 生产 **6470 → 5527 行（−14.6%）**。
+- **★★ 修掉真缺陷：硬冷却被半开探测放行**。`pick` 的半开分支会 `remove` 冷却后放行，而 402 额度冷却是照「次日 04:00」算出来的硬窗口 —— 结果额度耗尽期间**每个请求都白打一次上游**。
+  修法：`CoolState` 加 `hard` 标记，半开只放行软冷却（抖动/限流）；Quota / Region / LaneLocked 置 hard。按纪律先写测试确认它真红（`left: Some("solo") right: None`）再修。
+- **退避曲线收敛**：Rate 与 other 两分支 28 行重复 → 纯函数 `backoff_secs(strikes, hint)`。
+- 测试基线 **573**（core 3 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 154 / server 258 / store 85）。
+- ★ 复用本轮踩到的坑：拆模块后 `pub use` 重导私有符号必报 **E0364**（同第十四轮）—— 对外只需 3 个就拆成 `pub use gongyi::{gongyi_source_list, refresh_free_sites_guarded, FreeRefresh}`，其余走 `pub(crate) use`。
+- ★★ 构建环境（此前每轮都要重找，记死）：`cmd /c` 与 `.bat` 走中文路径会乱码，PowerShell `Out-File` 同理。**直接用 node `child_process.spawn` 调 `C:/Users/liang.zhao/.cargo/bin/cargo.exe`，并注入 env**：`CARGO_TARGET_DIR=C:/aigw-target` + `PATH` 加 MSVC `14.44.35207/bin/Hostx64/x64` + `INCLUDE`(msvc/include + WinKit 10.0.26100.0 的 ucrt/um/shared/winrt) + `LIB`(msvc/lib/x64 + ucrt/x64 + um/x64)。缺 INCLUDE 会在 libsqlite3-sys 的 cc-rs 阶段报 cl.exe exit 2。
+## 2026-10-26 第二十一轮（errlog / sesskey 拆分 + 后端口径修复 + relay 去重）
+- **新模块**：`errlog.rs`（169 行，最近失败台账 + 5 测）、`sesskey.rs`（94 行，会话键定长哈希 + 4 测）。lib.rs 生产 **5527 → 5303**。
+- **★★ 修掉真缺陷：两种存储后端聚合形状不一致**。`usage_by_platform` 的 DB 路径 SQL 里漏了 `cancelled`（只有 COUNT/ok/failed/tin/tout 五列），JSON 路径有六键，降级模式下前端读到 undefined。
+  先写 `backend_shapes_agree_on_every_counter` 确认它真红（左五键 vs 右含 cancelled），再补 SQL 的 `SUM(CASE WHEN cancelled<>0 ...)`。顺带修掉 913 行被压成一行的函数签名格式。
+- **★ relay 去重**：新建 `common.rs`，收 `er`（13 份）/ `secs`（7）/ `uuid_like`（4）/ `nanos_hex`（3）/ `truncate`（4）—— 抄写的真正成本是「给 RelayError 加字段要改 13 处」。
+  ★★ **只合并语义完全一致的**：`trunc` 在 coze（加省略号）、devin（不加）、trae（先 trim 且不加）三处行为不同，**没有合并**。
+- 测试基线 **585**（core 3 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 157 / server 266 / store 86）。
+## 2026-10-26 第二十二轮（tasks 拆分 + 删死参数 waf_fingerprint）
+- **新模块 `tasks.rs`（203 行）**：TaskStat / TaskHealth / unix_now / supervise_loop 三件套，+2 测（含一条锁住「panic 后必须继续调度」的用例）。lib.rs 生产 **5303 → 5129**。
+- **★★ 删掉死参数 `waf_fingerprint`**：它在 `Pool::report_with_hint` 里只剩 `let _ = waf_fingerprint;`（拉黑早已改由 class 统一决定）。
+  危害不在字节数而在**误导**：调用方以为「传 true 才拉黑」，于是流式路径长期传 `false` —— 而流式是最常见的形态，Loomy 那种 HTTP 200 + code:100002 假成功在流式上完全不给号池信号。
+  顺带把 `record()` 的 `waf_fp` 形参一并删除（同样无消费者），11 处调用点用正则一次性收敛。
+- 测试基线 **587**（core 3 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 157 / server 268 / store 86）。
+- ★ 坑：正则删形参后 `report` 的函数体被整行吃掉过一次（签名与 body 混在 splice 里）→ 改完必须立刻看上下文确认括号配平。
+## 2026-10-26 第二十三轮（接入源全网体检）
+- **★ 新增 `--doctor` 子命令（aigw bin）**：用**真实转发代码**（`fetch_models_with_secret`，含各 adapter 的头组/签名/私有协议）逐个去打上游清单，输出「通 / 需凭据 / 连不上 / 失败」四类。
+  为什么不用 curl 手测：qoder 要 COSY 签名、trae 要 Cloud-IDE-JWT、doubao 走 samantha 私有 SSE，手拼的请求与代码发出的不是一回事，手测「通」不能证明代码可用。
+  口径三要点：① 只体检 `models_policy=live` 的源（static/none 的源本来就没 /models 上游）② 跳过 `enabled=false` ③ HTTP 0 单列 [NET]（海外源无代理时必然落到这类，否则一次报几十条假故障）。
+- **修掉两个真缺陷（都是体检发现的）**：
+  1. `api-zhipu` base_url 写成 `open.bigmodel.cn/v1` → chat 返回 nginx 405、models 返回 HTML 首页，**整个源转发与拉清单全废**，而面板只显示「近24h 失败」。正确端点是 `/api/paas/v4`。
+  2. `anon-zen` 缺 `models_path` → 回落 `/models` 拿到 404。正确是 `/inference/v1/models`（v2 线缆；v1 的 /zen/v1 已停用）。
+- **★ 模型清单响应新增 4MiB 上限**（`MODELS_BODY_MAX_BYTES`）：实测 featherless 的 /v1/models 一次回 7MB（Brotli），全量读入再解析既拖慢预热、也让失控上游能撑大进程。超限判失败并带上实际大小，不静默截断。
+  ★ 这条不是纸上谈兵：加上限之前 `--doctor` 全量跑偶发 exit 3221225477（0xC0000005），加上之后消失 —— 内存护栏的收益在真机上才显形。
+- **停用 6 个域名已废的源**（`enabled=false` + toml 内写明实测证据）：free-nuomiaomiao / free-pmapi（530 源站不可用）、free-newapi / api-xirang / api-lightning（404）、minimax（agent.minimax.cn 反代 404，官方 API 通道已有 api-minimax 与 api-minimax-global 覆盖）。
+- 其余「失败」经核实**不是失效**，已在对应 toml 的 notes 写明：api-cloudflare（405 该路径不支持 GET）、api-featherless（7MB 超限）、api-longcat（返回 HTML）、api-qwencloud-coding（405 只对 Coding Agent 开放）、api-voyageai（只做 embeddings，不进 chat 路由）。
+- 新测试 `private_protocol_live_sources_declare_their_models_path`。★ **诚实记录**：实测移除 anon-zen 的 models_path 后它**仍是绿的**（anon-zen 是 static 策略，不进 live 分支）→ 该测试对那次事故不敏感，真正能发现它的是 --doctor。已把这条边界写进测试注释。
+- 测试基线 **588**（core 3 / bin 4 / crypto 21 / pool 35 / registry 14 / relay 157 / server 268 / store 86）。
+- ★ 踩坑：`upstream_kind` 的 serde 默认值是 **"openai" 而非空串**，用 `is_empty()` 判断「是否私有协议」会把 100 多个标准源全算进来。
+## 2026-10-26 第二十四轮（Brotli 修复 + 体检工具稳定化 + 静态清单漂移检测）
+- **★★ 修掉真缺陷：reqwest 缺 brotli 特性**。Cargo.toml 只开了 `stream`/`json`，于是凡回 `Content-Encoding: br` 的上游，拿到的仍是压缩字节 → 「HTTP 200 但 error decoding response body」。
+  实测受影响：ai-gateway.vercel.sh（480 模型）、api.kilo.ai、api.featherless.ai。修复后 api-gateway 与 kilo 恢复正常。用 br 的上游越来越多（Vercel/Cloudflare 系普遍启用），**影响的不只是清单、chat 转发同样会挂**。
+  特性名是 `brotli` 不是 `br`（reqwest 0.12）。已加测试 `brotli_encoded_models_list_is_decoded`（mock 返回 br 响应），实测移除该特性后立刻变红，报的正是线上那条 `bad json: expected value at line 1 column 1`。
+- **`--doctor` 崩溃修复**：`std::process::exit` 在 `#[tokio::main]` 里会跳过栈上析构（Arc/Mutex 守卫/未完成任务），全量体检偶发 0xC0000005（报告已打完、崩在收尾）。改成 `return` 让运行时自己收尾 → 连跑 3 次全 exit 0。
+- **清单读取改「边读边判」上限**：原来 `resp.text()` 读完再判 `len()`，7MB 已整块进内存，上限只做事后拒绝、挡不住并发叠加。改成 `bytes_stream` 按块累积，越限即停。
+- **静态清单漂移检测**：static 源若有 `models_path`，实时拉取后比对「静态表里有、上游已没有」的（只有这条会导致 404）。★ 刻意不报「上游有、静态表缺」——刻意只暴露免费档的源（如 anon-zen 列 9 个、上游 85 个）会被误报。
+- **体检范围**：加上 static 且声明了 models_path 的源；跳过 `enabled=false`。当前口径：通 22 / 需凭据 61 / 连不上 17 / 失败 5 / 漂移 0。
+- **对照参考项目核实**：qoder（openapi.qoder.sh + api1-3.qoder.sh，与 _refs/qoder2api-hub 一致）、trae（trae-api-cn.mchost.guru + /cloudide/api/v3/trae/oauth/ExchangeToken，与 _refs/wangqi233-trae2api、Trae2api-cn 一致；我用的 api.trae.com.cn 实测也通）。
+- **kuku 补漏**：实测 /wenchain/genflowpro/model/list?channel=genfp 有 13 个模型，静态表 12 个（无下架项），已补 `gateway-glm-5.1-kuaishou`。该端点需 BDUSS+STOKEN，无凭据时 doctor 无法核对。
+- 测试基线 **589**（core 3 / bin 4 / crypto 21 / pool 35 / registry 14 / relay 158 / server 268 / store 86）。
+- ★★ **修正既有认知**：记忆里「cargo 一律用 --offline，代理会让 crates.io 拉取失败」只对了一半 —— `cargo fetch`（不带 --offline）在本机可以正常下载（实测拉到 async-compression / brotli / flate2 等）。**只有加了新依赖/新特性时才需要这一步**，之后仍用 --offline 构建。crates.io 的 API 是 403（反爬），但 static.crates.io 下载正常。
+## 2026-10-26 第二十五轮（streamhead 拆分 + 空 error 误判 + 工具收敛到 core）
+- **新模块 `streamhead.rs`（261 行）**：流式首帧体检（sniff/scan/probe/classify + HeadProbe），+5 测。lib.rs 生产 **5124 → 4882**。
+- **★★ 修掉真缺陷：空 error 被当成流首帧错误**。上游（含 OpenAI 兼容层）常用空串/空对象表示「无错误」，旧逻辑只排除 null，于是正常流在首帧被掐断 —— 客户端收 502，号池还平白罚一次 Transient（把健康号冻一轮）。
+  修法：probe_json 里空串与空对象都放行。按纪律先写测试确认它真红再修。
+- **跨 crate 工具收敛**：`ct_eq`（secret.rs 与 net.rs 各抄一份、逐字相同）与 `default_true`（store 5 处 + registry）提到 **aigw-core**（唯一所有 crate 都依赖、自身零依赖的 crate）。
+  ★ `aigw-registry` **不改**：它是零依赖基础 crate，为一行 true 引入 core 依赖不划算。改动前先查依赖图是必要的。
+  ct_eq 两处都改成 re-export，调用方不变。
+- **接入源对照参考项目核实（全部一致，无失效）**：qoder、trae、web-glm（与 _refs/Sark1tama-glm2api 一致）、doubao（与 _refs/oss-doubao2api 一致）。
+  实测存活：deepseek 网页版（四步链路均返回业务码「缺 Token」）、metaso（我项目 /api/search/chat 与参考项目 /api/searchV2 都 400=缺参数）、元宝、qwen（WAF 页=缺凭据）、kuku（200 清单 13 个）。
+- 测试基线 **596**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 158 / server 273 / store 86）。
+- ★★ 环境限制（诚实记录）：**GitHub 与 crates.io API 都不可达**（raw.githubusercontent 直接 fetch failed），web_fetch 也走本机网络同样受限 → 与「GitHub 最新项目对比」只能靠本地 _refs 快照，17 个海外源仍无法复检。
+## 2026-10-26 第二十六轮（纳入 Agent2API 参考项目 + 内容拦截补救）
+- **★ 参考项目 Agent2API 已纳入**（用户指定 gitcode 镜像）。它是**纯 Rust**（461 个 .rs，与本项目同构）+ Tauri 壳，17 家提供商，位置 `_refs/Agent2API`（`_refs/` 已在 .gitignore 第 71 行，不入）。
+  ★★ **环境突破**：github.com 与 raw.githubusercontent 都不可达，但 **gitcode.com 可达**（`git clone` 正常，ls-remote 能列出分支含 feat/new-providers）。以后要拉 GitHub 上的新参考项目，走 gitcode 镜像（`https://gitcode.com/gh_mirrors/<owner>/<repo>`）。注意 raw 单文件被反爬拦（返回 HTML），只能整仓克隆。
+- **对比结果**：我方缺 8 家 —— accio / autoclaw / catpaw / commandcode / monkeycode / officeace / orcaterm / zcode。端点实测全部存活（accio phoenix-gw.alibaba.com、autoclaw autoglm-*.zhipuai.cn、catpaw ai.catpaw.meituan.com、commandcode api.commandcode.ai、monkeycode monkeycode-ai.com|.net、orcaterm api.orcaterm.cloud.tencent.com、zcode zcode.z.ai）。
+  其中 **zcode 是 OpenAI 兼容**（POST {openai_base}/chat/completions，国内 open.bigmodel.cn / 国际 api.z.ai），且我方 aigw-crypto 已有 zcode 签名器 —— 后续纳入成本最低。其余多为私有协议（需写 adapter）。
+- **★★ 落地一项我方缺失的机制：内容被上游审核拦下（400）后的补救**（对齐 Agent2API 的「动作 0」）。
+  现状：我方只有**前置**脱敏（sanitize.rs 防 11128 指纹），脱敏表必然滞后于客户端模板更新 → 漏网时上游直接 400，用户无从下手，换号也救不了。
+  新增：sanitize.rs 加 `looks_like_content_block(status, body)`（保守判定：只认 400 + 审核措辞/已知码，认不出就不试）与 `neutralize_request_body`（换最小中性 system + 清空工具描述）；relay 的 `forward_nonstream`/`forward_stream` 默认 OpenAI 分支接上，**只重发一次、不换账号、不罚账号**（内容问题不是账号问题）。
+  测试：`content_blocked_request_is_retried_with_neutral_prompt`（mock 首 400 次 200）+ `ordinary_400_is_not_retried`（参数错误的 400 不得重发）。实测禁用补救后立刻变红，是有效闸门。
+- 测试基线 **602**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 164 / server 273 / store 86）。
+- ★ 又一坑：往文件里插函数时若插在 `#[cfg(test)]` 与 `mod tests` 之间，新函数会被 cfg(test) 包住（生产代码引用不到）。插完必须确认 cfg 属性仍贴在 `mod tests` 上。
+## 2026-10-26 第二十七轮（补齐内容拦截的降级状态机）
+- **降级状态机（sanitize.rs）**：上轮只做了内容拦截补救的**第一步**（撞 400 后换中性提示词重发一次）；本轮补齐**第二步** —— 触发降级，让后续请求**首发就带中性提示词**，不再每个请求都先撞一次 400 再补救（客户端通常是一连串同模板请求，每条多花一轮往返、还多给上游一次风控记录）。
+  照搬的三个语义：① 降级期到**次日 00:00（UTC+8）**结束（上游风控按天统计，零点是天然重置点；无限期降级会让用户在问题消失后仍拿不到自己的 system）② **触发不续期**（否则持续报错的客户端会把截止无限推后 = 永久降级）③ **内存态、重启清零**（运行期状态非配置，落盘还要引入「何时清」的第二套判据）。
+- **★ 测试抓出一个真 bug**：`next_midnight_cst` 我最初写成「在 local 时间轴算零点后**直接返回**」，忘了减回 8 小时偏移 —— 降级截止会偏晚 8 小时（持续到当天 16:00 而不是 00:00 结束）。
+  ★ 教训：写时区类纯函数测试时**基准值不能随手编**。正确做法是选一个真实可校验的零点（2026-01-01 00:00 CST = 1767196800 UTC），并在测试里先断言 `（base + 8h）% 86400 == 0`（即基准本身确实是某个 UTC+8 零点）—— 否则基准错了，测试失败时你分不清是实现错还是测试错。
+- 测试基线 **605**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 167 / server 273 / store 86）。
+- ★ 全局静态量（`DEGRADE_UNTIL`）的测试纪律：Rust 测试默认并发，降级状态会被其它用例干扰 → 相关断言**合并进同一条测试**并收尾必定 `degrade_clear()`；补完还要用 `--test-threads=1` 与并发各跑几遍确认稳定（本轮两者都 167 全过）。
+## 2026-10-26 第二十八轮（纳入 zcode：两个接入源 + 登录链路）
+- **新增 `sub-zcode` / `sub-zcode-intl`**（ZCode 编码套餐订阅通道，国内 bigmodel / 国际 zai）。端点与模型名取自**上游权威配置** `GET https://zcode.z.ai/api/v1/client/configs`（2026-10-26 实测 200）。
+  国内 `https://open.bigmodel.cn/api/coding/paas/v4`、国际 `https://api.z.ai/api/coding/paas/v4`，都是 **openai:chat schema → 无需 adapter，走默认字节透传**；模型 GLM-5.2 / GLM-5-Turbo。
+  ★ 与 `api-zhipu`/`api-zai`（官方 API Key 通道）不是一回事：那两条要开放平台 Key、走开放平台计费；本条走 **ZCode 客户端订阅登录态**（Coding Plan 额度），不需要 Key。两者并存。
+- **实现 zcode 登录链路**（auth_login.rs）：服务端中介的「跳转 + 轮询」，符合铁律（无扫码/无浏览器）。四步：生成 32 字节 hex 的 poll_token → POST /api/v1/oauth/cli/init → 用户打开 authorize_url → GET /api/v1/oauth/cli/poll/{flow_id} 到 ready。
+  ★★ **init 必须带 `authorization: Bearer {poll_token}`，否则上游回 3004 invalid_flow**（实测踩到）；poll 用同一个 token。
+  ★★ **authorize_url 必须补中转页参数**否则浏览器跳到本机收不到的 `zcode://`、授权结果不被服务端记下、poll 永远 pending。参数名**两地不同**：国内 `redirect`、国际 `redirect_uri`（写错则对应那地静默挂到超时，症状极不直观）。已有 4 条单测锁住。
+- **★ 诚实标注未验证部分**：本机没有 ZCode 账号，实测只覆盖到**第 2 步**（init 返回真实 flow_id + authorize_url，已用 `--ignored` 冒烟测试跑通）。**第 4 步「授权完成取 access_token」从未端到端验证过** —— 若响应结构与预期不符，用户会看到「授权待确认」超时，可回退手动粘贴 token。
+- 测试基线 **609**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 171 / server 273 / store 86）。
+- ★ 联网测试纪律：需要外网/上游限流的验证标 `#[ignore]` + 写明手动跑法，不进 CI（否则连打两次 429 就是假失败）。
+## 2026-10-26 第二十九轮（冷却键必须用上游真名）
+- **★★ 修掉真缺陷：号池冷却键用的是请求名，不是上游真名**。chat_core 里 `pool.available` / `pool.pick` / `attempt_once` 三处传的都是 `&model`（原始请求名，可能带 `@平台` 后缀、大小写不同），而 `upstream_model` 才是 `canonical_model_for` 回填后的真名。
+  后果与 Agent2API 在 routing.rs 里警告的完全一致：① **写入分裂** —— 同一份额度被记成几条互不相干的冷却（面板显示「3 个模型限流中」，其实是同一份）；② **判定漏命中**（最实质的伤害）—— 用别名/另一种写法撞限额后冷却写在那个键上，改用真名请求时读不到，于是照样挑中这个已经限额的账号、白撞一次 429。
+  修法：三处改传 `&upstream_model`。
+- **★ 诚实记录未覆盖**：实测把三处改回 `&model` 后 `cargo test` **全绿** —— 说明这条选择**没有自动化测试保护**。我加的 `canonical_model_folds_case_and_dot_forms` 只锁住 `canonical_model_for` 的归一能力（前提），锁不住「调用处传的是哪个变量」（chat_core 端到端需真实上游）。已在代码注释里写明「改这里请靠代码审查，别以为有网」。
+- 测试基线 **610**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 171 / server 274 / store 86）。
+- ★ 从参考项目找缺陷的有效方法：读它的**模块头注释**（Agent2API 每个文件开头都写「为什么」与「踩过的坑」），比对己方是否同构。本轮这条就是从 routing.rs 的「冷却键必须是真名而不是请求名」里发现的。
+## 2026-10-26 第三十轮（逐条核对 Agent2API 的「坑」，多数我方已正确）
+- **方法**：读 Agent2API 每个文件的**模块头注释**（它写「为什么」与「踩过的坑」），比对己方是否同构。比扫代码找差异高效得多。
+- **核对结论（我方已正确处理，不必再查）**：
+  ① 「429 冷却写进记录后公开形态必须带出去」→ 我方 `/api/accounts` 每行带 `cooling_s` / `waf_s` / `blocked`，冷却在面板可见；
+  ② 「整行 put 少带字段 = 静默数据丢失」→ 我方 accounts.rs 的写方法是「定位行 → 改字段」，非整行替换；
+  ③ 「冷却键必须用上游真名」→ 上轮已修（chat_core 三处改传 upstream_model）。
+- **不适用项**：代理池（它是「命名代理 + 账号引用」，我方是全局三模式，属功能丰富度差异而非缺陷，不宜为它大改）；模型别名映射（我方 combo 已覆盖主要用途）。
+- **无害差异（不要合并）**：`nanos_hex` 在 dialect.rs（`{:016x}`）与 common.rs（`{:032x}`）**位宽不同**，但两者都只生成本地响应 id（msg_/rs_/chatcmpl-*），不发给上游、不参与校验 → 无功能影响，保留。
+- **端到端冒烟**：exe 起来后 143 个 spec 全加载、`skipped_specs` 为空、`/v1/models` 35 个模型、health ok。体检口径：通 23 / 需凭据 62 / 连不上 17 / 失败 5 / 漂移 0，exit 0。
+- ★ 冒烟时注意：用户机器上常有一个正式实例在跑（占着 8800 **和全部 OAuth 回调端口** 1455/18080/51121/51122/54545）。再起一个实例会看到 5 条「回调监听绑定失败（os error 10048）」—— 那**不是缺陷**，代码已降级为「粘贴回调 URL 兜底」。别去杀那个 PID。
+## 2026-10-26 第三十一轮（Anthropic 入站丢 thinking 块）
+- **★★ 修掉真缺陷：`anthropic_to_openai` 把 assistant 的 `thinking` 块整段丢了**（旧代码落到 `_ => {}`）。Chat 侧没有 thinking 块类型，对应的是 `reasoning_content` 字符串 —— 参考项目（Agent2API protocol/anthropic.rs）明确要求「回程 thinking 折进 reasoning_content，signature 丢弃」。
+  影响：多轮对话里上一轮的推理上下文消失；而 Anthropic 侧 thinking 与 signature 是配对的，丢掉还可能让上游认为消息不完整。
+  ★ 只修了**入站**方向：反方向（`openai_to_anthropic`）本来就对 —— 它会把 `reasoning_content`/`reasoning` 折成 thinking 块，且保证 thinking 是 content 第一项（Anthropic 语义是「先想再说」，顺序反了客户端渲染错乱）。
+- 测试：`anthropic_thinking_folds_into_reasoning_content` + `anthropic_without_thinking_has_no_reasoning_field`（后者锁住「没有 thinking 时不凭空塞空字段」）。实测回退修复后立刻变红，是有效闸门。
+- 测试基线 **612**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 171 / server 276 / store 86）。
+- ★ 用参考项目找缺陷的高效路径：读**协议转换**类模块的头注释（它会逐条列出两协议的差异点），拿每一条去问「我方这条做了吗」。本轮就是这样发现 thinking 映射缺失的。
+## 2026-10-26 第三十二轮（Responses 有状态字段 + store 声明）
+- **修掉真缺陷 1：Responses 的有状态字段被静默忽略**。`previous_response_id` / `conversation` / `prompt` / `background` 依赖服务端保存历史，而本网关是**无状态转发**。旧实现静默忽略 → 客户端以为多轮上下文被记住，实际每轮裸问；症状是模型「失忆」，而**这个症状几乎不可能归因到网关**（用户只会觉得模型不行）。
+  修法：带值时**报 400 并点名字段**（同 Agent2API protocol/responses.rs）。传 null / 空串不拒（那是常见形态）—— 已有测试同时锁住这两面。
+- **修掉真缺陷 2：Responses 响应没声明 store**。旧实现不出这个字段 → 客户端按自己的默认理解；一旦理解成 true，它就有理由只回传一个 id 当上下文（正是入站拒绝的那个场景）。现明确下发 `store: false`（「上游不存，告诉客户端存了是撒谎」）。
+  ★ store 是 **response 级**字段：message item 与 function_call item 都不该有。
+- 测试基线 **614**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 171 / server 278 / store 86）。
+- ★★ **本轮自己的两个操作失误（都是按行号 splice 造成的，务必引以为戒）**：
+  ① 用「行号 +1」插入时锚点选了 `"status": "completed"`，而这个文件里有**多处**同名行（Anthropic message、Responses response、function_call item），于是把 store 插到了两个不该有的位置；
+  ② 撤销时按行号删，删掉了 `role: assistant` 与 `call_id` —— 结构损坏，靠 `cargo test` 红了一条才暴露。
+  ★ 教训：**同一个 json! 块里有多处同名字段时，绝不能用「第一个匹配行」做锚点**。正确做法是先用**父级唯一锚点**（如 `"object": "response"`）定位到块，再在块内插入；改完立刻编译 + 跑该文件全部测试，别只看新增那一条。
+- ★ 另有一条测试有效性教训：`assert_eq!(out["store"], false)` 写成了下标取值，`Value` 缺键返回 Null 时**这条断言仍然通过**（实测移除字段后测试是绿的）。要断言「字段必须存在且为某值」必须用 `out.get("store") == Some(&json!(false))`。
+## 2026-10-26 第三十三轮（usage 字段只认一种写法）
+- **★★ 修掉真缺陷：`extract_usage` 只认 `prompt_tokens`/`completion_tokens` 一种写法**。上游是 OpenAI 兼容接口，但不同版本/不同接入点命名不统一（input_tokens / output_tokens / 驼峰 promptTokens / inputTokens 都在真机出现过）。只认一种时，换命名的上游会被**记成 0**，随后 `conv_usage` 走字符数估算 —— 用量报表失真且**不会报错**。
+  修法：四个别名都认，且按**第一个正数**挑（不是「第一个存在」）。
+  ★★ 为什么必须「正数」而不是「存在」：上游常同时给嵌套与顶层两种写法，嵌套那份往往是废值（一手形态 `prompt_tokens_details.cached_tokens=0` 而顶层 `cache_read_input_tokens=4800`）。按存在挑会命中恒 0 的那条，整条记成 0 —— 而 0 是「这家缓存没生效」的读数，比缺值更难查。（同 Agent2API upstream/usage.rs 的论证。）
+- 测试：`extract_usage_reads_all_common_field_names` + `extract_usage_skips_zero_and_keeps_looking`。实测回退到单写法后**两条都变红**，是真闸门。
+- 测试基线 **616**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 171 / server 280 / store 86）。
+- ★ 本轮又踩一次「替换吃掉邻居注释」：用「函数起始行往上吃 /// 注释」做替换边界时，把**上一个函数**（conv_usage）的说明一起吃掉了 —— 因为它紧贴在前面。改完要回头看一眼邻居还在不在（本轮已补回）。
+## 2026-10-26 第三十四轮（截断判据模块，续写尚未接线）
+- **新增 `truncated.rs`**：`looks_truncated` + 5 条判据 + 7 条测试。移植自 Agent2API 的 `core/upstream/continuation.rs`（它又来自 Trae2api-cn 的 continuation.py）。
+  它解决的真问题：上游输出预算用尽（`finish_reason: length` 一族）时客户端拿到**半截答案**，而它没法区分「模型就说这么多」与「被腰斩」——前端显示一段没有结尾标点的文字，用户以为模型坏了。
+  判据顺序（照参考实现，先硬后软）：① finish_reason 命中长度别名表（8 种写法，只认 `length` 会漏一整类上游）② 空正文但有思考 ③ 代码围栏 ``` 奇数 ④ 末 100 字符括号栈失衡（+2 容忍散文零星括号）⑤ rstrip 后落在悬挂尾部 / 长思考+极短正文且不以句末收尾。
+- **★ 状态：判据就绪，但自动续写没有接线**。也就是说这个模块目前**不被任何路径调用**（不会多发请求、不改变行为）。接线需要：非流式读聚合体、流式从下发帧攒同一份三元组，再循环重发（含轮数上限 + 相似度闸防死循环）。
+  ★★ 接线前必须知道的三条代价（参考项目明确写下的，也是我没擅自接上的原因）：① 多轮 = 多次上游往返，prompt_tokens 各轮**求和**；② 续写轮会**重新选路**，可能落到另一个账号甚至另一个供应商 —— 等于「同一次请求的内容出现在多个上游账号上」；③ 走续写时客户端只能看到最后一轮的 usage 帧（已知不完全，但不伪造字节）。
+- 测试基线 **622**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 171 / server 286 / store 86）。
+- ★ 中文标点坑：`DANGLING_TAILS` 最初只有英文 `:` 缺全角 `：`，测试「步骤一：」直接失败。凡是「尾部形态」类判据，中英文标点必须成对列全。
+## 2026-10-26 第三十五轮（后台任务周期漂移）
+- **★★ 修掉真缺陷：`supervise_loop` 的周期会累积漂移**。旧写法 `sleep(period) → 执行 → sleep(period)` 让**实际周期 = period + 执行耗时**，于是每天都往后推一点。
+  影响最大的是签到：它要遍历多个账号、逐条打上游（一次几秒到几十秒），跑上一年就偏出几小时。而且**面板上完全看不出来**（只看到「每天都是 09:12」），直到用户抱怨「自动签到越来越晚」。
+  修法：记 `started = Instant::now()`，下轮 `wait = next.saturating_sub(started.elapsed())` —— 扣掉本轮执行耗时。执行超过 period 时给 0（立刻进下一轮），不会因一次长跑把后续全部推迟。
+- 测试：`task_period_does_not_drift_with_execution_time`（period 80ms + 每次执行 40ms，5 轮总耗时必须 < 560ms；漂移实现会是 600ms）。实测回退成 `wait = next` 后立刻变红。
+- 测试基线 **623**（core 7 / bin 4 / crypto 21 / pool 35 / registry 13 / relay 171 / server 287 / store 86）。
+- ★ 计时类测试的稳定性纪律：这类断言依赖调度抖动，加完后要**连跑两遍**确认不抖（本轮 server 287 项连跑两次都 4.2s 通过）。
+- 另核实（**不是缺陷，别改**）：签到没有「按 UTC+8 自然日去重」。参考项目那样做是为了支持「多条签到条目各设时刻」；我方是每日一次周期任务，上游签到接口幂等（返回「今天已签到」时 `summarize_checkin` 已单列为「今日已领取」不算失败），另起一套自然日判定没有收益。
+## 2026-10-26 第三十六轮（积分快照永不过期）
+- **★★ 修掉真缺陷：号池的积分余额快照没有 TTL**。`credits: HashMap<String, (f64, Instant)>` 存了记录时刻，但**从来没人读它**（`credit_of` 里 `map(|(c, _)| *c)` 直接丢掉）。快照只在签到成功后刷新（每日一次），于是它永久有效。
+  后果（两种都无日志，只有现象）：① 快照值偏低 → 那个号永远优先被选中，但它其实早已没额度 → 反复撞 402；② 快照值偏高 → 有额度的号永远排在最后不用。
+  修法：加 `CREDIT_TTL = 25 小时`（签到每日一次，24 小时会在「今天还没签」的空窗里过期，多留 1 小时缓冲）；`pick` 里过期的视同「没有快照」（排最后）。
+- 测试：`stale_credit_snapshot_is_ignored`（直接操作 inner 注入过期 Instant）+ `fresh_credit_snapshot_still_orders_by_balance`。实测回退 TTL 判断后立刻变红。
+- 测试基线 **625**（core 7 / bin 4 / crypto 21 / pool 37 / registry 13 / relay 171 / server 287 / store 86）。
+- 另核实（不适用）：参考项目 `billing/request.rs` 那条「无时区的日期时间要用本地时区解析、与 JS 的 new Date 对齐」—— 我方 v2 **不解析**上游的积分到期时间（没有 CycleEndTime/ExpiredTime 那套 urgency 逻辑），所以没有这个解析错。
+## 2026-10-26 第三十七轮（端到端验证：非流式 + 流式 + 记账）
+- 本轮无代码改动，做的是**真机端到端验证**（625 个单测之外）：起 exe（端口 8811/8812、独立数据目录 `_smoke3`）→ health ok → `/v1/models` 35 条 → **真实非流式对话**（`kilo-auto/free` 返回 200 + 「ok」）→ **真实流式对话**（200 + `text/event-stream`，11 个 data 帧）→ `/api/usage` 已记账（requests 2 / success 2 / tokensIn 178 / tokensOut 238）。
+  说明最近几十轮的改动（模块拆分、Brotli、内容拦截补救+降级、冷却键真名、usage 别名、调度漂移、积分 TTL）在真机上协同正常。
+- ★ **冒烟纪律（重要）**：用户机器上有一个**正式实例常驻**（监听 8800，并占着全部 OAuth 回调端口 1455/18080/51121/51122/54545）。冒烟必须：① 用不同端口（8811/8812，避开 8800/8801）② 用 `AIGW_DATA_DIR` 指到临时目录（别污染真实数据）③ 收尾只 `taskkill` **确认是自己端口对应 PID** 的进程，**绝不动 8800 那个**（本轮清理时显式跳过 44140）。
+- 观察（不是缺陷）：`/v1/models` 只发布 35 条而 spec 有 143 份 —— 没凭据的平台模型不进清单（`platform_usable` 过滤），设计如此。
+- 观察（不是缺陷）：kilo 响应里带 `reasoning_details` 私有字段，透传给客户端是正确做法（原样给，不改写）。
+## 2026-10-26 第三十八轮（截断可见化 + 协议入口真机验证）
+- **截断判据接上了（零风险形式）**：非流式响应若被判为「被腰斩」，加响应头 `x-aigw-truncated: 1`。
+  ★ 为什么用**响应头**而不是响应体字段：客户端不认识的字段会被忽略或误判，而响应头是附加信息，不认识它的客户端完全不受影响。
+  ★ 为什么**不做自动续写**：那要额外打上游（多轮 = 多次往返、prompt 各轮求和），且续写轮会重新选路（同一次请求内容可能落到另一个账号）—— 那是产品决策，不该由代码擅自决定。
+  实现：`truncated.rs` 里 `TurnOutcome` 泛型化为 `TurnOutcome<'a>`、新增 `outcome_from_chat(v)`（从 chat 响应体取三元组），接线在 `chat_completions` 的 `Ok(Json)` 分支。
+- **★ 真机验证（本轮最有说服力的证据）**：`max_tokens=32` → 上游 `finish_reason: length` → 响应头出现 `x-aigw-truncated: 1`；`max_tokens=512` → `stop` → 无该头。两种都 200。
+- **三个协议入口真机全通**：`/v1/chat/completions`（200+正文）、`/v1/messages`（200，Anthropic 形态，usage 用 input/output_tokens）、`/v1/responses`（200，含 `store: false`）、带 `previous_response_id` → **400 且提示准确**。
+- 测试基线仍 **625**（本轮无新增用例，改的是行为；原有 7 条判据测试随泛型化一起通过）。
+- ★ 一个**不是缺陷**的观察：kilo 这类推理模型在 `max_tokens` 很小时 `finish_reason: length` + `content: ""`，思考内容在 `reasoning_details`（**base64 密文**，非明文 `reasoning_content`）。我方只认 `reasoning_content`/`reasoning`，所以 content 为空是**正确**的 —— 没有可转换的明文字段。别去解那个 base64，那是上游的专有格式。
+## 2026-10-26 第三十九轮（zcode 静态清单抄错了来源）
+- **★★ 修掉我自己上轮引入的真错误**：`sub-zcode` / `sub-zcode-intl` 的静态模型表写成 `GLM-5.2` / `GLM-5-Turbo` —— 那是上游 `client/configs` 里 **`providers[]` 某个旧条目**的值，不是权威清单。
+  ★ 权威来源是 `builtinModels`（实测只有 GLM-5.3 / GLM-5.3-Flash，`contextWindow` 各 1,000,000）与 `builtinProviders[].defaultModel`（5 个 builtin provider 全是 `GLM-5.3`）。已改成 GLM-5.3 / GLM-5.3-Flash。
+  ★ 教训：**同一个 JSON 里同名字段出现在多处时，先确认哪一处是权威**。`configs.data` 里 `providers[]`（条目级、可能是历史残留）与 `builtinProviders[]`（注册表级）都带 `models` 字段，抄错了就是「静态表列着上游已不首选的模型」。
+- **端点取舍已写进 spec 注释**：上游 `builtinProviders` 的 coding-plan 给的是 **anthropic schema**（`/api/anthropic`），而我方配的是 `/api/coding/paas/v4`（configs 的 `providers[]` 里标 `openai:chat`）。保持 openai 路径是对的 —— 本面板只做 OpenAI 透传，`format=anthropic` 的源会被 `platform_supported` 判为不支持。两条路径实测都 401（活着）。要改 anthropic 端点必须先给 relay 加转换。
+- 核实过、**不是缺陷**：kuku 清单与参考项目逐项对比一致（参考项目的 `gateway-deepseek-v4.1-flash-tencent` 与我方的 `-volcengine` 是不同上游变体，以上游实测为准）。
+- 尝试过但**放弃**的方法：用正则从参考项目源码批量提取各平台模型 id 做交叉比对 —— `qoder`/`raccoon`/`cline`/`antigravity` 的清单格式各异，提取到的大多是测试夹具（`m-1`/`u-echo`/`HSTAPROBE…`），不可靠。静态清单的权威来源只能是**上游自己**（`configs` 端点 / `/models`），不是别人的源码。
+- 测试基线 **625**（无变化，改的是 spec 数据）。
+## 2026-10-26 第四十轮（两个接入源地址写错）
+- **★★ 修掉真缺陷 1：`api-longcat` 的 base_url 配错**。原写 `https://longcat.chat/v1` —— 该地址的 `/v1/models` 返回**网站首页 HTML**、chat 也拿不到 API 响应，于是清单与转发全废，面板只显示「近24h 失败」。
+  实测正确端点：`https://api.longcat.chat/openai/v1`（`GET /models` → 401 `missing_api_key`；`POST /chat/completions` → 400 `invalid_json`）。修复后体检从 [FAIL] 变 [KEY]。**与之前 api-zhipu 是同一类问题**（base_url 指向网站而非 API）。
+- **★★ 修掉真缺陷 2：`api-cloudflare` 写死了 `accounts/self/ai/v1`**。`self` 不是有效 account id —— 等于「看起来能跑、实际必然失败」（清单永远 405、转发必被上游判 account 不存在）。
+  改成**占位符** `base_url = "@cloudflare_ai_url"`：未配置时平台明确处于「地址未配置」（请求时报错点名要配什么），比静默失败诚实。配置方法写进了 notes（填 `https://api.cloudflare.com/client/v4/accounts/<你的 account id>/ai/v1`）。
+- **体检结果：失败 5 → 3**。剩 `api-featherless`（7MB 超上限）/ `api-qwencloud-coding`（只对 Coding Agent 开放）/ `api-voyageai`（只做 embeddings），三者都已定性为「不是端点失效」。
+- 测试基线 **625**（改的是 spec 数据）。
+- ★ 一个**试过但没用的方法**：拿「base_url 根路径返回 HTML」当「地址配错」的判据 —— 逆向源（doubao/kuku/metaso/raccoon/yuanbao/mimo/web-*）的 base_url 本来就是网站根，真实路径在 `chat_path`；`api-alayanew` 的 base_url 是 `/v1`，根路径本来就无内容（它的 `/v1/models` 是正常 401）。精确判据只有「`base_url + models_path` 返回 JSON 与否」，也就是 **--doctor 已经在做的事**，别另造一套。
+- ★ 另一个教训：**找 base_url 配错，要试候选端点而不是只看一个**。longcat 的正确地址不在主域名上（是 `api.longcat.chat/openai/v1`），靠「试 5 个候选并看 content-type 是不是 JSON」才找到。
+## 2026-10-26 第四十一轮（体检工具三处诊断改进）
+- **① [KEY] 分支也打印 body 摘要**：只看状态码分不清「这个 401 是 API 端点给的」还是「某个网站/WAF 给的」—— 两者长得一样，但后者说明 base_url 可能打到了网页。改完立刻在 9 个源上看到了 body，**排除了 4 个可疑源**（都不是配置错）：
+  `api-cohere`/`api-together`/`api-cerebras` 是 Cloudflare 按 IP/地区拦（本机无代理，环境限制）；`api-kimchi` 的 401 HTML 是 nginx 做 auth 前置（该路径存在、正常）。
+- **② 429 单独归类**：上游限流是**临时状态**，混进「失败（端点可能已变）」会让每次体检都挂着几条待办，真问题被稀释。现在是小结里的独立一栏 + 单独列表。实测 `api-qianfan` 上一轮报 429、这一轮自己恢复了 —— 正好证明它不该进待办。
+- **③ 体检跳过占位符源**：`base_url` 以 `@` 开头（用户还没填地址）的源硬探会得到非法 URL，然后被归进 `[NET] 连不上` —— 那是假故障。上轮把 `api-cloudflare` 改成占位符后它就冒进了 NET 列表，这轮修掉。
+- 当前体检口径：**通 22 / 需凭据 64 / 连不上 17 / 被限流 0 / 失败 3 / 漂移 0**（106 个 live 源）。失败 3 个都已定性不是端点失效：featherless（7MB 超上限）、qwencloud-coding（只对 Coding Agent 开放）、voyageai（只做 embeddings）。
+- 测试基线 **625**（改的是 bin 里的体检工具，无新增用例）。
+- ★ 顺带核实（都对，不是缺陷）：`api-perplexity` 的 base_url 不含 `/v1` 是**官方设计**（它本来就只有根路径 chat/completions、没有 /models 端点，所以 `models_policy=static`）。别看到「缺 /v1」就当成配错。
+## 2026-10-26 第四十二轮（DNS 预检 + 停用域名失效源）
+- **★★ 体检新增 DNS 预检**：`[NET] 连不上` 里混着三类完全不同的事 —— ① 域名已不存在（ENOTFOUND，源真的没了）② 域名在但被 WAF 拦 ③ 海外源没配代理。三类都显示「连不上」时用户只能一个个手工 dig。现在先查一次 DNS，把 ① 单独摘成 `[DNS] 域名解析失败（ENOTFOUND，源可能已下线）` 并计入「需跟进」。
+  实测验证：临时启用 `free-naixi` 后准确输出 `[DNS] free-naixi 域名解析失败`（此前只能看到笼统的「连不上」）。
+- **停用 `free-naixi`**：`newapi.naixi.net` 的 **DNS 返回 ENOTFOUND（域名不存在）** —— 不是网络慢、也不是需要代理（同一时刻 `ai.berf1.cn` / `anyrouter.top` 都能正常解析）。理由已写进 toml。
+- **核实过、**保留**的：`free-berf`（`ai.berf1.cn`）—— node fetch 直连 57ms 返回 401（端点活着），但 **reqwest 与系统 curl 都报 `Recv failure: Connection was reset`**。这说明该站对某些 TLS/HTTP 客户端不友好（WAF 按指纹或 h2 协商拦），是**上游行为**，不值得为单一公益站改代码。
+- 体检口径：**通 22 / 需凭据 64 / 连不上 16 / 被限流 0 / 失败 3 / 漂移 0**（105 个 live 源）。失败 3 个仍是 featherless / qwencloud-coding / voyageai，都已定性不是端点失效。
+- 测试基线 **625**（改的是 bin 里的体检工具）。
+- ★ 排查方法论：**「连不上」不能只看 HTTP 状态或超时数字，要看 DNS 层**。`free-naixi` 6ms 就失败（DNS ENOTFOUND），`free-anyrouter` 1.4s（CF 拦），`agentrouter.org` 10.6s（超时）—— 三个时间量级本身就指向三种不同原因。
+## 2026-10-26 第四十三轮（静态兜底表大面积过期 → 漂移清零）
+- **★★ 体检范围扩大到所有静态表**（原来只比 static 源）：把闭包的 `is_static` 换成 `!spec.models.is_empty()` —— **live 源的静态表同样是「实时拉不到时的兜底」，里面躺着已下架的模型一样让用户选到 404**。
+- **★ 一次就暴出 13 个源漂移**（nvidia 静态表 8 个里 5 个已下架；modelscope / qiniu / chutes 整张表全部失效）。已按上游实测逐个重写，**漂移清零**。
+  典型证据：nvidia 上游已从 `glm-5.2`→`z-ai/glm-5.3`、`minimax-m3`→`minimaxai/minimax-m3.1-flash`、`deepseek-v4-pro`→`deepseek-v4.1-flash`。
+- **★★ 修掉两个比对口径缺陷（否则误报满天）**：
+  ① **`models_filter` 源必须跳过比对** —— `fetch_models_with_secret` 返回的本来就是**过滤后**的清单（kilo 的 `isFree`），拿它比静态表会把「静态表列了非免费模型」误报成「上游已下架」。实测 kilo 的 `kilo-auto/frontier`/`balanced` 上游确实存在、只是 isFree 为假。
+  ② **空清单时必须跳过比对** —— 拉不到清单时 ids 是空的，拿空集去比会把静态表里**每一个**模型判成「已下架」。实测 `apk-loomy` 的 `/models` 回 HTTP 200 + `{"code":"100002","desc":"缺少 token"}`（无 data），整张表被误报成 6 个全下架。**空清单的含义是「这次没拿到」，不是「上游一个模型都没有」**。
+- 体检口径：**通 22 / 需凭据 64 / 连不上 16 / 被限流 0 / 失败 3 / 漂移 0**（105 个 live 源）。
+- 测试基线 **625**（改的是体检工具与 11 份 toml 的静态表）。
+- ★ 重写静态表的取舍：**保留上游仍存在的 + 补几个当前主力**，而不是把上游几百个全抄进来（openrouter 有 462 个）。静态表的作用是「兜底能路由到一些模型」，不是「完整镜像」。
+## 2026-10-26 第四十四轮（清单大小上限治错了病）
+- **★★ 修掉真缺陷：`MODELS_BODY_MAX_BYTES` 定 4MiB 过严**。当初定 4MiB 是为了防「清单异常膨胀」，但实测 **featherless 的 /v1/models 是 6.9MiB**（7,188,582 字节，它把全部社区模型都列出来、每条还带 is_gated/created/model_class）—— 4MiB 直接把它挡在门外，那个源**永远拿不到清单**、只能吃静态兜底，而静态表会随上游变化而过期。
+  ★ 关键认识：这个上限要防的是**内存峰值**，而内存峰值已经在上一轮用「边读边判的流式累积」解决了 —— 上限本身只要拦住「失控上游回几百 MB」即可。4MiB 是拿一个安全阀去挡正常流量。
+  改成 **16MiB**（已知最大真实清单的 2.3 倍）。实测 featherless 从 `[FAIL]` 变 `[OK]`，静态表 8 个模型全部命中。
+- **体检结果达到最佳**：**通 23 / 需凭据 64 / 连不上 16 / 被限流 0 / 失败 2 / 漂移 0**。失败仅剩 2 个，都不是端点失效：`api-qwencloud-coding`（405，Coding Plan 只对 Coding Agent 开放）、`api-voyageai`（404，只做 embeddings 没有 /models）。
+- 测试基线 **625**（改的是 relay 常量与注释）。
+- ★★ **本轮自己的操作事故（记录教训）**：用「按行号替换注释」的脚本改这段时，把紧邻的 `impl OutClient {` 与 `pub fn http()` 签名一起吃掉了，文件变成 `const ...; &self.http }` —— **编译才暴露**。
+  教训：**替换一片连续行时要先确认上下边界是什么**（尤其上边界是「注释」而下边界是「代码」时）。安全做法是从 git 取原始段落对照（`git show HEAD:<file>`）后整段重写，而不是只改注释那几行。
+## 2026-10-26 第四十五轮（voyageai 策略修正 → 体检失败降到 1）
+- **修掉 `api-voyageai` 的策略不自洽**：它 `models_policy=live` 但 `models=[]`，而实测该 API **根本没有清单端点**（`/v1/models`、`/models`、`/v1/embeddings/models` 三个候选全 404，只有 `/v1/embeddings` 是 401）。live 策略会让它每次体检都去拉一个必然 404 的地址、在报告里挂一条假 FAIL。
+  改成 `models_policy = "none"`（无清单，靠 `模型名@平台` 后缀路由）—— 这才是它的真实形态：`chat_supported=false`，只服务 embeddings。改后体检不再探测它。
+- **体检达到当前最优**：**通 23 / 需凭据 64 / 连不上 16 / 被限流 0 / 失败 1 / 漂移 0**。
+  仅剩的 `api-qwencloud-coding`（405）**不是缺陷，别去改它**：实测它的 **chat 端点完全正常**（`POST /v1/chat/completions` → 401 `invalid_api_key`，说明接受网关形态），只有 `/models` 清单端点拒非 Coding Agent 客户端。它有 7 个静态模型兜底，转发可用。这条 FAIL 保留着反而有价值 —— 上游哪天放开，它会自动从 FAIL 变 KEY。
+- 测试基线 **625**（改的是 spec）。
+- ★ 判据经验：**`live` + `models=[]` 的组合要看有没有清单端点**。没有端点就该用 `none`（避免假 FAIL）；有端点但需要凭据则是正常的 `[KEY]`。别一刀切。
+## 2026-10-26 第四十六轮（死代码清理 + 账号命名收敛）
+- **删掉 `_touch` 占位函数**（auth_login.rs）：它的唯一职责是「让 ProviderSpec 导入不被判 unused」，而 ProviderSpec 在 494/776 行的真实签名里**一直在用** —— 纯历史遗留。删除后零告警，反证了判断。
+- **抽出 `account_name_of(platform, label)`**：登录成功（自动拿凭据）与手动粘贴两条路都要给账号起名，原来各写一份 `match display_name_of(...)`。两处各写一份的代价是「改文案得改两处，漏了只有面板上『一个账号叫 A、另一个叫 B』这种细小差别」，没人会注意到。`pasted_account_name` 改成它的薄封装，同时删掉它身上**过期的 `#[allow(dead_code)]`**（函数其实有调用方）。
+- **清理 8 个真未使用的 re-export**：`ModelsEntry` / `MODELS_FETCH_CONCURRENCY` / `base64_decode` / `is_db_file_name` / `restore_target` / `upstream_error_json` / `ErrNote` / `compact_err_text`。它们都是拆模块时「照搬一份导出清单」留下的，编译器在 `--tests` 下仍报 unused。
+- ★★ **`#[allow(unused_imports)]` 在这个仓库里是必要的，别当坏味道清掉**：逐个核实过，被抑制的符号（`key_id` / `sniff_stream_head_within` / `free_to_spec` / `fetch_gongyi_sites` / `LAST_ERR_MAX_CHARS` / `error_type` 等）**都在测试区被使用**（测试与 lib 同文件，但只在 `mod tests` 里引用）。
+  ★ 教训：清理这类抑制**必须跑 `cargo test`（不是 `cargo check`）**才看得准 —— 我第二轮清理时按 `check` 的告警删，把只在测试用的符号也删了，`cargo test` 立刻红。
+- 测试基线 **625**（行为不变），零告警。
+- 环境限制（再次确认）：**本机代理端口全关**（7890/7897/10809/1080/8888/20171/10801/7891 全 closed），17 个海外源仍无法复检。
+## 2026-10-26 第四十七轮（前后端契约与真机联调验证）
+- **前端体检结果良好**：app.js 3034 行 / 126 个函数 / **零重复函数名** / 零 console.log 残留 / 零 debugger / 零 TODO。
+- **前后端契约核对通过**：前端引用的 23 个端点（20 个 `/api/*` + `/v1/chat/completions` + `/v1/models`）全部在后端路由表里存在；后端额外暴露的 `/v1/messages`、`/v1/responses`、`/v1/messages/count_tokens`、`/v1/search/messages` 是给 SDK 用的，前端不引用是正常的。
+- **真机联调**（端口 8816/8817 + 独立数据目录）：`/` `/app.js`(144KB) `/style.css`(10KB) `/index.html` 全 200；`/api/health` `/api/platforms` `/api/accounts` `/api/pool` `/api/usage` `/api/runtime` 全 200 JSON。
+- **新 spec 确认已生效**：`/api/platforms` 里有 `sub-zcode` 与 `sub-zcode-intl`（各 2 个模型 GLM-5.3 / GLM-5.3-Flash），7 个已停用源（api-lightning / api-xirang / free-naixi / free-newapi / free-nuomiaomiao / free-pmapi / minimax）也都正确显示为 enabled=false。
+- 观察：`/api/platforms` 返回 189 行 > spec 的 143 份 —— 因为该接口还包含自定义 API 与公益站条目，不是 spec 数量。
+- 测试基线 **625**（本轮无代码改动，纯验证）。
+## 2026-10-26 第四十八轮（流式 usage 的两处缺陷）
+- **★★ 修掉真缺陷 1：`message_delta` 不带 `input_tokens`**。Anthropic 的约定是 `message_start` 给占位、**最终值在 `message_delta` 的 usage 里**（累计语义）。旧实现只发 `output_tokens`，于是客户端从 `message_start` 读到的 `input_tokens=0` 就一直是 0 —— 显示「输入 0 token」，而实际可能吃了几千 token 的上下文。
+- **★★ 修掉真缺陷 2：`SseParser` 的 usage 解析只认标准字段名**。这是第 33 轮那个缺陷的**第二处** —— 当时修了非流式的 `dialect::extract_usage`，但**流式**的解析器没修。上游换用 `input_tokens`/`output_tokens` 命名时，流式请求的用量全部记成 0。
+  ★★ 教训：**同一个缺陷要沿两条路径都查一遍**（非流式 / 流式、chat / messages / responses）。只修一处等于让「同样的问题在另一条路上继续发生」，而且更难发现（没人会想到两条路的用法解析不一样）。现在两处都支持四种别名 + 取第一个正数。
+- 真机验证：`message_start` → `{input_tokens:128, output_tokens:0}`；`message_delta` → `{input_tokens:128, output_tokens:100}`（修复前只有 output_tokens）。
+- 顺带验证：三条协议入口的**流式**事件序列都符合规范 —— `/v1/messages` 是 message_start→content_block_start→delta→block_stop→message_delta→message_stop；`/v1/responses` 是 response.created→output_item.added→content_part.added→output_text.delta→...→response.completed。
+- 测试基线 **627**（relay 173，+2）。
+- ★ 测试细节：`SseParser::feed` 是**按 \n 分行**解析的，测试里喂 `data: {...}` 必须带换行，否则解析不出任何事件（我第一版就漏了，两条测试全红在「标准字段名也返回 0」）。
+## 2026-10-26 第四十九轮（流式 Responses 缺字段）
+- **★★ 修掉「非流式加了、流式没加」的第三例**：`/v1/responses` 的**流式** `response.completed` 里既没有 `store` 也没有 `error`/`parallel_tool_calls`，而非流式 `openai_to_responses` 早就有了。现在两处都补齐。
+  ★ 系统做法：把**非流式与流式的字段清单逐项 diff**（本轮就是这么发现差的 5 项：error / incomplete_details / instructions / parallel_tool_calls / tool_choice）。补了前三个之外的两个有实际意义的（`error:null` 明确「没有错误」而不是「字段没实现」；`parallel_tool_calls` 是 Codex 判断能否并行发工具调用的依据）。
+- **真机验证**：流式 `response.completed` 现在是 `{object, status, store:false, error:null, parallel_tool_calls:true, model, output, output_text, usage}`；usage 完整 `input_tokens:127 / output_tokens:300 / total_tokens:427`（这一项受益于上轮的 SseParser 别名修复）。
+- **顺带确认**：`RespState` 与非流式共用 `parser.prompt_tokens`/`completion_tokens`，所以上轮修 SseParser 别名时**流式 Responses 也一起受益了** —— 这次不用再改。
+- 测试基线 **627**（本轮无新增用例，改的是输出字段）。
+- ★ 教训复用（上轮）：**「非流式 vs 流式」要成对检查**。这已经是第三例（usage 别名、message_delta 的 input_tokens、responses 的 store）。凡是「两条路径各写一份输出构造」的地方，都值得 diff 一遍。
+## 2026-10-26 第五十轮（接口一致性实测复核）
+- 本轮是**验证型**：把「成对结构 diff」的方法用到 Anthropic 消息、SSE 响应构造器、action 兜底、白名单校验四个维度，**结论都是已正确**。
+- 核实结论（勿再重复查）：
+  ① `message_start`（流式）字段与非流式 `openai_to_anthropic` **完全对齐**（id/type/role/model/content/stop_reason/stop_sequence/usage 都有）；
+  ② `sse_response_timed` 复用 `sse_response`，不是两份实现；
+  ③ **8 个 POST 端点对未知 action 全部返回 400 + 可读文案**，无效 JSON 也是 400（实测 `/api/platforms`、`combos`、`keys`、`pool`、`accounts`、`custom`、`free`、`checkin`）；
+  ④ **5 条协议入口的白名单校验全在**：`chat_completions` / `messages_completions` / `responses_completions` / `count_tokens` / `search_messages` 都调了 `key_model_denied`（`count_tokens` 尤其重要 —— 它是唯一不碰上游却会「按模型名回话」的旁路）。
+- ★★ **静态检查的教训**：用「代码里有没有某个字面串」当判据会大面积误报。本轮我搜「未知 action」时把 5 个 handler 误判成「缺兜底」，实际它们写的是「不认识的 action」「action 必须是」「不认识的 action=」（措辞各不相同）。
+  ⇒ **一致性这类问题要实测**（逐个打端点看状态码），不要靠 grep 猜。
+- 测试基线 **627**（本轮无代码改动）。
+## 2026-10-26 第五十一轮（缺 model 字段回 400 而不是 404）
+- **修掉语义错误**：`chat_core` 把「model 缺失」当 `"unknown"`、空串原样保留，两条路都落到 `resolve_spec` 失败，于是返回 **404「未知模型 unknown：…」/「未知模型 ：…」**（后者冒号后面什么都没有，用户只会困惑）。
+  真正的问题是**请求体少了一个必填字段**，那是 400 的语义。现在：缺 / 空串 / 纯空白 → `400 invalid_request_error` + 明确文案；**模型真的不存在仍回 404 model_not_found**（OpenAI 语义不受影响）。
+- **边界输入实测（本轮新开的验证面）**：空 body → 400 `invalid JSON body`；无效 JSON → 400；缺 messages → 400 + hint；未知模型 → 404 `model_not_found`。全部是 JSON 信封，客户端可识别。
+- 测试基线 **627**（无新增用例；本次改的是错误分支，不影响正常路径）。
+- ★ 判据记牢：**「字段缺失/格式错」是 400，「东西不存在」是 404**。混淆这两者会让客户端按错误的方向重试（404 会被某些 SDK 当永久错误直接放弃，而它其实只是这次请求写漏了字段）。
+## 2026-10-26 第五十二轮（同一判据要在三条入口都成立）
+- **修掉「只修了一条入口」**：上轮给 `chat_core` 加了「缺 model → 400」的检查，但 `/v1/messages` 与 `/v1/responses` 的 handler **各自**解析 model 并用 `unwrap_or("unknown")` 占位 —— 转成 OpenAI 形状后 chat_core 的空检查就失效了，于是这两条入口仍报「未知模型 unknown」404。
+  现已在这两处也加空检查（用各自的 `anthropic_error` / `responses_error` 返回 400）。**实测三条入口现在完全一致**：缺 model 全 400、未知模型全 404 `model_not_found`。
+- ★★ 这已经是「只改一处」的**第三类**教训：
+  ① 非流式 vs 流式（usage 别名 / message_delta 的 input_tokens / responses 的 store 字段）；
+  ② chat vs messages vs responses（本轮：model 校验）；
+  ③ 生产路径 vs 测试路径（第 46 轮：按 cargo check 告警清理，把只在测试用的符号删了）。
+  ⇒ **凡是有 N 条并行入口的地方，改完要逐条实测，不能假设它们共用同一段逻辑** —— `/v1/messages` 与 `/v1/responses` 都是先做协议转换再调 chat_core，转换器会吃掉「model 缺失」这个信息。
+- 测试基线 **627**（无新增用例）。
+## 2026-10-26 第五十三轮（错误优先级：先校验请求，再检查依赖）
+- **修掉 `/v1/search/messages` 的两个错位检查**：
+  ① **缺「必须是 JSON 对象」这道门**（另外四条入口都有）→ 数组 body 时 `get("query")` 全是 None、query 退化成空串，然后**一路走到「没有账号」的 503**，用户按提示去登录账号，而他真正的问题是请求体格式不对。
+  ② **缺 query 必填检查** → 缺/空/空白 query 同样落到 503「wb-bateway 还没有账号」。
+  修完后：五条入口对「数组 body」全部 400；query 缺失全 400 且文案点名缺什么；**有效 query 才 503**（那才是真的依赖缺失）。
+- ★★ **判据：错误优先级必须是「先校验请求，再检查依赖」**。请求本身不合法时，后面的一切判断都没有意义 —— 按依赖报错会把用户往完全错误的方向引（去登录账号而不是改请求体）。
+- ★ 这也是「N 条并行入口」的又一次验证：`/v1/search/messages` 是唯一既没做对象检查、也没做必填字段检查的入口，因为它看起来「只是个旁路」。**旁路最容易漏校验**。
+- 测试基线 **627**（无新增用例）。
+## 2026-10-26 第五十四轮（413 文案与类型五入口统一）
+- **验证到的现状**：超 32MB 请求体返回 **413 + JSON 信封**（不是 axum 的纯文本），这点早就对了。但文案是英文技术串 `Failed to buffer the request body` —— 用户看不出是「超上限」还是「连接断了」，也不知道上限多少。
+- **修法**：抽出 `body_read_failure_msg(status, e)`，413 时给「请求体超过上限（32 MiB）：请缩短上下文或拆成多轮发送」，**五条协议入口共用**（原来只有 chat 那条是人话，另外四条各写一份英文串）。
+- **顺带修类型映射**：`anthropic_error` / `responses_error` 里没有 `413 => "invalid_request_error"`，于是 413 落到 `api_error` —— **客户端会按「上游故障」重试一个永远超限的请求**。补上后三条入口 413 的 type 全是 `invalid_request_error`。
+- 实测：chat / messages / responses 三条入口的 413 现在**文案与 type 完全一致**。
+- 测试基线 **627**（无新增用例）。
+- ★ 这又是「N 条入口各写一份」的老问题（第五十三轮同类）：**只要发现某条入口的文案/行为不一致，就把共用的那段抽成函数**，别逐条改 —— 逐条改下次加第六条入口时又会漏。
+## 2026-10-26 第五十五轮（五入口错误矩阵 + 并发验证）
+- **系统化错误矩阵实测**（一次测全，不再逐轮发现）：无效 JSON / 非对象 / 空对象 / 未知模型 × 五条入口。
+  结果：**chat / messages / responses 四列完全一致**（400/400/400/404）；`count_tokens` 对空对象与未知模型返回不同结果是**正确**的（纯本地估算、不算 model、缺 messages 时 400）；`search_messages` 对「未知模型」回 503 也是对的（它用 query 不用 model）。
+- **`count_tokens` 行为核实**：缺 messages → 400；空 messages → 200 + `input_tokens:1`（`estimate_tokens` 的 `.max(1)` 兜底）；正常文本按换算后的 JSON 估，含格式开销。都合理。
+- **并发验证**（同一模型打 `kilo-auto/free`）：5 并发全 200；**6 并发也全 200、零 429**（max_inflight 默认 2）—— 前两个 ~3.8s 直接进，后四个 7.5~11s 排队等待。总耗时 11s 而非 6×15s，说明「在途已满时短暂等待而不是立刻 429」的设计是有效的。**每次测完 `inflight` 残留都是 `[]`**（租约正确释放）。
+- ★ 10 并发会逼近工具的 120s 执行预算（串行轮次 × 15s 等待），要跑更大的并发得放后台；本机 `spawn("node")` 会 ENOENT（PATH 里没有 node），只能用 run_code 自己的运行时。
+- 测试基线 **627**（本轮无代码改动，纯实测）。
+## 2026-10-26 第五十六轮（评估剩余的 7 家平台：成本远高于预期）
+- **★ 结论：剩下 7 家平台不适合在「持续优化」轮次里做**。以 `autoclaw` 为例核实了它的真实成本：
+  ① 凭据来源是**读本机 `%APPDATA%/AutoClaw/auth.json` 并用 DPAPI + AES-256-GCM 解密**（Electron safeStorage 的 os_crypt 方案，要直调 Win32 `CryptUnprotectData`）；
+  ② 请求要带 `X-Auth-Sign` 客户端指纹签名（appId/appKey）；
+  ③ 还有 OAuth 登录链路与 refresh。
+  这远不是「加个 toml」——**半成品会让用户看到「有这个平台但不能用」，比没有更糟**。其余 6 家（catpaw / monkeycode / orcaterm / officeace / commandcode / accio）同量级或更重。
+- 核实（**不是缺陷，别改**）：`/api/health` 的 `skipped_specs` **只在非空时输出**（`if !skipped.is_empty()`）。这是刻意的（正常运行时省体积，且 `ok` 刻意不受跳过影响，否则一个写错的 toml 会让整机健康检查变红、容器被反复重启）。代价是客户端分不清「没有问题」与「这个版本不报」，但改动会变 API 形状，不值得。
+- **当前终态（可复现的验证口径）**：
+  · 测试 **627 全绿**（core 7 / bin 4 / crypto 21 / pool 37 / registry 13 / relay 173 / server 287 / store 86），零告警；
+  · 接入源体检：**通 23 / 需凭据 63 / 连不上 17 / 失败 1 / 漂移 0**（105 个 live 源）。唯一失败是 `api-qwencloud-coding` 的 405「Coding Plan 只对 Coding Agent 开放」——它的 chat 端点实测正常（401 invalid_api_key），转发可用，**别去改**；
+  · 五条协议入口的错误矩阵一致（无效 JSON/非对象/空对象 400、未知模型 404、缺 model 400、超大 body 413 + invalid_request_error）；
+  · 并发：6 并发全 200 零 429，inflight 残留恒空；
+  · 前后端契约完整，真机可跑。
+## 2026-10-26 第五十七轮（备份恢复 + 令牌机制深测）
+- **备份/恢复：无缺陷，设计严谨**（实测闭环）：
+  · `POST /api/backup/export` → 200，29KB，4 个文件（free_sites.json / panel.db / panel.db-wal / pool-state.json）base64；**注意它是 POST 不是 GET**（GET 回 405，前端也是用 post）；
+  · 恢复时数据库**暂存为 `.restore-pending`**（服务运行中无法覆盖 SQLite），响应明确说「重启后生效」；
+  · 旧文件自动备份为 `.bak-<ts>-<name>`；
+  · **重启后日志打印「已应用恢复备份里的 panel.db / panel.db-wal」，`.restore-pending` 被消费，health 正常** —— 整条链路闭环。
+- **★★ 修正一个我自己的错误认知**：`data/panel-token.txt` **不是明文**，是 `dpapi:` 前缀 + Windows DPAPI 加密（378 字节 vs 令牌 48 字节）。所以「用户能从文件读回令牌」**不成立**。
+  逃生通道只有一条：**删掉 panel-token.txt 后重启**（令牌自动关闭）。而启动日志里那句话只在「文件解密失败」时才打印，**正常忘了令牌的用户看不到**。
+- **修掉的体验缺口**：`/api/*` 的 401 原来只有一句「缺少或错误的访问令牌」。现在补上完整指引：「忘了令牌？本网关不保存明文（data\panel-token.txt 是 dpapi 加密的），无法找回：删掉数据目录下的 panel-token.txt 后重启服务即可关闭鉴权，再用 /api/token 重新生成。」
+- **核实不是缺陷**（别改）：`/api/token` 的 `generate` 在无令牌时可执行、`clear` 不可 —— **这个不对称是正确设计**：无鉴权时「收紧」（开鉴权）是安全的，「放松」（关鉴权）才是危险的。
+- 测试基线 **627**。
+- ★ 令牌端点只接受 `action` = `generate` / `set` / `clear`（写 `rotate` 会 400 并列出合法值）。
+## 2026-10-26 第五十八轮（会话粘性实测：无缺陷）
+- **粘性路由实测通过**（`/api/pool` 已能观测，无需看日志）：
+  · 初始 `sticky_entries: 0`；发一个带 `metadata.conversation_id` 的请求后变 **1**，绑定 `k974416e72f1f341f → kilo:anon`、`left_s: 1798`；
+  · **同会话再发一次，entries 仍是 1，`left_s` 从 1798.07 涨到 1798.89 → TTL 滚动续期确实生效**；
+  · 换一个新 conversation_id 后变 **2**（独立建键）；
+  · `sticky_full: false`、`sticky_max_entries: 8192`（上限机制在位）。
+- `session_key` 的实现已经相当完善（读了 sesskey.rs 全文核实）：
+  · 客户端可控的 id 一律 FNV-1a 折成 **17 字节定长**（防「有人在 conversation_id 里塞整段历史」导致 HashMap 键膨胀撑爆内存）；
+  · 自家形状 `k+16位hex` 原样放行 —— 否则 `/v1/messages`（经 carry_session）与 `/v1/chat/completions` 会对同一会话算出两个键，跨协议混用时粘性就断了；
+  · 无 id 时取**最后一条 user** 的内容哈希（取首条会让会话永久钉在一个账号上、其余号饿死）。
+- **本轮三个方向（备份恢复 / 令牌 / 粘性）全部验证通过，没有发现缺陷**。加上前两轮（错误矩阵、并发）也都干净 —— 这是「核心机制已经稳固」的实证信号。
+- 测试基线 **627**（无代码改动）。
+## 2026-10-26 第五十九轮（模型链：只能用不透明 id 调用）
+- **★★ 修掉可用性缺陷**：链的 id 是**自动生成的不透明串**（`combo:u-a5261120ac9477b5`），用户建了条叫「测试链」的链，想按名字调用却拿到 **404「未知模型 测试链」**。要求用户记住一个哈希来调用**自己建的东西**，这是缺陷不是设计（而且 `/v1/models` 里也显示成那个哈希）。
+  **修法**：`chat_core` 里在 `combo:` 前缀分支之后加一条 —— 名字**恰好唯一**时按名字路由（`ComboStore::id_by_unique_name`）；重名则返回 None 不猜（避免「悄悄选了其中一条」）。**实测：`model="测试链"` → 200，`model="combo:u-..."` 也仍 200**。
+- 核实（**不是缺陷**）：`ComboStore::add` **在创建时就拒绝重名**（「同名必须拒绝，否则第二条会静默覆盖第一条」），所以正常路径下 `id_by_unique_name` 不会遇到两条同名；它的 None 分支只是对历史数据的防御。我第一版测试写错了假设（以为能 add 两条同名），`expect("b")` 直接 panic —— 已改成验证「add 拒绝重名」。
+- 顺带验证了链的 fallback：建一条 `[no-such-model-xyz, kilo-auto/free]` 的链，请求返回 200 且内容正确 —— **不可用候选被正确跳过**；`/api/combos` 的 `effective` / `unavailable` 字段也如实区分了两者。
+- 测试基线 **629**（store 86→88）。
+- ★ 模型链 API 只有 `action` = `add` / `update` / `remove` 三种。
+## 2026-10-26 第六十轮（平台名大小写敏感，与模型名口径不一致）
+- **★★ 修掉可用性缺陷**：模型名解析（`canonical_model_for` → `same_model`）**大小写不敏感**，但 `xxx@平台` 的后缀判定（`is_platform_id`）是**精确匹配**。用户在客户端手写 `kilo-auto/free@KILO` 会失败，且报的是「未知模型 kilo-auto/free@KILO」—— **把整串当成模型名，完全没提「平台名写错了」**，用户会去查模型名而不是平台。
+  **修法**：新增 `State::canonical_platform_id(candidate) -> Option<String>`（先精确命中，再退到 `eq_ignore_ascii_case`），`is_platform_id` 改成它的 `is_some()`，`chat_core` 的 `rsplit_once("@")` 改用归一化后的真实 id。
+  **实测**：`@kilo` / `@KILO` / `@Kilo` 全部 200；`@nosuchplatform` 仍 404（不会把任意后缀误判成平台）。
+- 核实（**不是缺陷，别改**）：`AccessKey.id`（`key-{16位hex}`）与 `CustomApi.id` 虽然也是自动生成，但**只在面板内部用**（UI 从 `snapshot()` 拿到 id 再点按钮），用户不需要手写进任何配置文件 —— 与模型链的 `combo:u-<hash>` 性质不同（那个要写进客户端 model 字段）。
+- 观察（边缘场景，未改）：`kilo-auto/free@@kilo` 返回 401 `PAID_MODEL_AUTH_REQUIRED` 而不是预期的 404「平台没有声明模型 kilo-auto/free@」。双 @ 不是真实用法，优先级低。
+- 测试基线 **629**。
+## 2026-10-26 第六十一轮（`@平台` 写错时的诊断提示）
+- **补上上一轮修复的不完整处**：上轮让**正确的**平台名大小写不敏感，但**拼错的**平台名（`@kiloX`）仍然走「整串当模型名」的路径，报「未知模型 kilo-auto/free@kiloX：没有启用的平台声明它」—— 用户会去查模型名，实际要改的是 `@` 后面那一截。
+  **修法**：后缀「看起来像平台名」（非空、≤40 字符、不含 `/` `空格` `@`）但不是已知平台时，直接报 `@{p} 不是已知平台`，并**用前缀匹配给出最接近的候选**（`@kiloX` → 提示 `@kilo`；`@api-zhip` → 提示 `@api-zhipu`）。找不到候选时提示 `/v1/models?platform=<平台>`。
+  **实测**：4 种写法全部符合预期（正确的不受影响仍 200）。
+- ★ 判据：**「看起来像某个语法元素但解析失败」时，必须明确说「这是语法元素的错」，不能退化成「整体不存在」**。后者会把用户引向完全错误的排查方向 —— 这与第五十三轮「错误优先级要正确」是同一条原则的另一面。
+- 核实（本轮新验证的面）：`/v1/models` 的 35 条 id **形态干净**（无空格、无大写、无 `combo:` 开头），抽样调用均不会 404（`metaso:*` 回 429 是免费站限流不是解析失败）。所以「清单里的名字拿去就能用」这条成立。
+- 测试基线 **629**。
+## 2026-10-26 第六十二轮（平台名口径三处统一）
+- **修掉最后一处不一致**：`/v1/models?platform=` 曾是**精确匹配** —— 用户照错误文案填成 `?platform=KILO` 会得到「没有叫 KILO 的平台」+ 空清单，于是「查不到」被误认为「这个平台没有模型」。现已走 `canonical_platform_id`（大小写不敏感）。
+  **实测**：`kilo` / `KILO` / `Kilo` 都返回 17 条且 `known: true`；`nosuch` 仍 0 条 + `known: false`。
+- ★★ **至此「平台名」的三处入口口径完全统一**：
+  ① chat 的 `模型@平台` 后缀（第六十、六十一轮）；② `/v1/models?platform=`（本轮）；③ `/api/platforms`（面板一直如此）。
+  ⇒ 判据：**同一个标识符出现在 N 个入口时，解析口径必须一致**。这三处的差异不是一次找齐的，是逐轮「换一个入口实测」发现的 —— 所以「逐个入口实测」比「读代码找不一致」有效得多。
+- 核实（**比我预想的好，不是缺陷**）：`?platform=nosuch` 并不是静默返回空 —— 响应体里带 `platform: {known: false, message: "没有叫 nosuch 的平台（/api/platforms 可看全部 id）"}`。`platform_note()` 早就做了这件事。
+- 测试基线 **629**。
+## 2026-10-26 第六十三轮（账号体系 id/name 核实 + 标识符线收尾）
+- **账号体系核实（不是缺陷，别改）**：
+  · 账号操作（toggle/delete/rename/verify/balance）**只认精确 id**，大写与名字都回 404 —— 但账号 id **从不要求用户手写**（面板 UI 从 `/api/accounts` 拿到 id 再传），所以不需要容错。这与模型链 `combo:u-<hash>`（要写进客户端 model 字段）性质不同。
+  · `rename` 的边界都对：空名 → 400「name 不能为空（写清这个号是谁的 / 哪条线路）」；超长 → 400「名字太长（500 个字符，上限 60）」；**重名允许**（名字是备注不是唯一键，id 才是）。
+- **扫了一遍所有 `s.id == xxx` 精确匹配点**（`accounts.rs` 6 处 + `lib.rs` 10 余处），全部在 `/api/accounts`、`/api/auth`、面板内部路径上 —— **用户不手写这些 id，无需容错**。
+- ★★ **「标识符解析口径」这条工作线的结论**（第五十九～六十二轮，共修 4 处）：
+  · 只有**用户需要手写进配置文件**的标识符才要求容错/可读：模型名、`模型@平台` 后缀、`?platform=` 查询参数、模型链名；
+  · 面板内部传的 id（账号 / 密钥 / 自定义 API / 公益站）**不需要**，强行加容错反而增加误匹配风险。
+- 回归：**629 连跑两遍全绿**，零告警；体检保持 通 23 / 需凭据 64 / 连不上 16 / 失败 1 / 漂移 0。
+## 2026-10-26 第六十四轮（自定义 API 端到端验证：通过）
+- **参数校验全对**：空名 / 坏 URL（`ftp://`）/ 空 Key / 坏协议（`gemini`）都是 400 + 可执行文案。协议文案还特意补了「Responses 等其他协议请填各自的 OpenAI 兼容网关地址」。
+- **端到端链路通**：添加一条指向 `https://api.kilo.ai/api/gateway` 的自定义 API → **自动拉到 383 个模型** → 正确进 `/v1/models`（`owned_by: custom-<id>`）→ `/api/custom` 里能看到完整清单 → 调用时路由正确。
+- **错误归因准确**（这是最值得看的部分）：用一个假 Key 调用时，上游回 401「Your authentication token is invalid」→ 网关识别为**凭据失效**并建议「到接入源 → 我的Kilo 点重新登录/重新粘贴凭据」；再调一次时该平台唯一账号已被隔离 → **503「账号当前全部不可用（冷却中或凭据失效隔离）」**。两层的区分是对的（前者「这次凭据不对」，后者「这个平台已不可用」）。
+- 自定义 API 的 id 形态 `custom-{纳秒}-{自增序号}`，注释说明「纳秒时间戳在同一纳秒内批量新增会撞 id，加进程内自增序号兜底」—— 这个细节已经处理过了。
+- 测试基线 **629**（本轮无代码改动，纯验证）。
+- ★ 一个观察（不是缺陷）：`/models` 清单端点通常不校验 Key，所以填假 Key 也能拉到模型清单 —— 真正的鉴权在 chat 时发生。调试时别把「能拉到清单」当成「Key 有效」。
+## 2026-10-26 第六十五轮（限流参数改了不生效 —— 安全相关静默失效）
+- **★★ 修掉严重缺陷**：`/api/runtime` 改 `per_ip_rpm` / `global_rpm` / `key_rpm` 会回「已更新 N 项，**立即生效**」，但 `RateLimiter` 三个字段**只是构造时的普通 u32**，没有任何运行时 setter；`runtime_set` 里只同步了 `max_inflight`。
+  ⇒ 用户以为把每 IP 上限从 300 收到 10 就收紧了，**实际仍是 300**。这是安全相关的静默失效：改了不生效比没有这个开关更糟（人会有虚假安全感）。
+  **修法**：三个字段改 `AtomicU32`（加 `set_rates` / `key_rate_now`），`runtime_set` 里按**变更字段**同步（`set_rates` 同时重置窗口计数，否则收紧后第一批请求会被旧计数连带挡下）。
+- **★★ 修法第一版又引入了新缺陷（当场实测发现）**：一开始三档一起 `set_rates(st.cfg.*())`，而 livecfg 里「用户没设过」的字段是 **0**，0 在这里表示「关闭这一档」—— 结果只改 `per_ip_rpm` 与 `global_rpm` 时，`key_rpm` 从 120 被**悄悄清零**。已改成「只覆盖这次真正 changed 的那一档，其余读限流器当前值」。
+  **实测**：只改 `per_ip_rpm`（300→2）后 `global_rpm` 保持 1200、`key_rpm` 保持 120；连发 3 个请求 #1/#2 是 200、#3 是 429 + `Retry-After: 60`。
+- ★★ 教训：**加了「运行时配置」这种能力时，要逐项验证每个字段都真的接到了执行层**。这里 `max_inflight` 接了（有 `pool.set_max_inflight`），三个 rpm 没接 —— 而响应文案说的是「N 项全部立即生效」，对没接的那些是假的。
+- 测试基线 **629**。
+## 2026-10-26 第六十六轮（用户开了系统代理 → 海外源全面复检）
+- **★★ 修掉 `--doctor` 不走代理的缺陷**：`proxy::load/apply` 在 main.rs 的 **532 行**，而 `if cli.doctor { ...; return; }` 在 **470 行** —— **体检永远走直连**，海外源一律报 `[NET] 连不上`。而体检的首要用途正是「排查接入源是否失效」，海外源恰恰最需要它。已把代理加载提到 doctor 分支内（读配置是只读操作，不违反「不写数据」）。
+  **代理可用性**：Clash 在 `127.0.0.1:7890`（本机唯一开着的代理端口）；`CONNECT api.mistral.ai:443 → 200 Connection established` 已验证。
+- **★★ 代理后的真实收益（连不上 16 → 1）**：
+  · 通 23 → **29**；需凭据 64 → 72；连不上 16 → **1**（只剩 `free-berf`，已知它对 reqwest/curl 会 reset）；
+  · **新暴露 2 个真端点错误**（直连时被误判成「网络不通」）：
+    ① `api-gemini`：`/v1beta/openai/models` 实测 **404**，而原生 `/v1beta/models` 是 403（需 Key = 存在）。已把 `base_url` 收成域名根 + `chat_path=/v1beta/openai/chat/completions` + `models_path=/v1beta/models`（`format!("{base}{path}")` 是直接拼接，没法在 base_url 带前缀）。
+    ② `api-mistral-codestral`：`/v1/models` 实测 404（`no Route matched`），`/v1/chat/completions` 是 401（存在）→ 改 `models_policy = "none"`。
+  · **新暴露 3 个静态表漂移**（huggingface / poe / zenmux），已按上游实测重写，**漂移 0**。
+- **修掉清单解析的格式缺口**：只认 OpenAI 的 `{"data":[{"id":...}]}`，不认 Google 原生的 `{"models":[{"name":"models/gemini-..."}]}`。已加 `models[]` 分支（并剥 `models/` 前缀）。这直接决定了 Gemini 这类源能否拿到清单。
+- **体检终态**：**通 29 / 需凭据 72 / 连不上 1 / 被限流 0 / 失败 1 / 漂移 0**。失败仅 `api-qwencloud-coding`（405 准入限制，chat 端点实测正常，别改）；连不上仅 `free-berf`。
+- 测试基线 **629**。
+- ★ 手工经代理探测的可靠做法：`net.connect(7890)` → 写 `CONNECT host:443` → 收到 200 后用 `tls.connect({socket})` → 发 HTTP/1.1。**注意 zenmux 响应用 chunked 编码**，要解 `size\r\ndata\r\n`，否则 JSON.parse 失败（表头是 `1f981\r\n`）。
+## 2026-10-26 第六十七轮（7 家未接入平台的成本评估 + bypass_cn 域名核实）
+- **★ 7 家平台全部需要 adapter，不是「加个 toml」**（逐个读了参考项目的模块头）：
+  · `monkeycode`：**建任务 + WebSocket 读 ACP 事件**（`is_stateful`）；
+  · `orcaterm`：会话式，建会话 + SSE 两步；
+  · `commandcode`：响应是 **NDJSON** 不是 SSE，且要**伪装官方 CLI**（`User-Agent: cli` + `x-command-code-version` + 指纹上报，上游按风控判定）；
+  · `catpaw`：会话式 + 18 个模块（tools/turn_executor/fingerprint/image_compress）；
+  · `autoclaw`：DPAPI 解密本机 auth.json + `X-Auth-Sign` 签名 + OAuth；
+  · `officeace`：自带 `signer.rs` + `signer_vectors.json`（签名协议）；
+  · `accio`：阿里 ADK 网关（`phoenix-gw.alibaba.com/api/adk/llm`）。
+  ⇒ 结论：**不适合在持续优化轮次里做半成品**（半成品让用户看到「有这个平台但不能用」，比没有更糟）。要做应作为独立任务排期。
+- **平台覆盖对比**：参考项目 19 个目录（其中 `catalog`/`custom`/`workbuddy` 是内部模块非平台），我方 **143 份 spec** —— 覆盖面上远超，差异只在这 7 家特殊协议平台。
+- **核实（结论：不改）**：`bypass_cn` 的 `CN_DOMAINS` 有 64 条，我方 42 个大陆源域名里有 8 个不在列表内（`ark.ap-southeast.bytepluses.com` / `maas-api.lanyun.net` / `api.ppinfra.com` / `api.qnaigc.com` / `www.sophnet.com` / `tokenhub.tencentmaas.com` / `xiaohuanxiong.com` / `trae-api-cn.mchost.guru`）。**实测这 8 个经代理访问状态码与直连完全相同**（401/404/200 一一对应）—— 用户的代理是规则模式，国内域名本来就走直连。**不加进列表**：加了反而绕过用户自己的代理策略。
+- 顺带统计：73 个 `[KEY]` 源里 **66 个返回标准 JSON**，7 个非 JSON 的都是上游明文 401 表述（`Authentication Fails` / `No Authorization header provided` / JWT missing 等），**没有新的端点错误**。
+- 测试基线 **629**（本轮无代码改动）。
+## 2026-10-26 第六十八轮（接入 Command Code —— 第 8 家 adapter）
+- **★★ 新增 `commandcode` adapter**（`aigw-relay/src/commandcode.rs`，500 行 + 8 条测试），接入 `api.commandcode.ai`。它的三个根本差别：
+  ① **路径不是 /chat/completions**，是 AI SDK 风格的 `POST /alpha/generate`；
+  ② **请求体是 `{config, params:{...}}` 信封**，system 要**提到顶层并从 messages 里移除**（留在 messages 里会变成未知角色消息）；`stream` 恒为 true（上游只支持流式，非流式由我们缓冲聚合）；
+  ③ **响应是 `application/x-ndjson`**：一行一个 JSON、**没有 `data:` 前缀**、且 **HTTP 恒 200** —— 认证失败/限流/余额不足全以流内 `{"type":"error"}` 表达。**「看状态码判断成败」在这里完全失效**，必须解析事件流。
+- **事件词表**（对齐参考的 protocol/commandcode_outbound.rs）：`text-delta`→content、`reasoning-delta`→reasoning_content、`tool-call`→tool_calls（**整体事件**，id/name/args 一次给全，与 Anthropic 的分片不同）、`finish-step`→只记 usage、`finish`→终态、`error`→错误帧，其余（start/text-start/reasoning-end 等）忽略。
+- **CLI 伪装头**：`User-Agent: cli` / `x-command-code-version: 1.53.1` / `x-cli-environment: production`。★ 实测**无 Key 时带不带都回同样的 401**，所以它不是鉴权条件；但「同一账号的两种请求来自两种 UA」是可观测破绽，因此照样逐字对齐。
+- **模型目录 `/provider/v1/models` 是公开可读的**（200，94 个模型，标准 OpenAI `{object:list,data:[...]}` 格式）—— 所以体检直接报 `[OK]` 而不是 `[KEY]`。静态表选的 10 个模型**全部命中上游**。
+- 接线四处：`has_adapter` / 非流式分派 / 流式分派 / `KNOWN_UPSTREAM_KINDS`（registry）。错误分类：401·403→Auth、402·429→Quota（402 按 429 处理，对齐参考「付费失败按限流」）、400·422→Rejected、其余→Transient。
+- **体检达到历史最佳**：**通 30 / 需凭据 72 / 连不上 1 / 被限流 0 / 失败 1 / 漂移 0**（104 个 live 源）。
+- 测试基线 **637**（relay 173→181）。
+- ★ 踩到的两个依赖问题：`common` 里的截断函数叫 **`truncate`** 不是 `trunc`；`StreamStat` 的字段是 **`tokens_in`/`tokens_out`** 不是 `prompt_tokens`/`completion_tokens`。本 crate **没有 `async_stream`**，流式要用 `tokio_stream::wrappers::ReceiverStream` + `tokio::spawn`（与 devin/kuku 一致）。
+## 2026-10-26 第六十九轮（接入 OrcaTerm —— 第 9 家 adapter）
+- **新增 `orcaterm` adapter**（`aigw-relay/src/orcaterm.rs`，488 行 + 8 条测试），接入腾讯云遨驰终端 `lightai.cloud.tencent.com`。它是**两步上游**：
+  ① `POST /assistant/conversation` 建会话（`{"id":"cid-<uuid>-orcaterm","title","ts","tags":["orcaterm"]}` → `{"code":0,...}`）；
+  ② `POST /assistant/chat?name=orcaterm&mode=0&csrfCode=&sseresume=true`（body 带 `user.setting.model` 与 `input:{type:"start",input,...}`）→ `text/event-stream`。
+  ★ 按**请求内会话**处理（每请求新建、历史拍平进输入）—— 无注册表、无跨请求状态、重启即忘。
+- **★★ SSE 最大的坑：错误帧不是 JSON**。上游写的是 `data: [ERROR]: [LLM_ERROR]: xxx`，按 JSON 解析会得到「空事件」，于是**失败被当成「上游什么都没说」，用户只看到空回复、没有任何错误提示**。必须先按前缀识别。业务码非 0（HTTP 恒 200 时错误藏在 `code` 里）同理。
+- 其他事件要点：`reasoning: true` 标记思考增量且**先于正文**流入 → 放 `delta.reasoning_content`；结束帧是 `data: [DONE]`。
+- 请求头：`Authorization: Bearer` + `X-Product: orcaterm` + `x-seqid` + 浏览器 UA + `Origin`/`Referer`（上游按来源判定）。
+- spec 用 `models_policy = "none"`：**上游没有模型清单接口**（列表来自桌面客户端内置），模型以 `TokenHub/xxx@apk-orcaterm` 后缀指定。所以它不出现在 `--doctor` 的探测列表里（none 策略不探测），这是预期的。
+- 面板验证：`apk-orcaterm` 已加载（enabled=true、0 个模型）；`api-commandcode` 10 个模型；**共 20 个 adapter 源**。
+- 测试基线 **645**（relay 181→189）。
+- ★ 踩到的两个 spec 坑：**TOML 字符串里的 `\com` 是非法转义**（Windows 路径要用正斜杠或转义反斜杠）；**`auth = "bearer"` 不存在** —— 合法值只有 `anon|api_key|o_auth_device|qr_scan|sms_code|cookie|client_file`，JWT 要用 `api_key`（relay 的 `apply_headers` 会自动补 `Bearer` 头）。
+## 2026-10-26 第七十轮（凭据形态本地校验 + monkeycode 接入清单）
+- **给 `commandcode` 加了凭据形态的本地校验**（`key_shape_ok` / `mask_key`）：
+  · 规则：`user_` 开头 + 其后至少一个合法字符 + 整串只在 `[A-Za-z0-9_-]` 内；
+  · ★ 为什么要在**发请求前**拒：不校验的代价是发出去只换回一条语焉不详的 401，用户会以为是「登录态失效」去反复重登，而真正该做的是**换一把正确的 Key**；
+  · 错误文案用脱敏形态（只露 `user_…` + 尾 4 位），别把 Key 打进日志。
+- **核实 monkeycode 上游可用**：国内 `monkeycode-ai.com` 与国际 `monkeycode-ai.net` 的 `/api/v1/users/status` 与 `/api/v1/users/models` **都返回 401**（端点活着、需要 `Cookie: monkeycode_ai_session=…`）。
+- **★ monkeycode 接入清单（下轮照此实现，别重新逆向）**：
+  · 站点：国内 `.com` / 国际 `.net`（两个 provider，与 AutoClaw/Qoder/ZCode 同款建模）；
+  · 认证：`Cookie: monkeycode_ai_session=<session>` + `GET /api/v1/users/status` 校验；**粘贴式登录**（密码要 go-cap 验证码、OAuth 要 SCaptcha+短信，都不适合网关代跑）；
+  · 目录：`GET /api/v1/users/models` → `{"code":0,"data":{"models":[{id(UUID), provider, model, display_name, interface_type, context_limit, output_limit, is_free}]}}`；下游模型 id 用 **`{provider}/{model}`**；
+  · 建任务：`POST /api/v1/users/tasks`（带 `model_id`=UUID、`image_id`、`cli_name`）；
+  · 任务流：**WS** `wss://<站点>/api/v1/users/tasks/stream?id=<taskId>&mode=new`；连上后**客户端必须先发** auto-approve + user-input，上游才开始跑；
+  · 下行帧：`{type,kind?,data?,timestamp?}`；`ping`（要回 `{"type":"ping"}`）/ `task-started` / `task-running`+`kind=acp_event|acp_ask_user_question` / `task-ended`（终态）/ `task-error`（终态）；
+  · ACP 事件映射：`agent_message_chunk`→content、`agent_thought_chunk`→reasoning_content、`tool_call`/`tool_call_update`→tool_calls、`usage_update`→累计 usage（非零才覆盖）、`plan`/`available_commands_update`→忽略；
+  · **工作量估计 1000+ 行**（WS 驱动 ~390 行 + ACP 翻译 ~640 行 + 建任务/凭据/目录），应单独排一轮做完，不要半成品。
+- 测试基线 **647**（relay 191）。
+## 2026-10-26 第七十一轮（接入 MonkeyCode —— 第 10 家 adapter，首个 WS 上游）
+- **新增 `monkeycode` adapter**（`aigw-relay/src/monkeycode.rs`，约 800 行 + 15 条测试），接入长亭科技 MonkeyCode 的**国内站与国际站**两个 provider（`web-monkeycode` / `web-monkeycode-intl`）。这是**第一个 WebSocket 上游**。
+- **链路**：`GET /api/v1/users/models` 取目录（拿 UUID + interface_type）→ `POST /api/v1/users/tasks` 建任务 → **WS** `/api/v1/users/tasks/stream?id=&mode=new` → 消费 ACP 事件。
+- **★★ 四个终态出口都必须显式收尾**（task-ended / task-error / 连接断 / 空闲超时）：参考实现在这几处是「静默 resolve、靠客户端等 EOF」，而**客户端的 SSE 解析器等的是 `[DONE]`** —— 只断连接会被渲染成「回答被截断」。本实现四个出口都给 finish 帧或错误帧 + `[DONE]`。
+- **★★ 自动批准是这家能不能用的开关**：连上 WS 后**必须先发** `{"type":"auto-approve"}` 再发 `user-input`；不发的话任务会停在第一个工具调用等用户确认，**永远不动**。Agent 提问（`kind=acp_ask_user_question`）要自动回 `reply-question`。心跳 `ping` 要回 `{"type":"ping"}`。
+- **ACP 事件的 data 是 JSON 字符串**（不是对象）→ 要**二次解析**；忘了就什么都收不到。映射：`agent_message_chunk`→content、`agent_thought_chunk`→reasoning_content、`tool_call`→tool_calls、`tool_call_update`→参数增量、`usage_update`→累计（非零才覆盖）、`plan`→忽略。
+- **输入侧**：`user-input` 的 content 是 **base64 编码**的 prompt；第一条非空 system 抽出来走 `system_prompt`，其余按 `[User]`/`[Assistant]` 加前缀；**客户端 tools 不透传**（上游 Agent 在 VM 内自带工具循环）。
+- spec 用 `auth = "cookie"`（session 粘贴式：密码要 go-cap 验证码、OAuth 要 SCaptcha+短信，都不适合网关代跑）；下游模型 id 用 `{provider}/{model}` 形态。
+- 真机验证：两个 spec 都正确加载、上游 401（端点活着需 Cookie），归入「需凭据」。
+- **体检**：通 30 / 需凭据 73 / 连不上 2 / 失败 1 / 漂移 0（106 个 live 源）。
+- 测试基线 **662**（relay 191→206）。
+## 2026-10-26 第七十二轮（OfficeAce 华为云签名器 —— 用测试向量逐字节验证）
+- **新增 `officeace_sign.rs`**：实现华为云 **SDK-HMAC-SHA256** 与 **V11-HMAC-SHA256** 两套签名，**6 个参考向量全部通过**（canonical_request / string_to_sign / signature / authorization **四层逐字节对齐**）。
+- **★★ 这是本项目第一次有「客观可验证」的协议实现**：`signer_vectors.json`（由参考项目的真实 signV4/signV11 产出）给了每层的中间值，所以算错了能立刻知道错在哪一层。三轮迭代就全靠它定位：
+  ① 第一遍：V11 的 `string_to_sign` 少了一行 `scope`（`<YYYYMMDD>/<region>/apic`）—— SDK 是 3 行、V11 是 4 行；
+  ② 第二遍：`signature` 不对 —— V11 派生链的 **key/message 是反的**：`step1 = HMAC(key=accessKey, msg=secretKey)`；
+  ③ 第三遍：`canonical_request` 少了 `content-type` —— **有 content-type 时必须参与签名**（POST JSON 的用例）；
+  ④ 还有一处反直觉：V11 的 signingKey 是 `derived[..32]` 的**小写十六进制字符串**（不是那 32 个字节）。
+- V11 完整派生链：`step1 = HMAC(AK, SK)` → `derived = HMAC(step1, scope ++ 0x01)[..32]` → `signingKey = derived 的 hex 串` → `sig = HMAC(signingKey_hex, stringToSign)`。Authorization 形状也不同：V11 用 `Credential=<AK>/<scope>`，SDK 用 `Access=<AK>`。
+- 三处与 codearts 的口径差异（所以不能复用）：① 未保留集更严（`! ' ( ) *` **也要转义**）；② 查询串按 WHATWG（键值先解码再编码、`+`→空格、按 (键,值) 排序）；③ V11 派生用 hex 串当 key。
+- HMAC 是**手写**的（sha2 之上，RFC 2104），没有为本模块新增 `hmac` 依赖。
+- 测试向量文件复制到了 `aigw2/crates/aigw-relay/src/officeace_vectors.json`（`include_str!` 内联，测试自包含）。
+- 测试基线 **666**（relay 210）。
+- ★ 剩余工作：officeace 的 **chat 转发链路**还没接（签名器已就绪；还需 `/v1/chat` 端点格式、`projectId`/`securityToken` 的获取方式）。
+## 2026-10-26 第七十三轮（OfficeAce 完整接入 —— 第 11 家 adapter）
+- **★ 核实后大幅简化**：OfficeAce 的 **chat 是标准 OpenAI 协议**（`{base}/v2/chat/completions`），**不需要签名器** —— 那 643 行的华为云签名只用于订阅/余额那些 CGI 接口。所以接入只花了三个小改动而不是一个大 adapter。
+- **三处改动**：
+  ① `signer = "officeace"` 注入 **`Authorization: Basic base64(key:secret)`**（新增 signer 合法值）。凭据约定为 `key:secret`；只给一个 key 时补空 secret。★ 用 Bearer 上游只回 401，而文案不会告诉你「认证方式用错了」，排查成本很高；
+  ② **非流式要自己转流式再聚合**（上游恒流式）：新增 `officeace_nonstream`，与 `wb_nonstream` 同构；
+  ③ **`max_tokens` 追加推理预算**：上游把它当「推理 + 正文」的**总预算**，给小了会 **HTTP 200 但正文空串**（finish_reason=length，推理 token 吃光预算）。做法是**追加** 1024 而不是取 max（max 会改掉「只想要 1 个 token」的意图），`max_tokens < 16` 原样透传。
+- spec 用**占位符** `base_url = "@officeace_base_url"`：每家部署的网关域名不同（`modelgw-xxxx.<region>.huaweicloud-agentarts.com`），必须用户自己填；未配置时启动日志会警告、请求时报错点名要配什么。
+- 真机验证：平台已加载（enabled=true），启动日志正确提示「2 个平台 base_url 仍未配置占位符」（cloudflare + officeace）。
+- 测试基线 **666**（本轮无新增用例，改的是转发路径）。
+- **进度**：已完成 4 家（commandcode / orcaterm / monkeycode / officeace），剩 3 家（autoclaw 需 DPAPI+签名、catpaw 需 18 模块、accio 需 ADK 信封转换）。
+## 2026-10-26 第七十四轮（接入 Accio —— 第 12 家 adapter）
+- **新增 `accio` adapter**（`aigw-relay/src/accio.rs`，431 行 + 8 条测试），接入阿里 Phoenix 网关（Accio Work 桌面端）。
+- **三处与 OpenAI 不同（都在 adapter 里处理）**：
+  ① **token 不在 Authorization 头，而在请求体**的 `token` 字段；
+  ② **思考是 part 上的标记**（`{"thought":true,"text":…}`），不是独立字段 → 翻成 `reasoning_content`；
+  ③ **业务错误写在帧里**（`error_code` / `error_message`），**HTTP 常是 200** —— 只看状态码会把失败当成成功。
+- 端点：`POST {base}/generateContent?sg_k=<md5(request_id)>`；请求体 `{model, tenant:"accio-agent", iai_tag:"phoenix-desktop", request_id, token, contents:[{role, parts:[{text}]}]}`。
+- **角色映射**：ADK 只有 `user` / `model` 两种 —— assistant → `model`，**system 折进 user**（Gemini 系没有 system 角色）。
+- `finish_reason` 映射：`MAX_TOKENS` → `length`（客户端据此判断被截断）。
+- 测试里用 `md5("abc") = 900150983cd24fb0d6963f7d28e17f72` 锁住 `sg_k` 的正确性。
+- 真机验证：平台已加载（enabled=true, region=intl）。
+- 测试基线 **674**（relay 210→218）。
+- **进度：5/7 完成** —— commandcode / orcaterm / monkeycode / officeace / accio。剩 `autoclaw`（需 DPAPI 解密 + X-Auth-Sign 签名）与 `catpaw`（18 个模块，含指纹/工具循环/图片压缩）。
+## 2026-10-26 第七十五轮（接入 AutoClaw —— 第 13 家 adapter）
+- **新增 `autoclaw` adapter**（`aigw-relay/src/autoclaw.rs`，约 340 行 + 7 条测试），接入智谱 autoglm 的国内版与国际版两个 provider。
+- **★ 核实后修正了我自己的错误记忆**：之前记的「需要 X-Auth-Sign 签名」是错的 —— AutoClaw 的 chat 是**标准 OpenAI 协议**（`POST {base}/chat/completions`）。真正的坑是三处：
+  ① **认证头是 `X-Authorization` 而不是 `Authorization`**（源实现为准；发错会稳定 401，而文案不会告诉你头名写错了）；
+  ② **system 提示要过白名单闸**（上游 2026-09-22 起，实测结论：必须以身份句开头+带 `## Tooling` 段，且**不能**出现 `You are ZCode…` / `You are Claude Code…` 这类**字面**身份句。没有 system 或只有中性句 → **406 空响应体**）；
+  ③ **`max_tokens` 的小正整数（30~8192）一律 406**（不传或 ≥10000 则 200）→ 出站前归一成 10000。
+- 实现要点：`normalize_system()` 前置官方身份句（**照抄客户端运行时**而不是自己编）+ 改写外来身份句（**把产品名整个去掉**，插词不够；匹配忽略大小写；**长的规则在前**，否则短串会把长匹配切碎）；`normalize_request()` 负责补 system 与归一 max_tokens；**幂等**（已带身份句时只改写不再前置，否则降级/重试路径会把提示词写两遍）。
+- 406 的错误文案补了三个可执行的排查方向（max_tokens / system 指纹 / 请求形态风控）—— 上游连错误体都不给，不补的话用户完全不知道该改什么。
+- 真机验证：两个 spec 都正确加载（cn / intl）。
+- 测试基线 **681**（relay 218→225）。
+- **进度：6/7 完成** —— 只剩 `catpaw`（18 个模块：指纹 / 工具循环 / 图片压缩 / 决策 / 轮次执行器，公认最重的一家）。
+- ★ 累计新增 adapter 6 家：commandcode / orcaterm / monkeycode / officeace / accio / autoclaw。
+## 2026-10-26 第七十六轮（catpaw 决策 + 新增平台回归验证）
+- **★★ catpaw 明确「暂不接入」**（不是遗漏，是评估后的决定）：
+  · 规模：**8124 行 / 20 个文件**（turn_executor 713、registry 698、messages 682、conversation 602…），是我已做的 monkeycode（约 800 行）的 **10 倍**；
+  · 协议：**conversation 会话协议**（`round(提交) → event(running) → turn(SSE) → 工具循环 → event(completed)`，每轮结束**必须回报**否则下一轮被拒），还要维护「x-session-id → conversationId」映射与**消息指纹链**（增量提交）；
+  · 验证可行性：需要美团登录 Cookie，本机没有账号，做完也无法端到端验证；
+  · ⇒ 半成品（如只做请求构造不做工具循环）会让用户遇到「有时能用有时不能」，**比不接入更糟**。
+- **回归验证通过**：新增 8 个 spec 后 —— `/v1/models` 35 个模型正常、**真实对话 200**、`/v1/messages` 与 `/v1/responses` 都 200。没有破坏任何既有功能。
+- **最终状态**：测试 **681 全绿**；spec **151** 份（原 143，+8）；体检 **通 30 / 需凭据 74 / 连不上 1 / 失败 1 / 漂移 0**。
+- **★ 平台接入工作到此收尾**：参考项目的 19 个目录里有 12 个是真平台，我方接入/覆盖情况 ——
+  · 原有 143 份 spec 已覆盖绝大多数；
+  · 本轮新增 **6 家 adapter**：commandcode / orcaterm / monkeycode / officeace / accio / autoclaw（后两家各两个地区共 8 个 spec）；
+  · 唯一未接入：**catpaw**（理由见上）。
+- ★ 注：仓库根的 `README.md` 是**旧版 Python 项目**的说明（提到 main.py / Python 3.8+），不是 Rust 版 aigw2 的文档，别改它。
+## 2026-10-26 第七十七轮（新增 adapter 的上游实测：两个真问题）
+- **★ 发现 `models_policy = "none"` 的源从不被体检** —— `orcaterm` / `officeace` / `accio` / `autoclaw` 四家的上游**从未被验证过**（只验证过 spec 能加载）。这四家如果端点写错，用户配好凭据才会发现。
+- **手工探测结果（两个真问题）**：
+  ① **`orcaterm` 缺必需凭据**：只带 Bearer 打 `/assistant/conversation` 得到 `{"code":500,"message":"NEED_UIN_AND_SKEY"}` —— 该网关除 Bearer 外还要 **UIN 与 SKEY**。我的 adapter 只发 Bearer，**这个平台实际会失败**。已在 notes 里如实说明（凭据要 `token|uin|skey` 形式，尚未实现）。
+  ② **`accio` 被阿里云风控拦**：`/api/adk/llm/generateContent` 在无凭据时返回的是**阿里云风控拦截页**（`bixi-intl.alicdn.com/punish/…`，HTML 1819 字节），不是 401 —— 该端点有额外的**客户端指纹风控**。同一时刻业务接口 `/api/llm/config` 正常回 `403 auth failed`。已在 notes 里说明「配好 token 后仍拿到 HTML 就是被风控拦了，不是网关 bug」。
+  ③ `autoclaw` 两国都正常回 401 `Invalid token`（端点活着）。
+- **★★ TOML 三引号陷阱（已踩两次）**：`notes = """…"""` 里出现反引号与括号/引号的组合时，TOML 解析器会报 `invalid multiline basic string` 或 `expected newline`。**两个 spec 都改成「单行 + 显式 \\n」写法**。规律：长说明文本用单行拼接最稳。
+- 测试基线 **681**（本轮只改 spec 文本）。
+- ★ 待办（真实缺口）：`orcaterm` 的 UIN+SKEY 支持。参考项目的 `OrcatermCredentials` 就有这两个字段，我方 adapter 只用了 access_token。要做的话：凭据改成 `token|uin|skey` 三段解析，并在建会话/对话请求里带上对应字段。
+## 2026-10-26 第七十八轮（修正误判 + none 源纳入体检）
+- **★★ 修正上一轮的错误结论（重要）**：我上轮说 `orcaterm` 缺 UIN+SKEY，**错了**。真相是用**空 body + 无请求头**探测才会得到 `NEED_UIN_AND_SKEY`；带上完整的客户端头（X-Product / x-seqid / Origin / Referer / UA）与真实建会话 body 后，上游回 `code=10050000 Invalid or expired AccessToken` —— 这是**正常的鉴权失败**，说明端点完全可用、我的实现是正确的。
+  ★ 教训：**探测一个需要特定请求形态的端点时，用空 body/无头去探会得到误导性错误**。要把「探测方法本身是否合规」也当成变量。
+- **★ 确认 `accio` 被强制人机校验拦**（这条是真的）：`/api/adk/llm/generateContent` 返回阿里云**滑块验证页**（响应体含 `rgv587_flag: sm` 与 `bixi-intl.alicdn.com/punish` 链接），试过两组不同请求头（含/不含 Origin、Referer）结果相同 ⇒ 该端点对非官方客户端有强制校验，纯 HTTP 网关形态无法通过（与「不做浏览器/扫码」的铁律冲突）。**已标 `enabled = false`** 并写明原因，保留 adapter 以便官方放开后重启。
+- **★★ 根本改进：`none` 策略源纳入体检**。之前 `orcaterm / officeace / accio / autoclaw` 四家**从未被探测过**（体检只覆盖 live 源与声明了 models_path 的 static 源），端点是死是活只能等用户配好凭据才发现。
+  · 筛选条件加：`ModelsPolicy::None && !chat_path.is_empty()`；
+  · 探测方式改为**根路径 GET**（新增 `OutClient::probe_reachable`）：拿到任何 HTTP 状态即算可达 —— 拿 `/models` 去探必然 404，那是探错了地方；
+  · 输出文案区分：`端点可达（根路径 HTTP 200/404；该源无清单端点，模型靠静态表/后缀路由）`，不再误报「清单 1 条」。
+  · 给 `orcaterm`（`/assistant/chat`）与两个 `autoclaw`（`/chat/completions`）补了 `chat_path`，否则它们仍被筛掉。
+- **体检效果**：源数 106 → **109**，通 31 → **34**。`apk-orcaterm` / `apk-autoclaw` / `apk-autoclaw-intl` 现在都显示 `[OK] 端点可达`。
+- 测试基线 **681**。
+## 2026-10-26 第七十九轮（体检全覆盖：源数 109 → 141）
+- **★★ 根因发现**：体检只覆盖 live 源与「static + 声明了 models_path」的源，于是**31 个源从来没人探过**（大量逆向协议源 + 4 家自定义 adapter）。端点是死是活只能等用户配好凭据才发现。
+- **改法**：所有启用源都参与，探测分两档 ——
+  · 有清单端点的（live / static+models_path）→ 拉清单 + 核对静态表；
+  · **没有清单端点的（其余全部）→ 探根路径判可达**（`probe_reachable`），拿到任何 HTTP 状态即算活着。
+  ★ 关键判据函数：`has_models_endpoint = Live || (Static && !models_path.is_empty())`，不再按 `models_policy == None` 分（那样漏掉了大量 static 无 models_path 的源）。
+- **★★ 改进当场引入误报，也当场修正**：根路径探测返回的是 `http-<状态码>` 假条目，拿它去比静态表，**28 个源全部误判为「静态表漂移」**（`api-perplexity` 5 个模型「全下架」、`apk-qoder` 的 `Auto`/`Ultimate` 别名也「下架」——一看就知道不对）。加一条 `probed_root` 判据把它排除后，**漂移回到 0**。
+  ★ 教训：**给「探测结果」和「真实清单」用同一个变量传递时，必须标记来源**，否则下游的比对逻辑会把占位值当成数据。
+- **最终体检口径**：**141 个源**（之前 109），**通 65 / 需凭据 74 / 连不上 1 / 被限流 0 / 失败 1 / 漂移 0**。通的从 30 涨到 65，是因为大量逆向源的根路径本来就可达（之前根本没探）。
+- 测试基线 **681**。
+## 2026-10-26 第八十轮（端到端验证：真实对话而不是只看可达性）
+- **方法论进步**：根路径探测只能判「域名还在」，判不了「对话接口还能不能用」。本轮改为**按平台抽样发真实 chat 请求**（每平台 1 个模型，`max_tokens=20`），这才是「接口是否失效」的直接证据。
+- **验证结果**（141 个源里 37 个根路径可达，实际可路由的是 4 个平台 35 个模型）：
+  · `kilo`：**✓ 真可用** —— 抽 3 个模型（cohere/north-mini-code:free、dots-studio/dots-3-note-preview:free、kilo-auto/free）全部 200，801ms；
+  · `pollinations`：**✓ 真可用** —— 200，3333ms，内容正确；
+  · `anon-zen` / `apk-metaso`：**429 上游限流**，不是接口失效。连发 3 次都 429，号池正确记为 `anon-zen:anon left_s=41 strikes=1`。
+- ★ **`finish_reason: length` 在 `max_tokens=20` 下是**正常**的**（推理模型的思考就吃光了预算），别把它当成「响应被截断」的缺陷。要验内容就得给足 max_tokens。
+- ★ **启动后要等 ~12 秒再查 `/v1/models`**：live 清单是异步拉的，等 8 秒时可能只有 0 个模型（我第一次就踩了这个，误判成「模型数为 0」）。
+- 结论：**免密可用平台只有 kilo 与 pollinations 两个**（其余 33 个可路由平台需要凭据）。这是当前无凭据环境的真实上限，不是缺陷。
+- 测试基线 **681**（本轮无代码改动）。
+## 2026-10-26 第八十一轮（apk-loomy 无录入路径 —— 违反铁律）
+- **★★ 修掉一个违反铁律的缺陷**：`apk-loomy` 声明的 `login_methods = ["sms","pwd","qr"]` —— **没有 `paste`**。项目铁律是「不做扫码/浏览器自动化」，所以这个平台**用户根本无法把凭据录进来**（看得见、点了用不了）。
+  · 而它的凭据本质就是**一个 token 字符串**（`signer = "loomy"` 会把 secret 双写成 Bearer + token 头），完全可以粘贴 —— 漏写 `paste` 等于把一个可用平台废掉了；
+  · 修法：`login_methods = ["paste","sms","pwd","qr"]`，并在 notes 里说明「浏览器登录后从会话/请求头取 token 粘贴即可」。
+- **★ 加了回归测试 `every_platform_has_a_non_browser_login_path`**：遍历所有启用 spec，要求每个平台至少有一条 `paste` / `device`（不依赖浏览器）的录入路径。验证过它**真能抓到**：把 loomy 改回原样立刻变红，并精确报出 `apk-loomy（login_methods=["sms","pwd","qr"]）`。
+- **顺带核实的分布**（187 个可粘贴 / 3 个 qr+paste / 1 个 sms+pwd+qr / 3 个 device / 3 个匿名）：**修复后没有任何平台只能扫码**，铁律合规。
+- 测试基线 **682**（registry 13→14）。
+- ★ 一条判据：**「平台接得进来」与「平台能调通」是两件事**。一个平台只要没有 paste/device 路径，即使 adapter 写得再对，用户也用不上 —— 所以这类检查应该比「端点是否可达」更早做。
+## 2026-10-26 第八十二轮（auth 语义修正 + 删掉一个无效测试）
+- **修 `apk-loomy` 的 `auth` 语义**：原写 `auth = "sms_code"`，但它实际用的是**可粘贴的 Bearer token**（`signer = "loomy"` 把 secret 双写成 Bearer + token 头）。已改 `auth = "api_key"`。
+  ★ 关键区分：**`auth` 是凭据「形态」（决定出站带 Cookie 还是 Bearer），`login_methods` 是凭据「获取方式」（扫码/短信/粘贴/设备码）—— 两个维度别混**。loomy 的形态是 Bearer（api_key），获取方式可以是粘贴/短信/扫码（login_methods）。写错形态会让前端走错表单。
+- **★ 删掉了一个「测不出问题」的测试**：我加了个 `auth_kind_matches_login_methods`（要求 `auth=qr_scan` 必须有 qr 方法、`auth=sms_code` 必须有 sms），**验证时发现它抓不到缺陷** —— 因为 `login_methods()` 对 `AuthKind::SmsCode` 会**自动返回 `["sms"]`**（兜底默认值），于是永远自洽。把 loomy 改回 `sms_code` 测试仍绿。
+  ★★ 教训：**「测试写完要验证它真能红」这条纪律必须每次都执行**。这次如果跳过验证，就会留下一个永远通过、看着很安心的假测试。已删除，不留虚假安全感。
+- 核实过**不是问题**：`apk-raccoon` 的 `auth = qr_scan` + `login_methods = ["qr","paste"]` 是**合理设计**（扫码为主路径、粘贴为兜底），不改。
+- 测试基线 **682**（registry 14）。
+## 2026-10-26 第八十三轮（业务码 200 但失败 → 误报「清单 0 条」）
+- **★★ 修掉一类隐蔽缺陷**：有一类上游**HTTP 恒 200，成败写在 body 的业务码里**（实测 loomy：`{"code":"100002","desc":"缺少 token","data":{}}`）。原来的清单解析只找 `data[]`，拿到空对象就当「清单是空的」，于是体检报告显示 `清单 0 条` —— **看着像这个源没有模型，实际是没凭据**。用户据此会以为平台废弃了。
+  **修法**：解析前先看业务码（`code` 既可能是字符串 `"100002"` 也可能是数字），非 `0`/`200` 就返回 `401 + "业务码 100002：缺少 token"`。现在报告是 `[KEY] apk-loomy HTTP 401（端点活着，本机无凭据）/ 业务码 100002：缺少 token`。
+- **★ 本轮还做了系统性的 spec 自洽检查**（6 个维度：adapter 源占位符 / static 空表 / cookie 非法 base / signer 与 kind 冲突 / region 非法 / anon 却声明 login_methods）—— **151 份 spec 全部通过**。
+- **核实**：21 种 `upstream_kind` 与 relay 里的 21 个实现文件**一一对应**（没有「声明了 adapter 但没实现」或反之）。
+- 体检口径：**141 个源 → 通 64 / 需凭据 75 / 连不上 1 / 被限流 0 / 失败 1 / 漂移 0**（loomy 从「通」正确归入「需凭据」）。
+- 测试基线 **682**。
+- ★ 判据：**「HTTP 200」不等于成功**。凡是有 `code`/`success`/`errno` 这类业务码的上游，解析前必须先判它 —— 否则失败会被当成「数据是空的」，而「空数据」和「没有权限」在界面上看起来一样。
+## 2026-10-26 第八十四轮（复用 refine_biz，别自己再写一套）
+- **★ 上一轮的修复改进为复用既有机制**：`aigw-core` 里早就有 `ErrorClass::refine_biz(biz_code, biz_msg)`，专门处理「HTTP 200 + 业务码假成功」，还带测试（`refine_biz_does_not_turn_rate_limits_into_auth` / `refine_biz_auth_fingerprints`）。
+  · 它的判据比我自己写的细致：**先排除限流/额度语义**（`token limit` / `tokens per minute` 是正常限流，误判成 Auth 会让账号进 30 分钟凭据隔离，面板上表现为「刚登录的号突然失效」）、用**精确文案**而非裸 `token` 子串、按业务码指纹（100002/100003/40001）；
+  · 但它**只在主转发路径（lib.rs:2141）被调用**，清单拉取路径没想到用它 —— 所以上一轮我在清单解析里自己写了一套（能跑，但重复且不如它细）。现已改成 `ErrorClass::Transient.refine_biz(&code, &desc)`，归不到 Auth 的用 502 而不是硬报 401。
+- **核实过不是缺陷**：`coze.rs:234` / `metaso.rs:238` / `trae.rs:420` 的 `unwrap_or(0)` 都在「只判非 0」或 `type=="error"` 的分支里，缺 code 当 0 是合理的。
+- **核实**：`ErrorClass` 有 8 个分类（Auth/Rate/Quota/Transient/Waf/Rejected/LaneLocked/Region），`from_status` 对 400/404/410/413/415/422 归 `Rejected`（不熔断平台）—— 注释说明「旧实现让它们全落 Transient，于是任何写错模型名的客户端都能熔断整个平台」。这套设计是经过推敲的。
+- 测试基线 **682**。
+- ★ 教训：**加新判据前先搜一遍有没有现成的**。`refine_biz` 这种带测试的既有机制，复用比自己写更安全 —— 它踩过的坑（限流被误判成失效）我上一轮的实现里其实也存在。
+## 2026-10-26 第八十五轮（非流式请求与上游失败没有日志）
+- **★★ 发现可观测性缺口**：全项目只有 **46 个日志点**，30 个 >300 行的文件**零日志**，**20 个 adapter 一行日志都没有**。
+  · 更关键：**非流式请求成功/失败都没有请求级日志**（`aigw::req` 的「请求首字节」只挂在**流式**路径上，`sse_response_timed` 只有流式用）；
+  · 后果：用户报「有时候能答有时候不能 / 某个平台突然全挂」时，**日志里什么都查不到**，只能靠猜。
+- **修法**（都在 `chat_completions`）：
+  ① 非流式成功 → `INFO aigw::req: 非流式完成 model=… ms=…`；
+  ② 上游失败 → `WARN aigw::req: 上游失败 model=… status=… ms=… why=…`（body 截 160 字）。
+  实测输出：`WARN aigw::req: 上游失败 model=metaso:search status=429 ms=495 why=秘塔错误 code=429 Too Many Requests`。
+- ★ 判断标准：**只记录「成功」不够，失败才是用户来求助的原因**。两端都记，日志才可用。
+- 测试基线 **682**。
+- ★ 遗留观察（未做，不是本轮必须）：各 adapter 内部仍无日志。它们的失败会通过 `ChatCoreErr::Upstream` 冒泡到上面这条统一日志里，所以**已经能定位到「哪个模型、什么状态码、什么原因」**；adapter 内部细节（比如某一步重试）仍不可见 —— 若有具体排障需求再加，别为了「有日志」而到处插。
+## 2026-10-26 第八十六轮（流式结束日志：Drop guard 与 lint 边界）
+- **补上流式路径的最一块日志**：以前流式只有「请求首字节」，**不知道这次流最终是答完了还是半路断了**。在 `sse_response_timed` 加 `StreamEndGuard`（闭包捕获，`Drop` 时打 `INFO aigw::req: 流式结束 model=… ms=… bytes=…`）。SSE 没有可靠的末帧信号、客户端也可能中途走 —— 但**两种终点都会让 guard 析构**，放 Drop 最稳。
+- **★ 三个编译告警的正解**：闭包里裸写 `guard.bytes += …` 被 capture 分析连判三次（unused_variables / dead-store ×2）—— 因为 `Drop` 里的读**在闭包体之外**，lint 看不见。正解**不是加 allow 也不是砍统计**，而把写入包成方法 `guard.add_bytes(n)`：方法调用明确算「使用变量」，三个告警一起消掉，零 allow 零告警。
+- 真机验证：正常流式 `ms=4102 bytes=37816`（完整答完）；读完 2 chunk 就 abort 的那发 `ms=912 bytes=824`（半路断）。**bytes 一项就分开了这两种结局**，正是这行日志的全部意义。
+- ★ **验证脚本的坑（本轮踩的）**：确认日志时 `split().filter().slice(0,15)`——启动期的 INFO 有 15 行，把请求期的 `aigw::req` 全部截没了，一度误判「日志没生效」。验日志要**先按 target grep 再截断**，别先截。
+- 测试基线 **682**，零告警；构建 + 三场景（非流式完成 / 上游失败 / 流式首字节+结束）真机全验过。
+## 2026-10-26 第八十七轮（前端 XSS 审计 + monkeycode Cookie 形态缺口）
+- **前端 XSS 审计：干净，无漏洞**（这是「验证过没问题」的结论，别重复审）：
+  · 转义设施齐全：`esc()`（HTML 实体）/ `jsq()`（JS 字符串）/ `att()=esc(jsq())`（onclick 内插值，注释记录过真实 XSS 事故：上游模型名 `bad');alert(1);//` 曾逃逸执行）/ `safeUrl()`（scheme 白名单，挡 `javascript://` 百分号解码绕过）；
+  · 聚合点全部内部转义：`pill()`、`srcCard`、`loginBtn`、`unusablePill`、`fmtCheckin`；`taskHtml` 是**先拼整行（含上游错误文本）再整体 esc**；`recentHealthPill` 的插值全是纯数字；
+  · 54 处 innerHTML 写入点抽查：动态值均过 esc/att。
+- **前后端契约核对（第 47 轮以来新增面）无漂移**：health 的 `limits`（per_ip/global/key_rpm）在概览与运行参数页都有；`/api/pool` 的 sticky 四字段 poolCard 已渲染（「会话粘性 N 条」）；登录抽屉由后端下发的 `login_methods`/`auth` 驱动，未知平台落**通用兜底**（api_key→粘贴框、cookie→粘贴 Cookie 框），新增 6 家 adapter 不需要前端改动就能接入。
+- **★★ 修掉真缺口：monkeycode 的 Cookie 形态**。面板 cookie 分支的通用提示是「粘贴整段 Cookie」，而 adapter 直接拼 `monkeycode_ai_session={secret}` —— 用户照提示粘整段时头会变成 `monkeycode_ai_session=a=1; monkeycode_ai_session=xxx;…`，**必然 401 且报错只说「未授权」**，用户不知道是粘贴形态问题。
+  · 修法：`cookie_header(secret)` 三形态整形 —— 裸值→拼键名；整段含目标键→提取（键名大小写不敏感）；含 `=` 但无目标键→原样整段发（交给上游判，不自作聪明）。3 处调用点全换，+1 测试（683）。
+  · 前端同步：COOKIE_HINT/COOKIE_PH 给 `web-monkeycode(-intl)` 加专属文案（点名 monkeycode_ai_session、说明整段也行）；国际站文案注明「账号与国内站不通用」。
+  · BUILD 已 bump → `v20261027a`；真机验证 served app.js 含新提示（改前端必须 cargo build —— rust-embed 是编译期嵌入）。
+- 测试基线 **683**（relay 226）。
+- ★ 工程习惯：往 JS 里内嵌长 Rust 片段用 `write` 工具写临时文件再拼接 —— 内联长数组本轮两次被 JS 解析器打回（引号/反引号转义地狱）。
+## 2026-10-26 第八十八轮（verify_account 漏了全部 5 个新 adapter —— 双重遗漏）
+- **★★ 修掉验活分派缺口**：`verify_account` 的 match 只有 14 个旧 adapter，**commandcode / orcaterm / monkeycode / accio / autoclaw 五个全部缺失**，掉进 `verify_openai` 通用兜底（GET models_path）。两个方向都错：
+  · **假阴性**：orcaterm / autoclaw 没有 /models 端点（或需要 X-Authorization 头）→ 好凭据也永远「验活失败」，用户以为凭据是坏的反复重粘；
+  · **假阳性**：commandcode 的 /provider/v1/models 是**公开的**（无凭据也 200）→ 错 key 也「验活通过」，用户以为接好了，一对话才 401。
+- **遗漏是双重的（两个独立事故叠加）**：
+  ① 第 65 轮接线时 verify 分派的 splice **失败了**（当时输出「验活分派行: 0」就是失败信号，没追查）；
+  ② commandcode 的 `verify` 函数本体在同轮**被截丢**：重写流式部分用 `t.slice(0, idx)` 砍掉后半段再拼新内容，而 verify 恰好写在后半段。函数没了 + 分派没加，两层都断，编译还不报错（没人引用它）。
+- **修法**：五个分派补齐；commandcode::verify 重写为 `GET /alpha/billing/credits`（带 CLI 头 + Authorization）——**不能用公开目录验活**，billing 端点是参考实现标注的「本家只用它做 key 探活」。`sk-` 前缀在 verify 里被 `key_shape_ok` 先拒（不发网络请求）。
+- **真机验证**：假 `user_…` key 保存后正确报「验活未通过」（修复前会误报通过）；`sk-` 前缀同样被拒。
+- 其余四家的 verify 本体核实都还在（orcaterm=建会话 / monkeycode=拉目录带 Cookie / accio=小探测 / autoclaw=小探测）。monkeycode 的 WS 握手 Cookie 也确认在用 `cookie_header()`。
+- 测试基线 **683**，零告警。
+- ★★ 两条工程纪律（本轮的代价换来的）：
+  ① **`slice(0, idx)` 重写文件后半段前，必须先列出 idx 之后有哪些顶层函数** —— 否则静默丢代码，编译还不报错；
+  ② **接线类改动（match 分派/注册表）完成后必须 grep 回读确认落盘** —— splice 替换「未命中」经常不抛错，只留下一个失败的输出信号。
+## 2026-10-26 第八十九轮（模型倍率 + 积分余额显示 + 加权说明上界面）
+- **新增 `aigw-server/src/model_rates.rs`**：CodeBuddy/WorkBuddy 族的**离线倍率表**（35 条，来源 APK 内嵌 `codebuddy-international-models.json` / `@tencent-ai/codebuddy-code@2.150.0`）。`rate_for()` 支持裸名 / `模型@平台` / vendor 前缀（`z-ai/glm-5.3`）三种形态，查不到返回 None（**不编数**）。
+  ★ 一处维护三站共用：wb-gateway / wb-gateway-intl / codebuddy 同一套模型族。表里**没有**的东西（如 kilo 的模型）就不显示倍率。
+- **`/api/platforms` 行新增 `rates` 字段**：只把查得到的模型的倍率下发（空对象表示没有）。真机验证 wb 两站各 17 模型 / 5 个带倍率（glm-5.2×0.79、glm-5.3×0.79、kimi-k2.6×0.52、hy3×0.00）。
+- **积分余额下发到账号行**：pool 新增 `credit_snapshot()`（返回 `(余额, 快照年龄秒)`，**按 CREDIT_TTL 过期视同没有** —— 与 `pick` 的选号判据同一口径，否则面板显示的数与真实排名依据不一致）；`credit_of()` 改为委托它。`/api/accounts` 行新增 `credit` / `credit_age_s`。
+- **前端**：账号表状态列加 `creditPill`（`积分 N · 刚刚/分钟前`，≤100 标 `低余额优先` 并标 warn 色 —— 把「低余额优先」这条加权策略写在界面上，用户才不会疑惑「为什么总是同一个号掉额度」）；模型列表每个模型后加 `×N` 倍率徽标 + 图例说明；BUILD → `v20261027b`。
+- **★★ 本轮自己犯的错（记下来）**：先凭印象写了倍率数值（kimi-k3 写成 1.20、glm-5.3 写成 0.53），**实际源表是 1.62 / 0.79**。写代码时内联数组被 JS 解析器打回两次，重建表时又用 `L.pop()` 误删了最后一条（34/35）。
+  ⇒ 教训：**数据必须从源文件读，不能凭记忆写**；生成静态表时用「读源 → 逐行拼接 → 校验条目数与首尾行」三步，不要手工 trim/pop。
+- **仍缺（下轮可做）**：① 在线倍率刷新（需登录态拉模型目录，旧版 `gwextra.py` 有完整实现可移植）；② 「真正按到期时间加权」—— 目前只有余额没有到期时间，`pick` 的加权用的是「余额低的先消耗」（与 workbuddy2api 同口径）；③ 账号表还能再收一列（积分/倍率可以合并成独立列）。
+- 测试基线 **684**（server 288），零告警；前端 `node --check` 通过、rust-embed 重建后真机确认新徽标与 BUILD。
+## 2026-10-26 第九十轮（快过期加权落地：多资源包到期 + 界面总览）
+- **★★ 「快过期加权」从近似变成真**：WorkBuddy 的 `get-user-resource` 实际返回**多个资源包**（`Response.Data.Accounts[]`，套餐基础/每日/赠送各有 `CycleCapacityRemainPrecise` 与 `DeductionEndTime`/`CycleEndTime` 到期时刻）。此前只记「余额总数」判不了「这号快作废」。
+  · `wb.rs`：新增 `parse_user_resource()`（逐包求和 + 取**最早到期的非零包**，`parse_time_epoch()` 支持 RFC3339Z / ±offset / 无时区按 +8 / 秒或毫秒四种形态，解析不出返回 None 不猜）+ 3 个测试；`query_balance` 回传 `expire_at`；
+  · `pool`：`credits` 从 `(f64, Instant)` 换成 `CreditSnap{value,at,expire_at}`；`pick` 排序改为**快到期优先（48h 窗口 `CREDIT_EXPIRING_WINDOW_SECS`）→ 余额升序 → 原序**；`record_credit_exp()` 记到期；落盘/恢复带 `expire_at`；
+  · server：balance 与签到成功后的快照刷新都走 `record_credit_exp`（签到语义本就正确：领奖后**另查真实余额**，不把领到的数当余额）。
+- **界面（creditSummary 总览条 + creditPill 到期徽标）**：账号页顶部「积分总览：N 个号共 M 分 · K 个号 48 小时内到期（选号已优先）· 最早到期 MM-DD HH:MM」；单号徽标「积分 120 · 剩 24 小时到期（优先消耗）」warn 色、与 pick 的 48h 窗口**同一口径**。BUILD → `v20261027d`。
+- **无浏览器的 UI 验证法（agent-browser 不可用时）**：本机没 node/npx，装 Chromium 太重 —— 纯函数 UI 用 `process.execPath` 跑 `new Function` 提取 app.js 里的 `creditSummary`/`creditPill` 直接 eval 测：总览合计 12220 ✓、48h 计数 ✓、最早到期格式 ✓、anon 行排除 ✓、soon/rich 徽标色级 ✓。
+- **测试基线 689**（pool 39，+3 快到期排序/落盘往返/wb 解析 ×3 在 relay 229）。
+- ★ 教训：**写测试前先算对期望值**——本轮多包求和测试我写了 1050（100+50=150），期望值错了两次才对齐；还有一次凭印象写了 epoch 常数（正确值差 6000 秒）。期望值必须从定义推或用同一实现交叉验证，不能拍脑袋。
+- ★ 后续可选：① `agent-browser`（Vercel Labs CLI）要 npm 全局安装 + Chromium，环境没有 node PATH；若要真浏览器 UI 验证需先装。② 企业账号走 `get-enterprise-user-usage`（参考项目有完整解析），v2 目前只覆盖个人账号。
+## 2026-10-26 第九十一轮（积分快照周期刷新任务 credits_refresh）
+- **补上「剩余积分显示」的活性缺口**：快照此前只在「手动点积分」「签到成功」两条路径更新 —— 用户 25h 无操作就过 CREDIT_TTL，视同没有：「快到期优先」断粮、积分总览条消失。新增后台任务 **credits_refresh**：`supervise_loop_now`（6h 周期 / 失败退避 30min / 冷启动先跑一轮），对 wb 族账号逐个 `query_balance` → `record_credit_exp`。**只读查询，不需要签到那样的开关**。
+  · 平台范围只取 `wb_checkin_base` 认得的站（intl 计费端点没实测过就不猜，注释写明）；
+  · 台账消息给人读：「刷新 N 个号的积分快照（M 个查询失败，多为凭据失效）」+ 有号 48h 内到期时的「（选号已优先）」；裸 epoch 不进消息（前端 health 那行会看不懂）；
+  · 个别查询失败只计入 fail_n，任务本身 mark_ok —— **部分失败 ≠ 循环失败**，与 daily_checkin 同口径。
+- 前端 `TASK_LABEL` 补 `credits_refresh: '积分快照刷新（6 小时）'`（health 台账行没标签会显示裸 id）；BUILD → `v20261027e`。
+- 真机双向验证：无账号 →「没有 wb 族账号，跳过」；假凭据 →「0 个号（1 个查询失败…）」且 ok_runs=1 不炸。
+- ★ 小事故：编辑 TASK_LABEL 时顺手把 `公益站每日刷新` 打成 `公益每日刷新`（意图外的文案改动），复查时自己抓到并恢复。编辑既有文案要**逐字对照**，别顺手。
+- 测试基线 **689**，零告警。
+## 2026-10-26 第九十二轮（倍率在线刷新 + 数据来源透明化）
+- **★★ 离线倍率表从「永远展示旧数」升级为「在线优先、离线兜底、来源如实」**：
+  · `model_rates.rs`：静态表之上加 `ONLINE` 覆盖层（OnceLock<RwLock<HashMap>>）+ `set_online`（**空集不许覆盖**，防一次失败刷新清空好数据）+ `source_label()`（在 MM-DD HH:MM / 离线(2026-09)）+ `save_cache/load_cache`（data/model-rates.json 原子写，启动回灌）；`rate_for` 改返回 owned String；
+  · `wb.rs`：`fetch_model_rates()` 移植旧版 gwextra.py 实测逻辑——console/enterprises/personal/models 端点（国内 copilot.tencent.com国际 www.codebuddy.ai）、**凭据形态自适应**（含 `=` 无空格→Cookie 否则 Bearer）、RATE_KEYS 14 候选 + 递归 walk（depth≤5）+ `extract_rate`（x0.79 credits→0.79；**键名命中但值非数字不许当倍率**；0..1000 越界拒绝，防把 token 价当倍率）；
+  · `credits_refresh` 任务顺带拉倍率（整站一份，第一个可用账号即试），台账消息带结：`…；倍率在线刷新失败（回退离线表）：HTTP 401`；
+  · 前端模型列表图例显示来源：`来源：离线(2026-09)`。BUILD → `v20261027f`。
+- **★ 实测端点行为已变**：旧版未登录回 400 JSON；现在无凭据 **302**、假 Bearer **401 HTML**（APISIX/openresty 网关层拦截，进不到应用）——在线成功路径需要真实登录态 Cookie 才能验证，所以实现按 best-effort 设计：**失败路径全部实测**（401→回退→台账+来源标签），成功路径靠旧版同源解析逻辑兜住。配了真账号自动转在线。
+- 测试基线 **693**（relay 232 / server 289 / pool 39）。
+- ★ 事故记录（同类第三次）：**appendFileSync 之后再用 `lastIndexOf("}")` 定位 mod 尾部会命中函数收尾** —— 测试块被插进 `fetch_model_rates` 函数体内部。修法：定位插入点要用「具名锚点」而不是「最后一个大括号」。
+## 2026-10-26 第九十三轮（死号必须清掉旧余额快照 —— 加权反噬缺陷）
+- **★★ 修掉「快过期优先」的一个反噬缺陷**：`record_credit_exp` 收到 `None` 时**直接 return**——凭据失效的号旧快照永远留在池里。死号的余额永不清零，若它还带着近到期的 expire_at，`pick` 会把它**排到最前**：每次路由先撞死号（号池对 401 有 Auth 冷却，但冷却窗之后死号又回来，无限循环）。
+- **修法：401/403 判死的号清快照**（`pool::clear_credit`）。判据函数 `auth_failure_of(err)` 单独可测、门槛刻意收紧：**只有 HTTP 401/403 算**——网络抖动/超时/5xx/业务码 JSON 错误一律不清（误清把好号的可用余额丢了，比留一个旧值更糟；最坏情况不过等 CREDIT_TTL 自然过期）。balance 手动查询与 credits_refresh 周期任务两处都接。
+- **真机 E2E**：死号手工塞 8600 的活快照 → 重启回灌 → 立即一轮查询 → 台账「刷新 0 个号的积分快照（1 个查询失败，**1 个凭据已失效并清除旧余额快照**）；倍率在线刷新失败（回退离线表）：HTTP 401」；`/api/accounts` 行 credit/credit_expire_s 字段消失 ✓。
+- 新增测试 3 个（clear_credit 往返 / auth_failure 判据严格性 / pool 侧），基线 **696**（pool 41 / server 290），零告警。
+- ★ **commandcode 积分显示调查后放弃**：参考项目对 /alpha/billing/credits 明确注释「本家只用它做 key 探活」，**全仓不解析响应结构**——字段名未知就不猜（对齐「不猜端点响应」纪律）。第二家积分平台等有实测响应再做。
+## 2026-10-26 第九十四轮（零余额反噬 + 一次真实的测试互相污染）
+- **★ 修掉「低余额优先」的第二个反噬**：余额恰为 0 的号会**永远占第一名**——每个冷却窗都白撞一次 402 才轮到可用号。修法：`pick` 里 `value < 1.0` 的快照降级为「无快照」（x0.79 倍率下 1 分连一次请求都不够付）。**只降级路由，面板照常显示 0**（真实余额，隐藏才是说谎）——两个口径不同是有意的，注释写明。
+- **★★ 全量跑抓出上一轮埋的测试污染 bug**（本轮最有价值的发现）：`online_layer_overrides_and_labels` 的 `set_online` 写全局缓存 `glm-5.3→0.42`，与并行跑的 `exact_and_stripped_lookups`（查同一键期待 0.79）互相污染。上一轮**恰好运气好跑绿了**（执行顺序巧合），本轮 pool 改动重排了任务图就翻车——正是「假绿」的教科书案例。修法：涉全局态的断言**合并成单一测试按序跑**（离线查询→在线覆盖→空集忽略→回退），另一个测试退化为不查表值的纯结构检查。
+- ★ 纪律升级：凡测试写**进程级全局状态**（static/OnceLock 等），其他任何测试都不得读同一数据——做不到就合并时序。写注释猜「没有别的测试碰它」不算验证，**连跑三遍全量（697/697/697）才算数**。
+- 测试基线 **697**（pool 42 / server 290），零告警；build 通过，生产实例 8800 无恙。
+## 2026-10-26 第九十五轮（五入口日志对齐：helper 抽取 + 一次影子变量教训）
+- **★ 补上自己违反教条的缺口**：第 82/85 轮加的非流式完成/上游失败日志**只挂在 /v1/chat/completions**——教条明明是「五条并行入口逐条实测」。Claude Code / Codex 用户日常走 /v1/messages 与 /v1/responses，日志黑洞恰好卡在它们身上。
+- 修法（复用而非三处拷贝）：抽 `log_done(model, started)` 与 `log_upstream(model, status, body, started)` 两个 helper；messages/responses 各自补 `started`、成功/失败/流式三接齐；messages/responses 的流式从裸 `sse_response` 换 `sse_response_timed`（以前连「请求首字节/流式结束」都没有）；search 的上游失败也接 log_upstream；count_tokens 是本地估算无上游，无需接。
+- **★ 影子变量教训**：给 search 插 started 时没注意到**函数里已有一个** `let started`（4891，搜索计时用）——我插的那把被内层定义 shadow，编译器报 unused 才暴露。**插变量前先 grep 函数体内同名绑定**，不能只看函数头。
+- **验证的意外收获**：验证时 Clash 恰好挂了（7890 全端口 ECONNREFUSED、注册表还指向它）——反而把**失败日志四入口全量打样**了：`上游失败 model=… status=502 ms=2017 why=network: 无法连接上游（检查本机代理/网络）…`。成功路径（log_done/timed 流式）复用的代码在 82/85/90 轮已真机过，helper 抽取零逻辑改动，全量 697 连跑绿。
+- **代理状态记录**：2026-10-27 22:5x 起 Clash 进程退出（127.0.0.1:7890 拒连）。下轮联网验证前先探 7890，不通就提醒用户重启代理。
+- 测试基线 **697**，零告警；build 通过。
+## 2026-10-26 第九十六轮（doctor 代理预检：报告不许误导诊断方向）
+- **★ 缺陷**：代理进程退出 + proxy.json 仍是 global 时，`--doctor` 把 141 个源全报成 [NET]「连不上」（实测国内站 baichuan/bigmodel/dashscope 的 TCP 直连明明正常）——**满屏假故障，用户只会以为上游全挂了，永远想不到是自家代理没开**。体检的首要用途是「谁挂了」，这份报告在这个场景下是误导的。
+- **修法**：doctor 读代理配置后先 TCP 探活代理本身（3s 超时），不通就在报告开头打显式警告：「代理 127.0.0.1:7890 连不上（模式仍是 global）…大概率是代理软件没运行，不是上游失效…先启动代理再重跑」。**只警告不改道**——global 是用户显式选的，预检失败就自动回落 direct 会造成「以为走代理其实裸奔」的更坏事故（与 proxy.json 解析失败必须出声同一条理）。
+- 附带实测事实：**kilo 直连可达**（direct 模式 16 条清单 OK）——代理挂掉时切 direct/bypass_cn 仍能救活国内免密源，警告文案里点了这句。
+- `proxy_host_port()` 解析 `http://host:port` / 带 userinfo / 无端口默认 80；+1 bin 测试。**一次脚本自我纠错**：新 mod proxy_tests 因 `if (!hasMod)` 没落盘（main.rs 已有 tests mod），改往既有 mod 加函数——落盘后必须 grep 回读确认（老纪律又救一次）。
+- 真机对照：global+代理死 → ⚠⚠ 出现、kilo NET；direct → 无警告、kilo OK。测试基线 **698**（bin 4）。
+## 2026-10-26 第九十七轮（direct 全量体检：校准真边界 + openrouter 漂移清零）
+- **★ 实测修正了自己上一轮的误判**：我上轮说「代理关闭时国内站 TCP 直连正常、doctor 全挂」——**不对**，那是 proxy.json=global 的场景。本轮 proxy.json=direct 全量体检：**141 源里 117 个直连可达**（通 51 + 域名活需凭据 66），只有 22 个 [NET]/[DNS]（openrouter/poe/gemini/codex 等**本来就要代理**的海外站）。代理通与不通的差值 = 那 13~22 个海外站。这才是「反代失效检查」的真边界。
+- **openrouter 漂移已清零**：删掉静态表里上游已下架的 `nvidia/nemotron-3-super-120b-a12b`，重跑 `[OK] 静态表 9 个模型均在上游`。漂移 0。
+- **基线记录**：direct 模式体检小结 `通 51 / 需凭据 66 / 连不上 22 / 被限流 1 / 失败 1 / 漂移 0`。两个非缺陷：qianfan 429（临时限流，重跑即好）、qwencloud-coding 405（官方限制，已知）；[NET] 的 22 个是海外站没代理所致，**不是反代失效**。
+- **关于「系统代理已启动」**：本轮起连续 2 次实测 7890/7897/10808/10809 全部拒连、无 clash/mihomo/v2ray 进程。代理实际不在运行。目标描述与环境不符时以环境为准——本轮所有验证都走 direct 完成，没有因此停滞。若后续要验海外源（openrouter/poe/gemini 等 22 个），需要用户先把代理起回来。
+- 测试基线 **698**，零告警。
+## 2026-10-26 第九十八轮（概览弹窗「积分资产」行 + 一次测试自打）
+- **资产总览进网关信息弹窗**：`/api/health` 新增 `credits:{accounts,total,expiring_soon,earliest_expire_s}`（pool 新增 `credit_summary()`，**口径与 pick 逐条一致**：TTL 过期不算、<1 不算、48h 窗口；无有效快照时整个键省略）；前端「服务网关信息」弹窗在任务/限流之间加「积分资产：N 个账号共 X 分 · M 个号 48 小时内到期 · 最早 MM-DD HH:MM · 明细在账号页」。BUILD → `v20261027g`。
+- **★ 测试场景被自己的正确行为清了（有意思的事故）**：第一次真机验证用 3 个假 wb 账号 + 手工塞快照 → health.credits 是 undefined。原因：**credits_refresh 冷启动立即跑一轮，假凭据 → 401 → 上轮加的 clear_credit 把我手工塞的快照全清了**。每个组件都在按设计工作，是测试设计与行为对撞。改用 ghost 账号键（pool 聚合只看 credits map，与账号表无关）后四项判定全过。
+  ★ 教训：**验证读路径时，别用会被写路径主动清理的键**；或者反过来说——这恰好证明 clear_credit 在真实链路上生效了。
+- 测试基线 **699**（pool 43），零告警；build 通过。
+## 2026-10-26 第九十九轮（面板「日志」页 + 落盘去 ANSI + 级别语义修正）
+- **★★ 补上排障链的最后一层**：面板此前没有原始日志视图——前几轮辛苦加的 `aigw::req` 请求日志（含上游失败完整 `why=`）只在磁盘文件里，用户不登机器就看不到。「用量」是 SQLite 结构化台账（错误被截断），这页是 tracing 原文，分工写在注释里。
+  · `rotlog::tail(data_dir, max_lines)`：只读尾部 256 KiB 窗口（整读 4 MiB 文件会让每次刷新复制全文件），按时间序、截尾取最新；窗口撕裂半行/BOM 都有处理 +1 测试；
+  · `GET /api/logs?lines≤2000&level=&grep=`：**先多取 6 倍再过滤**（grep 命中率低时 300 行窗口会筛成 0 行的假象）；
+  · 前端 VIEWS 新增「日志」页（用量与运行配置之间）：行数/级别/关键词三控件，WARN 橙 ERROR 红，尾部自动滚。BUILD → `v20261027h`。
+- **★ 真机揪出落盘 ANSI 转义码**：日志文件里的行带 `[2m`/`[0m` 色码——用户复制日志去提问就是乱码，`model=` 字段还被转义码切断。修 `init_tracing` 加 `.with_ansi(false)`（Tee 同写终端与文件，落盘归档就该纯文本；终端没色是小事，计划任务本来没人盯屏）。复验：新行零 ESC。
+- **★ 口径缝隙自查**：前端选项写「只看 WARN+」而后端 `level=WARN` 是子串匹配——ERROR 行不含 "WARN" 字样，被漏掉。修为级别下限语义（WARN 连带 ERROR）。**界面承诺什么就交付什么**。
+- 一次全量跑假报错（32/exit101，重跑 700 全绿）：build 与 test 抢 cargo 锁的瞬时形态，重跑即愈，不追。
+- 测试基线 **700**（store 89 / pool 43），零告警；真机验证 /api/logs 三档过滤 + 前端注册全过。
+## 2026-10-26 第一百轮（Token 周期限制器：从「事后冷却」到「事前控制」）
+- **★★ 对齐参考项目 Agent2API core/limiter.rs 的 v2 实现**：号池此前的治理全是**事后反应**（撞 429 才冷却、撞 402 才硬冷却）。免费额度账号被上游盯上往往因为**用量太猛**——限制器是事前主动控制：「账号 X 每周期最多 N token」，触顶选号跳过，**整点窗口翻页自动恢复**，无需人工。
+  · pool：`TokenRule{limit,period_s}`（周期夹 [30min,24h]，参考实现评审：太短「刚恢复又被拦」，太长失去保护）+ `token_used` 事实表 (窗口起点,已用)；`add_tokens_used` **只对配了规则的号累计**；`token_block_at`（持锁版给 pick，公开版给面板——**直接复用 token_block 会在 pick 里自死锁**，std Mutex 不可重入）；
+  · 三个要点照抄参考实现：规则按账号；窗口 floor(now/period)*period 对齐自然时间（读数可预期，不是滑动窗）；**拿得出证据才拦**（无记账=0=不拦——重启后事实表空，宁可短期用满也不误拦，误拦的号会永远饿死）；
+  · 记账在 `record()`/`record_cancelled()`（失败与取消**也计**——上游照样烧 token，限制器防的是用量被盯上，不是成功量）；
+  · 规则持久化在账号行（`token_limit`/`token_period_s`，serde default 不动旧文件），`/api/accounts` 新 action `set_limit`，启动时 main 从 rows_snapshot 灌池；删除账号走 `forget_account` 一并清（**后加的 map 容易漏进生命周期清**，credits/token_rules/token_used 三个全补）。
+- ★ **action 前置白名单**：accounts_action 函数顶部有 action 白名单（防拼错 action 被误报「缺 id」）——新加 action 必须同时扩白名单，只加 match 臂会得到「未知 action」（本轮真机第一发就撞上）。
+- 测试基线 **702**（pool 45 含限制器 2 条），零告警；真机 E2E：set_limit→行内显示→**重启回灌**→删除全链通过。
+- ★ 未完成（下一轮）：面板「限制」编辑按钮与用量展示 UI（行内字段已下发，前端没画）。
+## 2026-10-26 第一百零一轮（限额 UI + 引号地狱的终解法）
+- **限制器 UI 落地（BUILD v20261028a）**：账号行新增 `tokenPill`（`限 1.6k/5k`，用量 ≥80% 转 warn、**触顶转 err**——被跳过的号一眼可辨）+ 操作组「限额」按钮 → `acLimit` 弹窗（当前规则回显 / 额度输入 / 四档周期 [30min,1h,12h,24h] / 保存 / 清除限制）。弹窗说明写明与低余额优先、快到期加权**互不冲突**（它防的是用量）。eval 三态断言全过 + 真机 served 验证。
+- **★★ 引号地狱终解法（本轮被坑 4 次后定型）**：往 app.js 里嵌 JS 代码，run_code 内联长数组必炸（单双引号/backtick/`${` 三种冲突轮换来）。可复用的组合拳：
+  ① **新代码本身改双引号风格、不用模板字符串与 `${`**（onclick 传参用 `&quot;` 实体绕过引号嵌套）——外层 harness 模板就无害；
+  ② 需要 `${` 的行（如 `acLimit('${att(a.id)}')`）用 `String.fromCharCode(36)` 拼；
+  ③ 大块代码先 `nodeFs.writeFileSync` 存成 .txt，装配脚本只读文件拼接；
+  ④ **锚点先核实再替换**（本轮 `creditPill(a)}</td>` 的 `${` 在行首不在行尾，猜锚点连挂两次——grep 现场是铁律）。
+- **★ 别猜函数名**：新代码里的 `closeModal()` 在 app.js 根本不存在（弹窗收尾是 `closest(".modal-mask").remove()`）——用了就静默 ReferenceError。接既有工程前先 grep 依赖。
+- 测试基线 **702**（本轮零 Rust 改动），零告警。
+- ★ 限制器至此全链闭合：配置（面板弹窗）→ 持久化（账号行字段）→ 回灌（启动装载）→ 记账（record/取消）→ 拦截（pick 触顶跳过）→ 展示（行徽标 + token_rule/used 下发）。
+## 2026-10-28 第一百零二轮（503 文案区分限制器触顶：别把用户支去重新登录）
+- **★ 限制器的最后一块 UX 拼图**：全池触顶时 pick 返回 None，原 503 文案写「冷却中或**凭据失效隔离**…请到账号页重新登录」——但触顶**不该重新登录**（登了也没用，窗口翻页才恢复）。文案误导会把用户支去做无用功。
+- 修法：pool 新增 `token_hit_info(accounts) -> Option<(触顶数, 最早翻页秒)>`；chat_core 全挡分支据此出**两套文案**：有触顶 → 「（含 N 个号 Token 限额触顶）…触顶的号窗口翻页后自动恢复（约 X 分钟内），**无需重新登录**；也可到「账号」页调整或清除限额」；无触顶 → 维持原文案。且 **Retry-After 头带上恢复秒数**（复用既有 u16 通道，客户端 SDK 会自动等待）。
+- 证据规则贯穿：token_hit_info 只数「拿得出窗口用量证据」的触顶号（零用量/翻页后的不算），与 pick 完全同一判据（共用 token_block_at）。
+- ★ 测试自己踩的坑：第一版断言顺序错了——先给 a 记账 150 再 assert 全池 None（a 明明已触顶）。**测试的时序陈述要照抄心智模型：先验证「没证据不拦」，再制造证据**。修正后 705 全绿（pool 46）。
+- 真机全触顶场景需要真实 token 消耗（代理未恢复，无法打成功流量），本轮以单测 + 既有 Retry-After 通道（429 路径同款字段）收口。
+- 测试基线 **705**，零告警；代理仍不在运行（7890 拒连）。
+## 2026-10-28 第一百零三轮（粘性路由绕过限制器——available() 补闸）
+- **★★ 修掉限制器的绕过漏洞**：粘性路由命中后只过 `pool.available()`（waf+冷却），**没查限制器**——绑定过的会话触顶后继续钉死在该号上，每请求照烧。「限额防用量」的安全属性被粘性整体绕过：限了等于没限（尤其长会话，粘住谁谁触顶）。
+- 修法：`available()` 加 `token_block_at` 判据（与 pick 同一函数），注释写明为什么粘性关卡必须包含它。+1 测试（零用量不拦/触顶拒/无规则不影响）。
+- ★ 通用教训（第 N 次验证）：**给 pick 加新治理维度时，必须同步检查 `available()`**——它是粘性的旁路关卡，两处判据集必须一致（waf/冷却/限额三查齐）。freeze/unfreeze 不清限制器是**有意**的（那是自设保护，不是上游故障态）。
+- 测试基线 **706**（pool 47），零告警；build 通过；代理仍未恢复。
+## 2026-10-28 第一百零四轮（search 兜底的治理绕过 + 全局审计收口）
+- **★ 上轮教训立派上用场**：审计发现 search 的选号兜底 "or_else(|| ids.first())" 把 pick 的全部治理都绕过（冷却/WAF/限制器都不看）——原意是救「在飞打满」的瞬时态，实际却会在触顶号上继续烧。修法：兜底改为在 "available(a, search)" 里找（available 现已三查齐），全挡时 503 文案与转发路径同款（N 个号触顶、X 后自动恢复、无需重新登录）。
+- **全局审计**：grep 生产调用点——转发主路径、粘性关卡、search 兜底，三处全过同一判据集，**再无绕过**。新增治理维度后的「全调用点审计」应成为固定收尾动作。
+- 测试基线 **706**，零告警；build 通过；代理仍未运行。
+## 2026-10-28 第一百零五轮（面板代理连通测试 + 两个「死源」实为 TLS 指纹拉黑）
+- **★ 面板「⚡ 测试连通」按钮**（/api/proxy action=test，BUILD v20261028b）：只探测不保存，TCP 层 3s 超时（spawn_blocking 不占 async worker），复用 relay 的 `parse_host_port`（从 main.rs 迁来，**CLI 预检与面板共用一份解析**）。文案直接给行动指引：「多半是代理软件没在运行。启动它，或切回全部直连」。真机四态验证：死代理/直连/活端口/坏地址 + 探测零副作用（配置不变）。动机是本周真实事故：Clash 悄悄死了、global 模式全源连不上、面板毫不知情。
+- **★ 代理恢复后全量体检**：direct 时 22 个 NET 的海外源 20 个复活（OK/KEY），漂移 0。剩 free-anyrouter / free-berf 仍 NET——**经 CONNECT tunnel 实测两站 /v1/models 都回 401 正常 JSON（端点活着）**，但 reqwest 连接层被拒（is_connect）——Cloudflare / WAF **按 TLS 栈指纹过滤 HTTP 客户端**（raw Node TLS 通、reqwest 死；berf 第 58 轮就有此结论，anyrouter 新加入该族）。
+  ⇒ 处理：两站 enabled=false + notes 记全证据（端点活着但网关连不上 = 用户视角死源，留着制造假故障；若换 TLS 栈或上游放开再重启）。**体检最终态：通 64 / 需凭据 73 / 连不上 0 / 限流 1（瞬时）/ 失败 1（已知 405）/ 漂移 0**——体检史上第一次零 NET。
+- 教训：**doctor 的 [NET] 不等于上游死了**——带代理复查要用 raw TLS 区分「WAF 指纹策略」与「端点失效」，两者对用户的正确文案完全不同（前者可提示换客户端/放弃，后者应停用）。本轮若只看 doctor 会错杀两个活站、也会漏掉真结论（reqwest 指纹被拉黑的源永远接不进）。
+- 测试基线 **706**，零告警。
+## 2026-10-28 第一百零六轮（参考项目 diff 同步：orcaterm 模型归一 + 静态清单）
+- **★ 与参考项目对比闭环**：git fetch Agent2API（走代理）——本地副本与 origin/main **零差距**（10-16 后无新提交），但 10-16 那个 release 的实质提交里有一处 v2 未同步的修复：**OrcaTerm 模型目录与归一**。逐项对齐：
+  · `orcaterm.rs` 加 `resolve_model()`：上游只认 TokenHub/ 前缀——裸名 `glm-5.3` → `TokenHub/glm-5.3`；表外名/空串 → **显式回退默认档 glm-5.3-flash**（参考注释：与其让用户收看不懂的 LLM_ERROR，不如回退能答的档；SSE 帧 model 字段仍回显用户请求名，不冒充）；**表内未挂载的 hy4-preview 原样放行**（「面板里那个模型在网关消失」更糟，错误由流内明确下发）——三种策略的分界值得抄；
+  · spec `models_policy: none → static`，9 条清单用带前缀的**上游真实形态**作 id（用户看到什么发出去就是什么，不用猜写法）；notes 记录 hy4-preview 未挂载与来源（桌面端 1.6.4 面板逐项对证，上游 DescribeAIModelList 对普通账号回空数组——清单只能内置，没有接口可拉）。
+- **registry 校验测试又立功**：spec 里原有一行空 `models = []`，我插新表没删旧行 → duplicate key 被 `shipped_providers_are_all_valid` 当场抓住（这条「静默跳过变红灯」测试第 N 次拦截真实事故）。
+- 体检注意：static 且 models_path 为空的源走**根路径探测**（第 91 轮逻辑），orcaterm 转 static 后仍正常 [OK]，不引入假漂移。
+- 测试基线 **707**（relay 235），零告警；真机确认 /api/platforms 的 orcaterm 行 9 模型带前缀下发。
+## 2026-10-28 第一百零七轮（wb 头族升级 5.8.4：抢在上游渠道校验全面收紧之前）
+- **★★ 本轮最重要的同步**：参考项目 10-16 抓包发现 WorkBuddy 上游**对话链路新增渠道校验**——缺会话头族（X-Conversation-ID / -Request-ID / -Message-ID / -Root-Request-ID）回 400 / code **11-128**「可能不是官方客户端发出的」。v2 的 wb-gateway(-intl) 头族还是旧口径，intl 用户撞上就会全拦。逐项对齐参考 `workbuddy/adapter.rs chat_headers`（mitmproxy 5.8.4 实测）：
+  · UA 按地区取对话链路专用值：intl=`WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`（**产品段是小写连字符 workbuddy-ai**——v2 旧版给 intl 发 `WorkBuddy AI/… WorkBuddy AI/…` 是错的：X-IDE-Name/Type 两版都该是 `WorkBuddy`，product_name 是另一个字段）、CN=`WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1`；
+  · 会话头族**每请求现生成**（会话=带连字符 UUID、消息=32hex、trace 随机）——上游不拿 id 存历史也不跨请求关联，**要的是「有」不是「稳定」**；v2 旧版从 secret 派生的恒定值本身就是网关指纹（参考注释点名：恒定 X-Session-ID「就是一处网关特征」）→ 删 X-Session-ID；
+  · 补 X-Agent-Purpose=conversation / X-Agent-Type=main / X-Private-Data=true（v2 旧值 false）/ Origin+Referer（按端点域）/ intl Accept-Language=en-US；X-IDE-Version intl=5.8.4（过旧版本号本身是网关特征）；
+  · 删 wb_turn_key 死代码（turn 级恒定键的旧语义被「每请求现生成」取代）。
+- 验证：707 全绿零告警；kilo 主流程 200 回归 ✓（改动只影响 signer=wb 路径，天然隔离）；wb 假号验活正常走鉴权失败（头族改造不动鉴权层）。
+- ★ 待办：**有真 wb 账号时必须实测** intl 对话是否过渠道校验（11-128 不再出现）——假凭据只能验到 401，验不到「校验通过」。
+- 测试基线 **707**，零告警。
+## 2026-10-28 第一百零八轮（积分份额明细：alert → 逐份弹窗）
+- **★ 对齐参考项目 v3.0.6（319f640）第 6 项「积分明细」**：`parse_user_resource` 现在随汇总返回**逐包明细 packs**（name/total/left/expire_at）；前端「积分」按钮从 alert 一行字升级为弹窗：总剩余 + 每份额「已用 X / 面额 Y · 剩 Z · 到期 MM-DD」单列，**48h 内到期的份额名橙标**（与选号加权同一阈值），已用完/无余额的份额收进 <details> 折叠区不占第一眼；能量/成长值并入同一窗口。BUILD → v20261028c。
+  · 份额名**以上游 PackageName 原文为准、没有才退包码**——参考 issue #239 的教训：本地码表会把上游改过的套餐名覆盖成过时旧名；
+  · server balance 响应整体透传 query_balance 的 json，packs 零接线自动带出；
+  · 测试适配三元组 + 明细断言（4 行含剩 0 的都要进明细——「已用完」也是要展示的份额）。
+- **对照清单第 14 项核对通过，不动**：「404 类确定性失败不再原地重发」——v2 的 `failover_worthy` 判据早已明确 Rejected(400/404/410/413/415/422) 不换号、LaneLocked/Region 不换号、连接层失败(status=0)不换号，注释写着「三连重试只会把一次失败变成三倍等待」。口径一致无需改。
+- 参考 v3.0.6 其余大项对 v2 不适用（自定义提供商七方案余额/Antigravity 读数/代理池镜像/订阅 YAML——v2 没有对应子系统）；#15 CodeArts 积分翻倍与 #16 Trae 有效期是参考自家 bug 修复，v2 无这些读数路径。
+- 全量 **707** 绿零告警；真机 served 确认新弹窗代码；代理在运行但无真实 wb 凭据，明细数据形态的真机验证留待有号时（解析层已有单测锁形态）。
+## 2026-10-28 第一百零九轮（chat 路由按 TTL 补拉 live 清单 + 三轮调试实录）
+- **★ 模型获取缺口修复**：`resolve_spec` 的补拉判据原来只看 `contains_key`（缺失才拉）——缓存一旦建立，**过期后 chat 路由未命中的新模型永远 404**，直到有人 GET 一次 /v1/models 刷新缓存或重启。GET 侧本来就有 models_ttl 的按平台过期判定，路由侧漏了。修法：路由补拉改用**同一个** `models_ttl(ids, ok)`（缺失或过期都拉）。影响诚实说明：单平台+无名册的情形有 spec_for_model 的「单平台兜底」窄口子放行（设计如此），真正受益的是多平台部署 + 客户端不主动拉清单的长驻场景。
+- **行为测试**（三态锁判据）：缺失→补拉一次；新鲜→复 resolve **不**再拉（不 hammer 上游）；把缓存时间拨老→必须再拉。用 AtomicUsize 计数的 mock /models 断言「补拉是否发生」而**不断言路由结果**（裸名落到哪个平台是另一层策略，测试不该锁）。装配踩坑三连，全记下来：
+  ① **`SocketAddr::to_string()` 没有 scheme** → 拼出的 base_url 变成 `127.0.0.1:57285` → reqwest `builder error`（status=0，看起来像网问题，实际是 URL 非法）。mock 地址一律 `format!("http://{addr}")`；
+  ② `t.replace("let st = state(vec![spec]);", …)` 替换了**全文件第一处**（别的测试的）——同名行遍地都是，段内替换先 slice 定位；
+  ③ 新测试最初没绕开「单平台兜底」（第二个 static 平台没装配成功前，resolve 直接 Some 返回、根本不进补拉分支）——**debug print 三连（targets/fetch 结果/raw）比猜快**。
+- 测试基线 **708**（server 291），零告警；build 通过。代理本轮仍在运行（上轮恢复的）。
+## 2026-10-28 第一百一十轮（用户报障三连：wb 验活假阴性 / 登录观感 / 用户信息展示）
+- **★★ 根因：wb 族验活走了通用 verify_openai**（探 /models），而 copilot.tencent.com 没有这个端点 → **活凭据被判「鉴权失效」**。用户截图铁证：账号积分 5961 是 2 小时前查成功的（query_balance 走 get-user-resource，CLI UA），但「检查」报失效 —— 凭据明明是活的。用户因此以为「跳转登录后拿不到账户」并反复重登（重登多少次都没用，端点不存在）。
+  · 修法：`wb::verify()` 改用**积分查询端点**（get-user-resource）判死活——它就是已验证可用的轻量鉴权探测（用户账号实测通过过），不带对话头族、不烧额度；verify_account 加 "wb" 分派。修好后「设备授权可能已过期」只在真 401 时出现，语义才准。
+- **★ 实测澄清**：设备授权流程**本身完全正常**——`POST /v2/plugin/auth/state` 回 200+state+authUrl（真实授权链接），poll 未授权时正确 pending。所谓「无法获取账户登录」是验活假阴性造成的观感。
+- **★ 用户信息展示（best-effort）**：`wb::fetch_profile()` 走 `GET /v2/plugin/accounts`（无凭据 401，端点存在）+ 宽松候选键解析（nickName/userName/email/planName/avatar 等，**解析不出就不显示**——比硬编码字段名显示假「—」诚实）；账号记录加 `profile` 字段（serde default，旧文件零迁移），保存/设备授权成功/「检查」三处都会拉（检查时补拉是为了老账号不必重登）；前端账号行显示「用户名 · 邮箱」+ 套餐 pill。BUILD → v20261028d。
+- 教训：**「检查」是用户发现凭据问题的主动路径，它一旦假阴性就会把人推进「反复重登」的死循环**。验活端点必须用该平台真实可用的鉴权探测点，通用兜底只适合「有 /models 的 OpenAI 兼容源」。
+- 测试基线 **708** 全绿，零告警；build 通过；真机三路验证（save/start/poll/verify）。
+## 2026-10-28 第一百一十一轮（验活三态化：6 个假阴性 + 2 个假阳性一次修清）
+- **★★ 用户报障的根因是系统性的**：wb 不是孤例。我用代理把「走 verify_openai（探 /models）且非 anon」的源逐个实测，一次查出两类错：
+  · **6 个假阴性**（好凭据被判失败）：mistral-codestral / perplexity / voyageai / wps / codearts / web-glm —— 它们**根本没有 /models 端点**（实测 404），旧实现 `status.is_success()` 一律判死；
+  · **2 个假阳性**（错凭据也判活）：apk-nano 回 200 HTML 首页、cline 回 200 **公开清单**（无需凭据）——旧实现只要 2xx 就算过。
+- **修法：验活结论从 bool 升为三态 `VerifyOutcome`**（Alive / Dead(原因) / Unknown(原因)）＋ `classify_verify_probe(status, body)`：
+  · 401/403 → Dead；404/405/501 → Unknown（端点不存在 ≠ 凭据坏了）；2xx 且响应是**带 data/models 数组的 JSON** → Alive，2xx 但 HTML/无数组 → Unknown；5xx → Unknown；网络失败 → Unknown；
+  · 20 个 adapter 的 bool 结论用 `b2o()` 桥接（它们内部本就用平台真实鉴权端点探测，语义够用）；
+  · **Unknown 不写号池健康、不写平台卡片 last_error**——写上去就是一条假故障；前端 `verified` 字段变三态（true/false/**null**），null 时明确说「无法自动验活，不代表凭据失效，用一次真实对话确认」；
+  · Dead 文案 = **上游真实原因 + 按平台类型的行动指引**（`verify_failure_hint` 因此从死代码变回有用：kiro 指 accessToken、扫码平台提示重扫）。
+- 真机三验证：perplexity/codestral（无端点）→ verified:null「无法自动验活」；zai（有端点+假 key）→ verified:false「HTTP 401 上游明确拒绝」。
+- 测试：新增 `classify_verify_probe_is_three_state`（9 个断言覆盖 6 种状态）+ `accounts_verify_unreachable_reports_unknown`；**3 个既有测试改用 401 mock**（它们本意是验「明确失败要落卡片」，用「连不上」的 mock 在新语义下不该再落卡片）。基线 **710**，零告警。
+- ★ 教训：**「验活失败」必须是「上游明确说了不行」，不能是「我们没测成」**。把探测失败当凭据失效，用户会反复重登一个好账号——这类假阴性比不验活更伤。
+## 2026-10-28 第一百一十二轮（验活二段探测：无法判定 → 明确判定）
+- **★ 上一轮把 6 个假阴性改成「无法自动验活」是诚实但没答问题**。本轮加**二段探测**：`/models` 探不到（404/405）时，回退发一条 `max_tokens=1` 的最小对话，按**鉴权层**的答复判活。
+  · 判据分界是「鉴权过没过」而不是「请求成不成功」：401/403→Dead；**400/422→Alive**（上游说「你参数不对」前提是先认了你的 key）；**429→Alive**（能被限流说明身份已识别）；2xx→Alive；404→Unknown（模型名/端点问题，与凭据无关）；5xx/网络→Unknown；
+  · 只对 **kind=openai 且 chat_supported** 的源做：chatglm 要签名、纯 embedding 源（voyageai/wps）根本没有对话端点，给它们发通用对话只会得到噪音；
+  · 代价：一次约 1 token 的请求，仅用户主动点「检查」时发生。
+- 真机验证：**perplexity / codestral（假 key）从 `verified:null` 变成 `verified:false` +「HTTP 401（对话探测：上游明确拒绝该凭据）」**；voyageai（chat_supported=false）正确保持 null 不做探测。
+- 单测锁判据：401→Dead / 400→Alive / 429→Alive / chat_supported=false→Unknown（mock 上游 /models 一律 404、/chat 按需返状态码）。
+- ★ 顺带记两个 relay 测试的构造技巧：ProviderSpec **没有 Default**、relay 的 dev-dependencies 里**没有 toml** → 测试里用 `serde_json::from_value(json!({...}))` 造 spec（它有 Deserialize）。
+- 测试基线 **711**，零告警；BUILD v20261028e。
+## 2026-10-28 第一百一十三轮（接入源卡片显示登录用户 + 一处性能浪费）
+- **★ 补齐用户报的第三点**：上轮只让「账号」页显示登录用户，用户说的是「接入源**与**账号」都没显示。现在 `/api/platforms` 每行带 `profiles:[{name,email,plan}]`（来自账号记录的 profile），前端卡片：**单账号且有名字时直接显示「张三」，多账号显示「N 账号」**，并在卡片下方渲染「登录用户：张三 · a@b.com [专业版]」；信息缺失时整行不渲染（不占位、不显示假「—」）。BUILD → v20261028f。
+- **★ 顺手修掉一处性能浪费**：第一版实现把 `accounts.rows_snapshot()` 写进了平台循环里——197 个平台会把整张账号表的 JSON **重复构建 197 次**。改为循环外预取一次 `account_rows`，循环内只做过滤。**这类「循环内做全表快照」的写法在面板热路径上很常见，以后加字段先看一眼循环位置**。
+- 前端纯函数 eval 验证：单账号→名字、多账号→「3 账号」、无 profile→「2 账号」、明细行含邮箱与套餐 pill、无 profile 时返回空串。真机确认 197 行全部带 profiles 字段（无 profile 时为 `[]`，不伪造）。
+- 测试基线 **711**，零告警；build 通过。
+## 2026-10-28 第一百一十四轮（59 个假阳性：公开 /models 掩盖错 key）
+- **★★ 查出比上一轮更大的问题**：体检 [OK] 的 64 个源里，**59 个是「需要凭据但无凭据也能 200」**——OpenRouter / NVIDIA / HuggingFace / cline 等的 `/models` **本来就是公开的**，拿它验活等于**任何 key 都通过**（用户存错 key → 面板显示「验活通过」→ 一对话才 401）。真机：openrouter 假 key 曾判活。
+- **修法：三段式验活**（`verify_openai`）：
+  ① 清单 404/405（端点不存在）→ 对话探测（上一轮，解决假阴性）；
+  ② 清单 401/403 → 直接判死；
+  ③ **清单通过也要证伪**：对「需凭据 + 支持对话 + kind=openai」的源再补一次对话探测，**只有明确结论才采用**，Unknown（如模型名不对 404）沿用原判定——不误杀；
+  · anon 源不做证伪（本来没凭据）、chatglm/专用 adapter 不走这条（要签名/有专用 verify）；
+- 新增 spec 字段 `verify_chat`（cline 已置 true）：**跳过清单探测**直接用对话——清单公开且巨大时（cline 469 条）省一次大响应。真机：cline / openrouter / nvidia 假 key 全部从「判活」变成「HTTP 401/403 对话探测拒绝」。
+- 单测：`alive_models_is_challenged_by_chat_probe` 四态（清单200+对话401→死 / 清单200+对话200→活 / 清单200+对话404→**沿用活**不误杀 / anon 不被探测）。对照组测试因第三段生效而改语义（原断言「默认路径假阳性」已不成立——正是修好的证明）。
+- 测试基线 **713**，零告警；真机 openrouter/nvidia/cline 三验证。
+- ★ 教训升级：**「清单能拉到」不等于「凭据有效」**——公开清单是免费额度的常见形态，验活必须落到「鉴权层会不会拒」这一点上。
+## 2026-10-28 第一百一十五轮（网络抖动不再误判为凭据失效）
+- **★ 扫出同类系统性缺陷**：20 个 adapter 的 verify 全是「请求 Ok 按判据给 bool，请求 **Err 一律 false**」——把「网络抖动/超时」和「凭据被拒」混成同一个 false。用户网络不好时点「检查」，**好账号被标「鉴权失效」并写进号池健康**，白重登一次。12 个 adapter 有这条 `Err(_) => false`。
+- **修法选型（关键取舍）**：逐个改 20 个 adapter 的签名/Ok 分支风险高且机械；改为在 `verify_account` 层做**二次确认**——第一次判死时间隔 300ms 再验一次：第二次活→判活（抖动）、第二次无法判定→判无法判定、第二次仍死→判死（两次一致才可信）。**零 adapter 改动，一次覆盖全部 20 个**。代价：仅「第一次失败」时多一次请求（用户手动点检查才发生）。
+- 另外把 `wb::verify` 单独升为三态：业务码非 0 → Dead(带上游 msg)、**网络失败 → Unknown**（不再判死）。这是用户平台的验活主路径。
+- 单测：mock 第一次 401 第二次 200 → 判活且**恰好请求 2 次**（锁住「只重试一次」，避免无限重试）。
+- 测试基线 **714**，零告警；最坏情况（真失效）多一次请求 + 300ms，可接受。
+- ★ 教训延续：「**探测失败**」与「**明确拒绝**」必须在类型上分开（三态 + 二次确认双保险），否则用户会被自己的网络问题误导去重登。
+## 2026-10-28 第一百一十六轮（大清单模型列表：分页 + 本地筛选）
+- **★ 实测过的性能/可用性问题**：抽屉里是全量渲染模型行——aihubmix 有 **671** 个模型、api-gateway **482** 个，一次插几百个 DOM 节点会让抽屉明显卡顿，而且用户根本翻不到想找的那个。
+- 修法：`srcModelsBlock` 拆成「壳 + `modelRowsHtml(可重入)`」，超过 `MODEL_PAGE=40` 时**只渲染首页** + **本地筛选框**（输入即时过滤，`setModelFilter` 只重渲染该列表、不整页重绘所以焦点不丢）+「显示全部 N 个」链接；无匹配时给明确提示。
+- eval 验证 5 种形态：小清单(3)→3 行无搜索框 / 大清单(120)→**40 行**+搜索框+「还有 80 个未显示」/ 筛选 model-1→31 行 / 显示全部→120 行 / 无匹配→提示。真机确认 BUILD v20261028g 已分发。
+- 诚实说明：无凭据的新实例看不到 671 个模型（`/v1/models` 只聚合可用平台），这个优化对**配好 key 的用户**（aihubmix 等）才显现。
+- 测试基线 **714**，零告警。
+## 2026-10-28 第一百一十七轮（周期性体检：新发现证书过期源 + NET 显示原因）
+- **体检**（139 live 源，9s）：通 64 / 需凭据 72 / 连不上 1 / 限流 1 / 失败 1（已知 405）/ **漂移 0** —— live 清单与上游一致，无新增漂移。
+- **★ 新发现 `api-tokenrouter` 证书间歇性过期**：CONNECT 通（200）但隧道内 TLS 握手 `CERT_HAS_EXPIRED`。连探 6 次：**4 次证书过期、2 次正常回 HTTP 401** —— 该站多后端/多节点，其中一个证书过期。用户配了 key 也会有约 2/3 请求失败 ⇒ `enabled=false` + notes 记全实测数据（等上游续期改回 true）。
+- **顺手修好 `[NET]` 的信息量**：旧实现不管什么原因都只打一句「连不上（超时/拒连）」，而「证书过期 / 代理拒连 / 超时」在用户眼里长得一样、处置完全不同（等上游 / 查代理 / 重试）。现在 `[NET]` 行打印原因摘要（110 字截断）。
+- **★ relay 的 `network_hint` 增加证书识别**：错误串含 `certificate`/`cert` 时明确说「这是上游站点的问题，与你的网络和凭据无关，通常只能等上游续期」——否则用户会去查自己的代理、重配凭据。
+- ★ TOML notes 的老坑又踩一次：**notes 里不能有真实换行、也不能嵌裸双引号**（`旧记录："…"` 让字符串提前结束）。单行字符串是唯一稳妥写法。
+- 测试基线 **714**，零告警。
+## 2026-10-28 第一百一十八轮（自查上一轮埋的静默失效：poll 缺 platform）
+- **★ 自查发现静默失效**：上上轮给「设备授权登录成功后拉登录用户信息」写的代码依赖 `out.get("platform")`，而 `login.poll` 的返回**从来没有 platform 字段** → 那段代码**永远不会执行**。真机实测确认（poll 返回只有 `{ok, session, account_id?}`），修好后返回 `{ok, platform:"wb-gateway", status:"pending"}`。
+- 修法：poll 的返回构造抽成纯函数 `poll_response(&Session, Option<(String,bool)>)` + 两个 `#[cfg(test)]` 辅助，并加**契约测试** `poll_response_carries_platform_and_account`——漏字段是静默失效，只有测试能盯住。
+- ★ 教训：**新写的调用方代码，必须确认它依赖的字段真的存在**。我上上轮写了 `out.get("platform")` 却没验证 poll 的返回结构，代码编译通过、测试全绿，功能却是死的。`Option` 解构 `if let (Some(a), Some(b))` 恰好把「字段不存在」变成了静默跳过——这类写法要格外警惕。
+- 测试基线 **715**，零告警；真机验证 poll 返回带 platform。
+## 2026-10-28 第一百一十九轮（wb 验活分派从未命中 + 国际版 X-Domain）
+- **前后端字段契约核对 19/19 通过**（platforms.rates/rates_source/profiles、health.tasks/limits/credits、logs、auth.save.verified 三态/profile、accounts.profile/token_limit、auth.start.login_url、auth.poll.platform、pool、runtime）——上轮那类静默失效目前没再发现。
+- **★★ 抓到真 bug：wb 验活分派从未命中**。我把 `"wb" => wb::verify(...)` 加在 `match spec.upstream_kind` 里，但 **wb 族的 upstream_kind 是 openai**（同协议透传），身份标记是 `signer = "wb"` —— 那个分支永远不执行，wb 实际一直走通用 verify_openai。实测症状：验活消息里出现「对话探测」字样（只有 verify_openai 会那么说）。修法：`if spec.signer == "wb" { return wb::verify(...) }` 前置判断。
+- **wb::verify 的错误分类**：post_json 对非 2xx 返回字符串 Err，第一版把所有 Err 当「网络失败」→ 真 401 显示成「无法验活」（用户不知道要不要重登）。现在按前缀分：`HTTP 401/403` → Dead（且只留状态码，不带网关 HTML body）；其余 → Unknown。
+- **国际版 X-Domain**：wb 国内外**同一个端点**（copilot.tencent.com），上游靠 `X-Domain` 头判站点（参考项目 billing 也这么做）。新增 spec 字段 `domain`（wb-gateway=www.workbuddy.cn / wb-gateway-intl=www.workbuddy.ai），`post_json_domain()` 带头发送，`wb::verify` 与 `query_balance` 都用它；server 三处 query_balance 调用点改传 `accounts.domain_of(platform, secret)`（账号上的 domain 是登录时上游给的，比 spec 更准）。
+- ★ 教训延续（第四次同源）：**「我加的代码在跑」需要证据，不是自觉**。这次是靠「消息里出现了不该出现的『对话探测』字样」才发现的——**输出的措辞是判断「哪条代码路径在跑」的免费探针**。
+- 测试基线 **715**，零告警；真机两验证：wb-gateway / wb-gateway-intl 假 token 都正确 `verified:false` + 「HTTP 401（上游拒绝了这把凭据）」。
+## 2026-10-28 第一百二十轮（国际版账号不刷积分：硬编码平台列表漏了一个）
+- **★ 又是一个静默失效**：`checkin_all`（签到）与 `refresh_credits_all`（积分刷新）里写死 `["wb-gateway", "codebuddy"]`，而**倍率刷新**那处写的是三站（含 `wb-gateway-intl`）——于是**国际版账号永远不会自动刷积分、不会签到**，循环里 `continue` 掉，不报错、不记日志。
+- 修法：抽成单一来源 `pub(crate) const WB_CREDIT_PLATFORMS = &["wb-gateway", "codebuddy", "wb-gateway-intl"]`，三处循环统一用它；加**一致性测试** `wb_credit_platforms_are_all_recognized`（双向：清单里每个都被 `wb_checkin_base` 认得 + 认得的都在清单里）。**并做了变异验证**：把 intl 从常量里删掉，测试当场变红（「wb-gateway-intl 认得但不在清单里，没人给它刷积分」），恢复后转绿。
+- `wb_checkin_base` 从「只认国内两站」扩到三站：依据是 2026-10-28 实测——intl 带 X-Domain 请求返回 **401（拒绝凭据）而不是 404（端点不存在）**，说明端点同域名可用。旧的 `base_only_cn_platforms` 测试相应改名/改语义。
+- ★ 教训（第五次同源，这次是「列表漏项」）：**同一个概念在多处手写列表，必然有一天不同步**。抽成常量 + 双向一致性测试，比「小心一点」可靠得多。
+- 测试基线 **716**，零告警。
+## 2026-10-28 第一百二十一轮（系统性审计：CLI 侧漏了国际版 + 站点域写死）
+- **审计方法**（值得复用）：全仓扫两类模式——① `["平台id", ...]` 形式的硬编码列表；② `signer == "…"` / `upstream_kind == "…"` 的分派判定（15 处，逐一核对均合理）。
+- **★ 抓到 CLI 侧的两处同源缺陷**（`aigw/src/main.rs` 的 `daily_growth` 成长任务）：
+  · 遍历 `["wb-gateway", "codebuddy"]` —— 后者是**根本不存在的历史遗留平台**，而真实存在的 `wb-gateway-intl` **从来没跑过成长任务**；
+  · `web_base` 写死 `if platform == "codebuddy" { .cn } else { workbuddy.cn }` —— **就算遍历到国际版也会把它导向国内站**，请求必然失败。
+- 修法：遍历改为 `all_specs().filter(|s| s.signer == "wb")`；站点域抽成 `wb::web_base_for(&spec)`（唯一来源是 `spec.domain`：wb-gateway=www.workbuddy.cn / wb-gateway-intl=www.workbuddy.ai），加测试 `web_base_follows_spec_domain`（含「国际版必须指向 .ai」「非 wb 族/无 domain 返回 None 而不是猜一个域」）。
+- 残留审计：全仓 `["wb-gateway"…]` 字面量只剩常量定义与两处测试断言——**唯一来源已收口**。
+- 测试基线 **717**，零告警；build 通过。
+- ★ 这一系列（第一百十八~一百二十一轮）共同的根因是「**同一个事实在多处手写**」：平台清单、站点域、分派条件、返回字段。每发现一处就收口成单一来源 + 一致性测试，是目前最有效的解法。
+## 2026-10-28 第一百二十二轮（审计前端：3 个 cookie 平台缺专属粘贴提示）
+- 审计口径：前端 44 处平台字面量主要在两处映射（`LOGIN_UI` 平台→登录面板、`COOKIE_HINT` 平台→粘贴提示）。**不能被「有多少处硬编码」唬住，要看它导致什么后果**——`LOGIN_UI` 缺失会 fallback 到**正确的 cookie 面板**（不是错误形态），所以真正的问题是 `COOKIE_HINT` 缺失时文案含糊。
+- **★ 抓到 3 个平台缺提示**（`apk-nano` / `apk-wps` / `web-glm`）：它们落到通用文案「复制整段 Cookie」，而其中 **web-glm 根本不吃整段 Cookie —— 它要 `chatglm_refresh_token` 的值**（adapter 拿它当 Bearer 去换 access_token）。按旧文案贴整段 cookie 的人 100% 验活失败。
+- 补齐三条提示（内容都从 adapter/spec 的真实凭据形态反推，不是猜的）：web-glm 要 refresh_token 值、apk-wps 关键是 wps_sid、apk-nano 整段 Cookie（后两者仅验活）。
+- **核对口径的坑**：第一版核对拿「所有 auth=cookie 平台」比 COOKIE_HINT，报「仍缺 5 个」——那 5 个（antigravity/metaso/mimo/kiro/qwen）其实**有自己的专属粘贴面板**，根本不走 COOKIE_HINT 路径。正确口径是「走 fallback 面板的 cookie 平台」，改口径后 6/6 全覆盖。**统计口径错会制造假缺陷**。
+- 测试基线 **717**，零告警；BUILD v20261028h。- ★ 工具坑（本轮踩两次）：**在同一个脚本里串行跑 `cargo test` 再 `cargo build`**，第二次调用会与第一次的残留状态/文件锁竞争，输出「32 passed ... exit 101」这种误导性结果（看起来像测试挂了，其实只是 cargo 退出异常）。判据：单跑 `cargo test` 立即 `717 全绿 exit 0`。**跑测试与构建要分两次独立调用，且读结果前先确认 exit code 与「test result」行同时正常**。
+## 2026-10-28 第一百二十三轮（积分按钮：不该显示的平台也显示）
+- **体验瑕疵**：账号页每个账号都有「积分」按钮，但只有 wb 族有计费端点——点其它平台的号只会弹「该平台没有积分余额端点」。后端其实一直如实回 `supported:false`，**问题是按钮不该出现**。
+- 修法（守住「单一来源」原则）：**不由前端抄一份平台列表**，而是后端在账号行下发 `balance_supported`（来源就是 `wb::wb_checkin_base(platform).is_some()`），前端 `a.balance_supported ? 按钮 : ''`。
+- 顺带核对账号行全部按钮是否都是「平台专属」：检查 / 限额 / 改名 / 停用 / 删除都对所有平台有效（限额是本地治理、检查走各平台验活），只有「积分」是专属 —— 已收口。
+- 真机验证：wb-gateway → `balance_supported:true`（显示），api-perplexity → `false`（隐藏）。BUILD v20261028i。测试基线 **717**，零告警。
+- ★ 模式：**「点了才报不支持」的按钮都是设计缺口**——凡是动作有前置条件（平台能力、凭据形态、enabled 状态），就该把那个条件下发到前端来控制可见性，而不是等用户点了再教育他。
+## 2026-10-28 第一百二十四轮（国际版用户看不到签到/成长任务入口）
+- **★ 前端最后一份「能力判断」硬编码**：账号页 `const wbN = rows.filter(a => a.platform === 'wb-gateway' || a.platform === 'codebuddy').length` —— 决定签到 / 成长任务 / 自动签到开关显不显示，**漏了 wb-gateway-intl**。后果：只有国际版账号的用户，`wbN=0`，**整个 wb 功能入口都不显示，功能等于不存在**（后端明明支持三站）。
+- 修法：改用上一轮下发的 `balance_supported`（单一来源 `wb::wb_checkin_base`）+ 排除 anon 占位行 → `rows.filter(a => a.balance_supported && !a.anon).length`。前端不再抄平台列表。
+- 真机对照验证：只造 wb-gateway-intl + perplexity 两个账号 → **旧逻辑 wbN=0（入口全隐藏）**、新逻辑 wbN=1（正确计入）。BUILD v20261028j。
+- 顺带审计前端剩余 17 处 `p.id === '…'`：全是 **UI 文案/面板分支**（wbName 显示哪个站名、各平台扫码说明），属于合理的前端呈现逻辑；「能力判断」类的硬编码已收口干净。
+- 测试基线 **717**，零告警。
+- ★ 这一串（118~124 轮）的完整清单：返回字段缺失（poll.platform）、分派条件写错（signer vs kind）、平台清单三处不同步（后端）、站点域写死（CLI）、cookie 提示缺失（前端）、能力判断硬编码（前端 wbN）。**「同一个事实在多处手写」是这类 bug 的唯一根因**，收口成后端下发是唯一可靠的解法。
+## 2026-10-28 第一百二十五轮（倍率：国际版正常，刷新健壮性与信息量）
+- **先证伪再动手**：担心「国际版模型名与离线倍率表对不上」——实测两站 `models` **完全相同**（17 个），与离线表命中 **5/17**（hy3 / glm-5.3 / glm-5.2 / kimi-k2.6 / minimax-m3），两站都下发 5 条 rates，`rates_source=离线(2026-09)`。未命中的 12 个（hy4-preview、hy3-x、deepseek-v4.x、glm-5.1/5.3-flash/5v-turbo、kimi-k3-1/2.8-preview/2.7、auto）是 **APK 之后新上线**的模型，只能靠在线刷新拿到——符合「查不到不显示」的设计，**不是 bug**。
+- **修倍率刷新的健壮性**：`'rates` 循环原来「第一个有账号的平台失败就 break」——多平台部署时第一个号凭据过期（401）就再也不试后面的好号，用户永远看到「回退离线表」。改为 `continue 'rates` 逐个尝试。
+- **增强刷新消息的信息量**：成功时区分「N 条」与「含 fresh 条静态表没有的新模型」——用户据此判断 hy4-preview 这类新模型的倍率到底拿到没有。新增 `model_rates::offline_rate_for()`（**只查静态表、不看在线层**），并加测试锁住这个区分（在线层注入 hy4-preview=0.55 后：`rate_for` 应看到、`offline_rate_for` 必须仍是 None）。
+- 测试基线 **718**，零告警；build 通过；真机确认 wb / wb-gateway-intl 都下发 5 条 rates。
+## 2026-10-28 第一百二十六轮（五入口实测 + 两个真 bug）
+- **六入口端到端实测**（本地 mock 上游 + custom API 接入）：chat/completions、messages、responses、count_tokens、chat 流式全部 200；search 暴露 bug（见下）；`/v1/models` 聚合正常。
+- **★ bug 1：`/v1/search/messages` 无账号回 503 `overloaded_error`** —— 那个错误类型在官方 SDK 里是**可重试**的，客户端会自动重试；而「网关里没这个平台的账号」重试一万次也不会变好。改成 400 + `invalid_request_error`，文案注明「网关侧配置缺失，重试不会变好」。
+- **★ bug 2：上游无视 `stream:true` 回整包 JSON 时，网关把裸 JSON 塞进 `text/event-stream`** —— 客户端按 SSE 解析必崩（实测 content-type 是 SSE、body 里没有任何 `data:` 前缀）。新增 `wrap_json_as_sse()`：整包读下，包成「一帧 data + [DONE]」，统计口径复用同一个 `SseParser`（否则这类平台台账恒记 0 token）。为统一两个分支的返回类型，把流类型收成 `BoxedByteStream`（`Pin<Box<dyn Stream + Send>>`）——`stream::once` 不 Unpin，必须 Box::pin。
+- 测试：`json_response_is_wrapped_into_sse`（帧头/帧尾/原文完整/统计吃到 usage 3+2）、`empty_json_response_still_terminates_sse`（空 body 也要给 [DONE]，否则客户端挂到超时）。
+- 测试基线 **720**，零告警；真机验证包装后客户端拿到合法 SSE。
+## 2026-10-28 第一百二十七轮（流式协议实测 + 截断语义被吞）
+- **实测 `/v1/messages` 与 `/v1/responses` 的流式**（Claude Code / Codex 的日常路径）：事件序列都正确 —— messages 是 message_start→content_block_start→delta×N→content_block_stop→message_delta→message_stop，responses 是 response.created→output_item.added→content_part.added→delta→completed。`message_start` 里 usage 为 0/0 是**流式固有的不可知**（真实值在 message_delta，实测 5/2），不是 bug。
+- **★ 抓到转换层吞字段**：上游 `finish_reason:"length"`（被长度截断）时，Responses 响应恒写 `status:"completed"` + `incomplete_details:null` —— **客户端（Codex）会认为是完整答案**、据此决定不再续写，用户只看到「答到一半停了」且找不到原因。
+- 修法：`openai_to_responses` 与流式的 `response.completed` 都按 finish_reason 映射：`length|max_tokens` → `incomplete` + `{"reason":"max_output_tokens"}`；`content_filter` → `incomplete` + `content_filter`；其余/缺失 → `completed`（**别把「上游没给」误报成截断**）。
+- 测试 `responses_status_reflects_finish_reason`（四种：length / content_filter / stop / 无 finish_reason）。真机验证两种形态都带上了 incomplete_details。
+- 测试基线 **721**，零告警。
+- ★ 一句总结：**协议转换层最危险的错误不是「报错」，而是「静默把上游的坏消息改成好消息」**（截断→completed）。这类字段要逐个对照上游语义，而不是照抄字段名。- ★★ **同一轮里自己踩回老坑**：新加的 `offline_rate_for_ignores_online_layer` 与既有 `lookup_and_online_layer_in_order` 共享全局 `ONLINE`，并行跑互相污染 → `lookup_and_online_layer_in_order` **稳定失败**（不是偶发！连跑两次都红）。修法：把断言合并进既有测试（同一个测试内串行），并删掉独立测试。**修正后连跑三次全量 720 全绿**。
+  · 这次的教训比上次更深：我甚至在注释里写了「与本模块既有测试串行用同一全局」，但那只是**自我安慰**——Rust 测试默认并行，注释不会让它变串行。**只有合并进同一个 `#[test]` 才真的串行**。
+- ★ 另外记一个诊断纪律：**连续三次遇到「exit 101 但重跑就好」不能当它是工具噪声**。这次查明后是稳定失败（全局态污染）。判定方法：连跑两次，若失败用例相同就是真 bug；若每次不同才是 flaky；若「重跑就好」要怀疑**并行顺序依赖**。

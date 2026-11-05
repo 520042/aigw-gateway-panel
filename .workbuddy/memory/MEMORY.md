@@ -1,296 +1,117 @@
-# 网关项目 · 长期记忆
+# 网关项目 · 长期记忆（2026-11-05 蒸馏版）
+
+> 这里只放**跨会话必须知道**的结论、规则和坑。
+> 逐日过程、调试实录、中间数据一律看 `memory/YYYY-MM-DD.md`。
+> 旧版 228KB 全文已归档为 `MEMORY.full-2026-11-05.bak`（含 10-26 起 127 轮改造记录，需要细节时再查）。
 
 ## 定位
-免费 AI 额度 → 本地 OpenAI 端点（`/v1` 暴露 chat/completions、models）的聚合面板。单 EXE 自洽，无外部网关。
 
-**主力 = `aigw2/`（Rust workspace，9 crates + 75 份 `providers/*.toml`）**，自 2026-10-16 起持续演进。
-`aigw-panel-rs/`（第一代 Rust）与 `aigw-panel/`（Python 原版）都是历史实现，只作对照，不再加功能。
+免费 AI 额度 → 本地 OpenAI 端点（`/v1` 暴露 chat/completions、models）的聚合面板。
+单 EXE 自洽，无外部网关。
 
-## 硬规则（被纠正过，必须遵守）
-- **UI 只显示「国内站 / 国际站」两行**（WorkBuddy/CodeBuddy 合并卡）。`apk-codebuddy`/`apk-codebuddy-cn` 是 `wb-gateway-intl`/`wb-gateway` 别名，不加 `gwlogin.PLATFORMS` 规格，不进 `api/login?action=platforms`。★ 云端旧摘要「4 行独立」是过期错误记录，2026-10-14 被当面纠正，以本段为准。
+**主力 = `aigw2/`（Rust workspace，9 crates + 百份 `providers/*.toml`）**，2026-10-16 起持续演进。
+`aigw-panel-rs/`（第一代 Rust）与 `aigw-panel/`（Python 原版）是历史实现，只作对照，不再加功能。
+
+## 硬规则（被当面纠正过）
+
+- **UI 只显示「国内站 / 国际站」两行**（WorkBuddy/CodeBuddy 合并卡）。`apk-codebuddy`/`apk-codebuddy-cn` 是 `wb-gateway-intl`/`wb-gateway` 别名，不加 `gwlogin.PLATFORMS` 规格、不进 `api/login?action=platforms`。
 - 绝不引入/提及 WorkBuddy Gateway（Go EXE，已彻底移除）。
-- 数据目录 = `%LOCALAPPDATA%\aigw2\data\`（aigw2 专用；`aigw-panel-rs\data`、`aigw-panel\data` 都是陈旧位，只在 import_legacy 时读）。
-- 安装位 `%LOCALAPPDATA%\aigw2\`（非 Downloads，火绒会拦）。
-- aigw2 铁律：**禁扫码 / 禁无头浏览器 / 禁 CDP·Chromium**。登录只允许「跳转链接+手动粘贴回调」「设备码」「API Key」「Cookie 粘贴」四种。
+- 数据目录 = `%LOCALAPPDATA%\aigw2\data\`。安装位 `%LOCALAPPDATA%\aigw2\`（Downloads 会被火绒拦）。
+- **aigw2 铁律：禁扫码 / 禁无头浏览器 / 禁 CDP·Chromium**。登录只允许「跳转链接+手动粘贴回调」「设备码」「API Key」「Cookie 粘贴」四种。
+- 结论先行 + 表格优先；不猜硬件/规格参数；存疑单列「待确认」。
 
 ## 构建 / 部署
-- 构建（aigw2；workdir 必须是 `aigw2/`）：`$env:PATH="$env:USERPROFILE\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR='C:/aigw-target'; cargo build --target x86_64-pc-windows-msvc -p aigw`
-- 产物 `C:\aigw-target\x86_64-pc-windows-msvc\debug\aigw.exe`（★ 不是 `C:\aigw-target\debug\aigw.exe`，那是旧版）
-- 部署：`taskkill /IM aigw.exe /F` → 拷 exe + `providers\*.toml` 到 `%LOCALAPPDATA%\aigw2\` → `schtasks /Run /TN Aigw2Service`（计划任务 BootTrigger + InteractiveToken，参数 `--port 8800`）
-- **改前端 `aigw2/web/app.js` 必须重新 cargo build**（rust-embed 内嵌），再 Ctrl+Shift+R
-- 测试：`cargo test --target x86_64-pc-windows-msvc`（2026-10-20 实测 **127 项全绿**：core 3 / crypto 20 / pool 16 / registry 10 / relay 19 / server 38 / store 21）
-- 实测接口一律用 node fetch：PowerShell `Invoke-WebRequest` 会把 UTF-8 当 GBK 解，中文全乱码（不是服务端 bug）
 
-## 模块地图（aigw2，当前主力）
+```powershell
+# workdir 必须是 aigw2/
+$env:PATH="$env:USERPROFILE\.cargo\bin;$env:PATH"
+$env:CARGO_TARGET_DIR='C:/aigw-target'
+cargo build --target x86_64-pc-windows-msvc -p aigw
+```
+
+- 产物：`C:\aigw-target\x86_64-pc-windows-msvc\debug\aigw.exe`（**不是** `C:\aigw-target\debug\aigw.exe`，那是旧位）
+- 部署：`taskkill /IM aigw.exe /F` → 拷 exe + `providers\*.toml` 到 `%LOCALAPPDATA%\aigw2\` → `schtasks /Run /TN Aigw2Service`（BootTrigger + InteractiveToken，`--port 8800`）
+- 改前端 `aigw2/web/app.js` **必须重新 cargo build**（rust-embed 内嵌），再 Ctrl+Shift+R
+- 测试：`cargo test --target x86_64-pc-windows-msvc`（2026-10-20 基线 **127 项全绿**）
+- cargo 一律加 `--offline`：git 全局 `http.proxy=127.0.0.1:7890`（Clash 常不在跑）会让 crates.io 拉取全失败
+- 实测接口用 **node fetch**：PowerShell `Invoke-WebRequest` 把 UTF-8 当 GBK，中文全乱码（不是服务端 bug）
+
+## 模块地图（aigw2）
+
 | crate / 文件 | 职责 |
 |---|---|
-| `crates/aigw-core` | `ErrorClass::from_status` / `refine_biz` 错误分类（StreamChunk 仍是死代码） |
-| `crates/aigw-registry` | `ProviderSpec` 声明式接入 + `load_dir_lenient` 加载 75 份 toml（坏文件只跳过不炸全表）+ `apply_settings` 解 `@占位符` |
+| `crates/aigw-core` | `ErrorClass::from_status` / `refine_biz` 错误分类 |
+| `crates/aigw-registry` | `ProviderSpec` 声明式接入；`load_dir_lenient`（坏文件只跳过）+ `apply_settings` 解 `@占位符` |
 | `crates/aigw-crypto` | 签名：glm X-Sign / codearts SDK-HMAC-SHA256 / loomy / qoder / zcode |
-| `crates/aigw-store` | `accounts.rs` 凭据池 / `custom.rs` 自定义 API / `free.rs` 公益站 / `flags.rs` 逐模型·逐平台停用 / `atomic.rs` tmp+fsync+rename / `lib.rs` SQLite usage（DB 不可用降级 JSON 并读回历史） |
-| `crates/aigw-pool` | 号池六件套：InFlight 租约(≤2) / (账号,模型)冷却 / WafIpGate(401·403→账号级 30min) / RecentPick / 半开 / forget_account |
-| `crates/aigw-relay` | 出站 HTTP + 平台反代：`lib.rs` 通用 OpenAI 透传与流式 `tap_passthrough`；`doubao/yuanbao/kuku/metaso/glm/loomy/codearts` 专用；`auth_login.rs` 全部登录链路；`wb.rs` 每日签到；`proxy.rs` 出站代理 |
+| `crates/aigw-store` | `accounts` 凭据池 / `custom` 自定义 API / `free` 公益站 / `flags` 逐模型停用 / `atomic` tmp+fsync+rename / `lib` SQLite usage（DB 挂了降级 JSON） |
+| `crates/aigw-pool` | 号池六件套（见下） |
+| `crates/aigw-relay` | 出站 HTTP + 平台反代：`lib.rs` 通用透传与流式 `tap_passthrough`；`doubao/yuanbao/kuku/metaso/glm/loomy/codearts/deepseek/coze/devin/orcaterm` 专用；`auth_login.rs` 登录链路；`wb.rs` 签到；`proxy.rs` 出站代理 |
 | `crates/aigw-server` | axum 路由 + `guard` 门禁 + `AppState`（`spec_for_model`/`resolve_spec`、模型缓存、备份、usage API、rust-embed 前端） |
-| `crates/aigw` | bin：CLI（host/port/token/providers/install/purge）+ 启动装配 + `warm_models` 预热 |
-| `web/app.js` + `index.html` + `style.css` | 单页前端（5 视图：总览/接入源/账号/用量/关于），rust-embed 内嵌 |
-| `providers/*.toml` | 75 份平台规格（free-* 公益站 / api-* / apk-* / sub-* / web-* 等） |
+| `crates/aigw` | bin：CLI（host/port/token/providers/install/purge）+ 启动装配 + `warm_models` |
+| `web/`（app.js/index.html/style.css） | 单页前端（总览/接入源/账号/用量/关于），rust-embed 内嵌 |
+| `providers/*.toml` | 平台规格：free-* 公益站 / api-* / apk-* / sub-* / web-* 等 |
 
 ### aigw2 关键机制（改代码前必读）
-- **门禁** `guard`：Host 白名单 → Origin/Referer 白名单 → `/api/*` 令牌（`/v1/*` 不校验，SDK 直连）。回环监听时默认 token=None。
-- **路由** `spec_for_model`：`模型@平台` 显式 → 静态 models → 整表缓存索引 → 每平台 live 缓存兜底；**已取消「未知模型打到第一个启用平台」的静默兜底**，未知模型一律 503。
-- **凭据可用性** `platform_secret` / `platform_routable` / `platform_supported` / `platform_usable`：没凭据的平台模型不进 `/v1/models`。
-- **超时**：connect 10s / read 300s（kilo 流式实测首包 134s）/ 非流式总时长 180s / 拉模型清单 12s；`network_hint()` 把超时翻成人话。
-- **流式记账**：`tap_passthrough` 用 tokio mpsc 回传统计（旧版 std mpsc 阻塞 worker 会饿死线程池）；中途出错补发 error 帧 + `[DONE]`；下游断开记失败不记成功。
 
-### 历史实现：aigw-panel-rs（第一代 Rust，只作对照）
-| 文件 | 职责 |
+- **门禁 `guard`**：Host 白名单 → Origin/Referer 白名单 → `/api/*` 令牌（`/v1/*` 不校验）。回环监听默认 token=None。
+- **路由 `spec_for_model`**：`模型@平台` 显式 → 静态 models → 整表缓存索引 → 每平台 live 缓存；**未知模型一律 503**（已取消「打到第一个启用平台」的静默兜底）。
+- **可用性**：`platform_secret` / `platform_routable` / `platform_supported` / `platform_usable`；没凭据的平台模型不进 `/v1/models`。
+- **超时**：connect 10s / read 300s / 非流式总时长 180s / 拉清单 12s；`network_hint()` 翻人话。
+- **流式记账**：`tap_passthrough` 用 tokio mpsc 回传统计（std mpsc 会饿死线程池）；中途出错补发 error 帧 + `[DONE]`；下游断开记失败。
+
+## 号池 / 余额 / 清单 / 前端 / 登录（合并速查）
+
+- **号池六件套**（`aigw-pool`）：InFlight 租约（同账号+模型 ≤2）/ (账号,模型) 冷却 `min(30s·2^n,900s)×抖动` / WafIpGate（401·403→账号级 30min）/ RecentPick（60s 内选过 ≥2 次让位）/ 半开（全挡时放行最紧迫）/ `forget_account`（删号清幽灵）。冷却键必须用**上游真名**。
+- **错误语义**：Auth 401 / Quota 402 / Rate 429 / Rejected 400 / Waf 403 / Transient 502（`status_for_class`）。
+- **余额/积分**：响应多是资源包列表，对 `Accounts[]` 按 `CapacityUnit==credits` 求和（只取首条必错）；到期优先级 `CycleEndTime>ExpiredTime>DeductionEndTime`；分桶 expired/d1/d3/d7/d14/d30/later；60s 缓存；死号要清余额快照，否则加权反噬。
+- **模型清单**：顺序 = 专用分支（wb/loomy/yuanbao/orcaterm）→ 通用实时 → 缓存 → 静态；**静态不许覆盖 live**。元宝模型：`POST {"agentId":"naQivTmsDa"}` + 头 `X-Exp-Params: enableNewPcStyle=2`。
+- **前端**：改完 `node --check` 不够，要 `node test_views.js` + headless 截图；`index.html ?v=` 已删，版本号只看 `app.js` 的 `BUILD`；CSS 注释禁 `*/` 提前闭合（校验 `/*`==`*/` 计数 + brace 平衡）。
+- **登录**：设备码 = wb 族 / MiniMax / Kimi(RFC8628) / Grok(OIDC) / Meta Muse / Cline(WorkOS)；PKCE 回调 = Codex(1455) / Claude(54545) / Antigravity(51121) / Devin / Trae（回调直传 refreshToken→ExchangeToken）；跳转轮询 = CodeArts(华为 ticket 1s×120→AK:SK) / Qoder / Lobster。save 即验活。
+- **验活三态**：ok / auth / unknown。网络抖动不许判成凭据失效；公开 `/models` 会掩盖错 key（59 个假阳性教训）。
+- **Token 限制器**：从「事后冷却」改「事前控制」，`available()` 必须同时看限制器，否则粘性路由/搜索兜底会绕过（踩过两次）。
+
+## 高频坑
+
+| 坑 | 现象 | 解法 |
+|---|---|---|
+| `load_dir` 白名单不同步 | 新增 `upstream_kind`/`signer` 后**全表静默丢失**（122→47 平台） | 改 registry 白名单必须同步 |
+| 旧数据 secret 脱敏 | 后台拿到 `***` | 用 `login.raw_rows()`，不用 `list_accounts()` |
+| 时区 | 时间戳差 8 小时 | `now_local()` 必须 +8h |
+| `/api/route` 契约 | 前端拿不到映射 | 必须是对象映射，不能 `Vec<String>` |
+| 单测写死随机量上限 | 偶发失败 | 只断言下限 |
+| `list_accounts()` 空字段 | 前端 XSS 审计时的坑 | 输出一律转义 |
+
+## 里程碑
+
+| 日期 | 事 |
 |---|---|
-| `handlers/api.rs` | barrel：`pub mod routers; pub use routers::*;` |
-| `handlers/api/routers/*.rs` | 14 域：util/overview/models/login/tencent/gwextra/accounts/router/catalog/settings/proxies/automation/wb/data（备份恢复） |
-| `handlers/v1.rs` | `/v1/chat/completions`+`/v1/messages`；`pooled_attempt!` 宏选号（非 async fn+闭包，Rust 无 lending closure） |
-| `install.rs` | ★ B1 自检安装（`--install/--uninstall/--purge`）：复制到 `%LOCALAPPDATA%\aigw-panel-rs\` + 桌面/开始菜单 `.lnk` + HKCU 自启 + MessageBox 反馈（对齐对方 NSIS setup.exe） |
-| `handlers/api/routers/data.rs` | ★ D 数据备份/恢复：`/api/data/backup`(POST) / `/api/data/backups`(GET 列) / `/api/data/restore`(POST ?ts=，防穿越校验) |
-| `server/pool.rs` | ★ S3 号池治理 |
-| `server/db.rs` | ★ S5 SQLite 存储 usage_events（WAL+NORMAL+busy_timeout，JSON 合并幂等，DB 不可用降级 JSON） |
-| `server/usage.rs` | UsageRecorder：DB 单条 INSERT，每 500 条批量 prune；DB 不可用回退 JSON 全量重写 |
-| `server/credits.rs` | 积分到期快照 + urgency_rank |
-| `server/balance.rs` | 数据驱动通用余额；`fetch_raw` 返原 JSON |
-| `server/login.rs` | 登录会话+账号池；`raw_rows()` 拿未脱敏 secret |
-| `server/tencent.rs`/`autocheckin.rs`/`cdp.rs` | 腾讯直连 / APP 自动签到 / CDP 浏览器(9333) |
-| `relay/*.rs` | 原生中继+网页反代；`relay::out_client()` 超时四项分设 |
-| `router/mod.rs` | 模型→上游 熔断/EWMA/亲和 |
-| `tray/mod.rs` | windows-sys 托盘；HKCU Run `AigwPanel` |
+| 10-13~10-15 | aigw-panel（Python→Rust 第一代），S1~S6 + B1 安装 + D 备份恢复 |
+| 10-16 | **aigw2 立项并当日收官**：M0 骨架→M1 引擎核→M2 声明式接入→M3 透传→M4 管理面→M5 安装器；62 测试 |
+| 10-17~10-20 | 接入源 12→122；**铁律反转：禁扫码/禁 CDP**；登录引擎全落地（设备码/PKCE/跳转轮询）；参考项目全量解析（27 项目 / 29 万字）→ 5 批能力落地 |
+| 10-21~10-22 | 账号健康可见；错误类别→HTTP 码；web-deepseek 原生 adapter（wasm POW）；249 测试 |
+| 10-26 | 仓库治理（90 份未跟踪 toml 入库）；模块拆分 20+ 轮；doctor 体检工具；Token 限制器雏形 |
+| 10-28 | 127 轮收尾；验活三态化；国际版漏网修复一批；积分/倍率透明化 |
+| 10-31~11-04 | 新 adapter：monkeycode / cloudcode / kiro / mimo / opencode / metaso / orcaterm 打磨 |
 
-## ★ S3 号池治理（server/pool.rs）
-`pooled_attempt!` 唯一选号入口。InFlight 租约(同(平台,账号,模型)≤2并发) / (账号,模型)冷却(min(30s·2^n,900s)×抖动[0.5,1.5)) / WafIpGate(401/403→账号级拉黑30min) / RecentPick(60s窗口选≥2次让位) / 半开(全挡放行最紧迫) / `forget_account`(删号清幽灵)。`classify`：401/403→Auth，429→Rate，其它→Transient。
-★ Loomy：HTTP 200 + `{"code":"100002"}` 假成功 → `loomy.rs::biz_err()` 识别(登录/失效/授权/token→401)。
+## 反复验证后的工程教训
 
-## ★ 超时四项（relay::out_client）
-connect(10s)+read(90s,覆盖TTFB与包间idle)+流式不设总时长+非流式总时长180s。`web.rs` 仍 no_proxy。
+1. **同一个判据要在所有入口成立**（chat / responses / anthropic / 后台 / CLI）——历史上被漏过 5 次。
+2. **静默失效最贵**：限流参数改了不生效、poll 缺 platform、验活漏 adapter，都要靠「自查上一轮埋的雷」补。
+3. **上游 2xx 不等于成功**：业务码在 body 里（loomy `100002`、ima `1411/600001`、orcaterm `10050000`），必须 `refine_biz`。
+4. **错误帧不是 JSON**：orcaterm `data: [ERROR]: [LLM_ERROR]`、SSE 建连后错误要发流内 error 帧，否则失败被当成「上游什么都没说」。
+5. **UUID / 时间戳这类「形状对但位不对」的字段**最容易误判成内容问题（orcaterm `input.id` 非 v4 → `Invalid inputId`）。
+6. 大文件分段写必须 append（`writeFileSync` 会覆盖前段）；测试内联 toml 必须有 `stream_dialect`。
+7. 代理相关：「开了系统代理」要复检全部海外源；`curl --noproxy '*'` 会把 `-x` 也排除掉，测代理时别加。
 
-## ★ 余额/积分/urgency_rank
-- 响应多是资源包列表：对 `Accounts[]` 按 `CapacityUnit==credits` 求和（单键递归只取首条必错）。
-- 到期优先级 CycleEndTime>ExpiredTime>DeductionEndTime；分桶 expired/d1/d3/d7/d14/d30/later/none；60s 缓存。
-- `urgency_score`：有到期日→days*1000；无到期日有余额→10^7-余额；都无→i64::MAX。只落盘不实时算。
+## 未决 / backlog
 
-## ★ 模型清单
-实时拉+缓存，顺序：专用分支(wb/loomy/yuanbao)→通用实时→缓存→静态。静态不许覆盖 live。元宝模型：`POST {"agentId":"naQivTmsDa"}`+头 `X-Exp-Params: enableNewPcStyle=2`。
+- `wb-gateway` 客户端仿真专项（WAF 头族：X-Agent-Purpose / risk_headers / X-Machine-ID / X-Device-Token(Turing Shield=11128) / 会话头族 B3；池内 JWT 27 天）
+- A 源接入声明化重构（B2 文档 P0，未写代码）
+- 远程扫码 qrscan、tasks.json 持久化、app/relays 原生替代
+- NSIS 安装器（本机无 makensis，仅有备用脚本）
 
-## 前端（app/static 三处同步：源 / dist / 安装位）
-`default_static_dir()`：`<exe>/app/static`→`../../aigw-panel/app/static`→`../app/static`→`AIGW_STATIC_DIR`。路由 `/app.js`。
-改前端 bump `index.html ?v=`；★ CSS 注释禁止 `*/` 提前闭合（写完校验 `/*`==`*/` 计数+brace平衡）；JS `node --check` 查不出运行时错，需 `node test_views.js` + headless Edge 截图。
+## 参考
 
-## 关键坑（高频）
-- `list_accounts()` secret 脱敏 → 后台必须用 `login.raw_rows()`。
-- `now_local()` 须 +8h。
-- `/api/route` 契约须对象映射(api.rs describe_models)，不能 Vec<String>。
-- 分层：`api.rs`+`api/`子目录挂子模块；`routers/mod.rs` 的 `pub use` 是兼容层别删。
-- 单测断言别写死随机量上限（如 waf_left 只断言下限）。
-- 改前端 `node --check` 不够 → `node test_views.js`；JS 重名函数覆盖 → grep 验零重复。
-
-## 登录链路
-copilot 原生扫码：`_start_native_qrcode`→`_poll_native`(轮询 `/v2/plugin/auth/token?state=`)→token 落池(secret=accessToken)。poll 竞态无 gw_session 静默等下轮。anon-zen：method=anon 免登录。
-
-## 参考框架
-xiaofan6ya/workbuddy2api：① 按领域拆路由 ✅ ② pool 号池治理 ✅ ③ 积分到期面板 ✅。不照搬 MySQL/Redis、Python 栈、读桌面端 .info。
-
-## ★ v2 全量 Rust 重构（2026-10-16 立项，M0 已落地）
-- 用户指令：26 个 2api 仓库+本地项目全部拉取解析记录；**不要现有框架，全部用 Rust 重构**；先计划后执行。4 项决策已按推荐确认：A 静态 JS+rust-embed / 新建 aigw2 / 核心 15 平台优先 / 成本归因进 M6、订阅通道 backlog。
-- 文档：`网关项目/重构调研-2api项目全集.md`（26 仓库摘要+32 项算法提取矩阵+本地盘点+红黑榜）、`网关项目/重构计划-v2.md`（aigw2 workspace 9 crates + providers/*.toml 声明式接入 + M0-M6）。
-- **M0 骨架 ✅（2026-10-16 15:00）**：`aigw2/` workspace（aigw-core 错误分类+StreamChunk / aigw-registry 声明式 spec / aigw-server axum+rust-embed / aigw bin CLI）；providers/anon-zen.toml 首份 spec；19 测试全过；8801 起服端到端验证通过（health/models 契约/chat 501 占位/首页）。
-- **M1 引擎核 ✅（2026-10-16 15:40）**：7 crates（+store/pool/relay），35 测试全过；SQLite+旧数据只读幂等导入（28 条）；号池六件套（租约/冷却/WAF/RecentPick/半开/forget）；relay 超时四项+字节透传+SSE 归一解析；**真实对话打通**（pollinations 免密车道非流式+流式，anon-zen 已被上游收紧 403 FreeTierError 只能当错误路径用）。
-- **M2 声明式接入 ✅（2026-10-16 16:05）**：8 crates（+crypto），45 测试全过；registry 全字段（models_path/models_filter/upstream_kind/signer/biz_err）；glm 签名（SECRET=8a1317a7468aa3ad86e997d08f3f31cb，校验位算法）+chatglm adapter（parts 快照差分转 delta，assistant_id=65940acff94777010aa6b796）；AccountStore 导入旧 accounts.json（8 账号，明文 secret 后台专用）；**kilo 免密真实对话 ✓**（isFree 过滤 15 模型，cost:0）；web-glm 无凭据 401 门控 ✓（等用户登录 chatglm.cn）；4 spec：anon-zen/pollinations/kilo/web-glm。
-- **M3 透传批次 ✅（2026-10-16 16:35）**：11 spec 全载；`模型id@平台` 后缀路由（旧版语义）；settings 占位符（@lobster→lobster_server，旧 settings.json 只读导入）；Cookie 注入（AuthKind::Cookie→Cookie 头）；ModelsPolicy::None（无清单纯后缀路由）。元宝透传真实打到上游（405=需补 Referer/Origin，链路全通）；web-lobster 占位符门控 502。**批2 OAuth/批3 签名类/批4 wb+deepseek POW+豆包 CDP 待后续**（状态总表在 daily log）。
-- **M4 管理面 + M5 安装器 ✅（2026-10-16 17:45）**：/api/platforms+accounts+pool 三端点；web/ 四视图 SPA（总览/平台/账号/用量，玻璃基座，headless 6/6 命中）；bin --install/--uninstall/--purge（%LOCALAPPDATA%\aigw2 + .lnk + HKCU Run\Aigw2 直写注册表）。45 测试全过。
-- **★ v2 收官（2026-10-16 18:45）**：12 平台 spec（11 启用）+ 62 测试 + 单 EXE。**唯一剩余=wb-gateway 客户端仿真专项**（spec 已铺 enabled=false；WAF 要求完整头族：X-Agent-Purpose/risk_headers/X-Machine-ID/X-Device-Token(Turing Shield 缺失=11128)/会话头族 B3；workbuddy2api-master 一手全文在 _refs/；池内 JWT 27 天有效）。kilo 免费池上游波动属常态（错误透传已验证）。
-- **★★ 10-17~10-20 巨变（daily log 全天细节，此处蒸馏）**：
-  - **铁律反转（10-19 拍板）**：v2 禁扫码/禁无头浏览器/CDP/Chromium（10-16 的 cdp.rs/browser_dl.rs 已删）。全部登录=跳转（用户自己浏览器）+手动粘贴，或设备码/API Key。起因：擅自建 browser_dl 被面斥。
-  - **接入源 12→122**：gen_providers.py/2 从旧 catalog 批量生成（官方 API 24 / 订阅 8 / 客户端 27 / 公益站 64）；公益站=bubblevv 聚合源 JSON-LD、FreeStore 每日刷新已添加不丢；自定义 API=CustomStore+CherryStudio 式弹窗（OpenAI/Anthropic 双协议）。
-  - **★ 坑**：load_dir「任一非法即 Multi 空表」——新增 upstream_kind(doubao/yuanbao/kuku/metaso)/signer(loomy) 必须同步 registry 白名单，否则全表静默丢失（10-20 踩过，平台数从 122 掉到 47）。
-  - **登录引擎**（auth_login.rs，一手全落地）：设备码=wb族/MiniMax/Kimi(RFC8628 auth.kimi.com X-Msh 头)/Grok(OIDC)/Meta Muse/Cline(WorkOS)；PKCE 回调=Codex(1455)/Claude(54545)/Antigravity(51121)/Devin(headless)/Trae(回调直传 refreshToken→ExchangeToken)；跳转轮询=CodeArts(华为旧 ticket 1s×120→AK:SK)/Qoder(设备码+PKCE S256)/Lobster(OAuth)；save 即验活。
-  - **adapter**：doubao(samantha 旧端点)/metaso(匿名13发/IP 走代理可用)/yuanbao(建会话+仅流式)/kuku(BDUSS+STOKEN errno 11002=Quota)/codearts(SDK-HMAC-SHA256)/wb(每日签到)/proxy(出站代理三模式+CN直连热更新)；cline WorkOS 401 刷新双通道自愈；SSE 建连后错误发流内 error 帧。
-  - **参考项目全量解析**（10-19，3523 行/29 万字符，27 项目在 _refs/ 不入库）：Part C 能力总表→5 批落地（StickyRouter 粘性 1800s FNV-1a 兜底最后一条 user/donut+面积图/CodeArts/WorkOS 自愈/wb 签到）。sub2api 纠偏=OAuth 订阅号池化售卖网关，非机场转换。
-  - **真实端到端（10-20）**：秘塔 ✅（匿名+代理）、豆包 ✅（真实 Cookie 旧端点）；元宝 ❌ Cookie 过期需重登；WPS/纳米 ⚠ 仅验活不可对话。
-  - **运维**：构建产物在 **C:\aigw-target\debug\aigw.exe**（CARGO_TARGET_DIR 已改）；部署=taskkill→拷exe→同步providers→schtasks /Run Aigw2Service；前端改后必须 cargo build（rust-embed）+ Ctrl+Shift+R；代理 global 7890；accounts.json 明文勿泄。
-- **批2 登录引擎 ✅ + M6 可观测 ✅（2026-10-16 18:00）**：wb 族设备授权（/v2/plugin/auth/state→token，三头缺一被 APISIX 拦）+ MiniMax PKCE S256；AccountStore 双源持久化（v2 own 权威，add_account 落池）；/api/auth start/poll 真实拿到 copilot.tencent.com 服务端 state ✓；/api/requests 历史+平台归因。
-- **批3 签名器 ✅ + 批4 CDP 桥 ✅（2026-10-16 18:20，62 测试全过）**：ghfast zip 拉三仓库源码提全常量 → crypto/qoder.rs（COSY：指纹派生+自定义Base64+RSA 包裹+AES-CBC info+md5 五段签名，4 测）/loomy.rs（HMAC-SHA1 九行签名+AK 2thryby66wxi53sk，5 测）/zcode.rs（enc:v1 AES-256-GCM SHA256 派生，4 测）；relay/cdp.rs（tungstenite 版受控浏览器桥，Storage.getCookies+host 过滤，真实拉起 Edge ✓）；/api/auth 支持 spec.login_url 平台的 CDP 会话。**批3 踩坑**：rsa 0.9 加密方向 key.encrypt(rng,pad,data)、from_public_key_pem 需 pkcs8::DecodePublicKey、tempKey 是 16 字符 hex 非 32、json compact None→""。
-- **★ v2 构建三坑（写代码前必看）**：① 本机 rustup default=**windows-gnu**，新 workspace 从零编 windows-sys 0.61+（raw-dylib）报 dlltool not found → 项目根必须放 `rust-toolchain.toml` 固定 `stable-x86_64-pc-windows-msvc`（旧项目靠 C:/aigw-target 热缓存躲过，从零重编同样会挂）；② rust-embed 插值 folder 需 `features=["interpolate-folder-path"]`；③ `cargo test` 不产 bin，端到端前要 `cargo build`。
-- 协议基线（活跃）：Sark1tama/glm2api、qoder2api-hub、wangqi233/trae2api、Trae2api-cn、lobsterai2api、luawei1/cline2api、xingluoyuankong/loomy2api、dengyie/zcode2api、grok2api、AIClient2API、dsh、workbuddy2api、sub2api、doubao2api、TecentHelp2Api、ops120/zcode2api。
-- 关键提取：cline2api WorkOS 自愈+uTLS(rquest)；lobster 错误分类→冷却映射；dengyie 账号状态机；qoder COSY 签名+设备指纹派生；dsh 按 body 形状判流+Ed25519 升级；sub2api WS↔SSE 桥；TecentHelp 会话粘定 userid。
-- 本地有 LobsterAI2API 与 cli-proxy/cliproxy-src 克隆（CPA 生态）。
-- License 纪律：sub2api=LGPL、cherry-studio&dengyie=AGPL、AIClient2API=GPLv3 → 只参考机制不复制代码。
-- 2026-10-16 15:00 观察：旧版 aigw-panel.exe 进程已不存在（8800 空闲，非本次操作所致，taskkill 仅精确匹配 aigw.exe 验证实例）。
-
-## ★ UI 玻璃拟态设计系统（2026-10-16 起）
-- 主参考 dsh-our-free-model（毛玻璃+短动效+数据可视化）；用户判定原 UI 太朴素，已确认「原生重做设计系统」路线 + 试点先行。
-- 基座在 style.css 末尾段：`--glass-bg/--glass-bd/--glass-shadow/--blob1/2`（亮暗双份）+ `body` 双 radial 渐变光斑(fixed) + `.glass` 工具类（**定义必须在 .card/.mini/.todo-i 之后**，同特异性后者胜，加 `glass` 类即换肤）+ `.stat` KPI 玻璃卡 + `.pill` 药丸 + `.about-hero`/`.timeline`/`.tbl` + `viewIn` 入场动画（reduced-motion 全关）。
-- 试点 总览+关于 ✅（`?v=20261016f`）；其余 8 页待用户确认视觉方向后铺开（积分到期→donut 风险分布、用量→面积图/热力图）。
-- ★ 坑：给 section 加包裹层(.ov-anim/.about)后 `#view>section{margin-bottom:20px}` 选择器失效，需为 `.ov-anim>section` 单独补 margin；`.about>section` 不补（卡片自身 16px margin 已够）。
-
-## 进度
-S1 分层 ✅ / S2 积分+urgency ✅ / S3 号池 ✅ / S4 UI 9项 ✅ / S5 SQLite+响应体积(credits 分页) ✅ / S6 前端自动校验 ✅。
-B1 自检安装 ✅ / B2 双项目对标文档 ✅ / C 关于页 ✅ / D 数据备份恢复 ✅（均 2026-10-16 上午落地）。
-UI 玻璃拟态试点（总览+关于）✅，其余 8 页待确认后铺开。
-未做：远程扫码 qrscan；tasks.json 持久化；app/relays 原生替代未接线；**A 源接入声明化重构（B2 文档 P0，尚未实施代码）**；NSIS 安装器本机无 makensis 未编译（仅备用脚本）。
-
-## B1 安装模式要点（install.rs）
-- 本机无 makensis → 用 Rust 二进制 `--install` 自检安装（复制 exe+app/static+webpow 到 `%LOCALAPPDATA%\aigw-panel-rs\`、建桌面/开始菜单 `.lnk`(PowerShell COM WScript.Shell+BOM)、写 HKCU `Run\AigwPanel` 指向安装位 `--tray`、MessageBox 反馈后启动已装 exe）。
-- `--uninstall` 删快捷方式+自启（保留 data）；`--purge` 卸载+延迟 `cmd` 删整目录。
-- `set_autostart_for(exe_path, enable)` 抽出自 `tray/mod.rs`，供安装流程复用；值为 `"<exe>" --tray`。
-- 数据目录天然落在安装位 `data/`（重装/升级不丢数据）。
-- 可选 `installer/aigw-panel.nsi`（Unicode/用户级/装到 `$LOCALAPPDATA\aigw-panel-rs`）仅备用，本机无法编译验证。
-
-## D 数据备份恢复（data.rs）
-- `DATA_FILES` 8 文件：settings/accounts/panel.db/disabled_models/sites/checkins/tasks/notify。
-- 备份=目录快照复制到 `data/backups/<UTC时间戳>/`+`manifest.json`（零压缩依赖，避免损坏）；恢复=`is_safe_name` 防 `../` 穿越后拷回 `data/`，返回 `need_restart:true` 前端调 `/api/settings?action=shutdown` 重启。
-
-## 2026-10-21 关键变化（详见 memory/2026-10-21.md）
-- **账号健康可见**：号池 `Pool.health`（内存）记录每个账号最近一次真实请求结论（ok/auth/quota/rate），`/api/accounts` 每行带 `health`，`POST /api/accounts {action:verify}` 立即验活；前端账号表有「健康」列 + 「检查」按钮。面板终于能一眼看出哪个号过期。
-- **错误类别 → HTTP 状态码**：`aigw_relay::status_for_class()`（Auth 401 / Quota 402 / Rate 429 / Rejected 400 / Waf 403 / Transient 502），修正 metaso/kuku 把「限流」包成 502 导致 SDK 不退避的问题。
-- **同名模型择优路由**：`spec_for_model` 先用 `platform_usable`（可转发）再回落 `platform_routable`，避免 `@lobster` 这类占位地址平台抢到同名模型后返回 503。
-- **usage_prune 按 rowid 保留最近 N 条**（ts 是 REAL 秒，同秒多条会整组误删）；清理失败改为 `tracing::warn!`。
-- 测试基线 **150 项全绿**（core 3 / pool 21 / registry 18 / relay 24 / server 47 / store 23 / crypto）。
-
-## 2026-10-22 关键变化（详见 memory/2026-10-22.md）
-- **web-deepseek 原生 adapter 上线**：此前是「声明式空壳」，现在是 `upstream_kind="deepseek-web"` + `aigw2/crates/aigw-relay/src/deepseek.rs`（内嵌 `deepseek_sha3.wasm` + wasmi 解 POW）。协议 5 步：users/current 取 token → chat_session/create → create_pow_challenge → `X-Ds-Pow-Response`（base64 JSON，**answer 必须是整数**）→ chat/completion 的补丁式 SSE（`{v:…}` 快照 / `{p,o:APPEND,v}` / 无 p 的纯增量 / BATCH 取 accumulated_token_usage）。
-- 真机实测：非流式 2.58s 出「你好」；流式 reasoning_content 正常。测试基线 **215 项全绿**；exe 20,112,384 字节；/api/platforms 127 行。
-- 三个只在真机暴露的坑：① wasmi 参数要用 `wasmi::core::F64`（不是 f64）② POW answer 用 f64 序列化成 `69573.0` → 上游 HTTP 200 返回 `40301 INVALID_POW_RESPONSE`（2xx 无正文必须把原始 body 截进错误信息）③ 求解 1~2s 必须 `spawn_blocking`。
-- 构建提速：`[profile.dev.package.wasmi]`/`wasmi_core` 的 `opt-level = 3` 把 POW 从 14,855ms 降到 1,195ms（Node 21ms 是 JIT 待遇）。
-- cargo 一律用 `--offline`：git 全局 `http.proxy=127.0.0.1:7890`（Clash 未跑）会让 crates.io 拉取全失败。
-
-## 2026-10-22 补齐（详见 memory/2026-10-22.md 三节）
-- 「都做」收官：`apk-qwenwork` 是**路径写错**（OpenAI 形状，chat_path=/api/v1/chat/completions）；`apk-coze` 新增 coze adapter（v3 chat、模型名=bot_id、写 `<bot_id>@apk-coze`）；`sub-devin` 新增 devin adapter（会话型 Agent：POST /v1/sessions + 轮询 status_enum 到 finished，取最后 devin_message；每次请求消耗额度，需显式 `devin@sub-devin`）；`sub-meta` 本机不可达（curl 000）只能诚实标注需代理。
-- 数字：workspace **249 tests**、exe **21.47MB**、`/api/platforms` **127**。
-- 写文件教训：分段写大文件必须 `appendFileSync`（`writeFileSync` 会把已写好的段覆盖）；测试内联 toml 必须有 `stream_dialect`。
-
-## 2026-10-26 仓库治理与模块拆分
-- **源码入库**：此前约 90 份 `providers/*.toml`、`aigw-relay` 十个 adapter、`aigw-store` 六个模块（atomic/secret/keys/combos/rotlog/archive）全是未跟踪文件，只在工作区里存在。已一次性提交。`.gitignore` 新增 `_fuzz/` `_qr/` `_axtest/` `aigw2/_probe/` 与根目录探针碎片（`_t*.json` `r1.txt` `p.json` 等）。删掉过期的 `accounts.rs.bak`。
-- **spec 去重**：`api-bailian` 与 `api-dashscope` 同端点同 Key 同清单 → 删除前者（老配置 `@api-bailian` 要改 `@api-dashscope`），`gen_providers.py` 分支同步收紧。剩余 6 组同 base_url 但**语义不同**（官方 Key vs 订阅反代），不合并：codex/sub-codex、kimi-code/sub-kimi、apk-trae/web-trae、apk-qoder/web-qoder、apk-antigravity/sub-antigravity、wb-gateway/wb-gateway-intl。
-- **前端版本号**：`index.html` 的 `?v=` 已删（服务端本来就发 `Cache-Control: no-cache`），`app.js` 的 `BUILD` 是唯一版本号，现为 `v20261026a`。
-- **★ 新建模块**（aigw-server）：`net.rs`（host/origin/SSRF 判定纯函数，9 测）、`ratelimit.rs`（三档限流，7 测）。`lib.rs` 仍 16074 行，其余拆分（协议互转 / 流式状态机 / 路由域）尚未做。
-- **guard 性能**：每个 /v1 请求原本两次线性扫 KeyStore，现合成一次。
-- **测试基线**：workspace **335** 全绿（core 3 / crypto 21 / pool 29 / registry 13 / relay 151 / server 232 / store 82）；`cargo clippy` 未安装（需 `rustup component add clippy`），目前只能用 `cargo check` 当告警闸。
-- 环境：本机 `pwsh` 偶发启动失败（exit 3221225794），文件操作用 Node fs 更稳。
-
-## 2026-10-26 持续优化（第二轮）
-- **新增模块**：`dialect.rs`（三方协议互转 + 9 条用例）。`lib.rs` 16074 → 15421 行。
-- **/v1/models 三处过滤改 Cow**：无链/无 key/无 ?platform= 时零分配；白名单匹配不再逐条 `format!("{id}@{owner}")`。
-- **Retry-After 感知**：`RelayError::retry_after_hint()` 解析 JSON/文本两种形态，夹 [1,3600]；`Pool::report_with_hint` 采纳并夹 [1,900]，有提示不涨 strikes。
-- **在途已满换号**：`chat_core` 从「死等同一账号 15s」改为「等 1.5s → sticky.unbind + tried.push + 重选」，全平台无别号才退回 15s 预算。★ 换号必须解绑粘性，否则死循环。
-- 测试基线 **352**（core 3 / crypto 21 / pool 33 / registry 13 / relay 153 / server 243 / store 82）。
-- ★ 提交信息必须用 `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))`；Out-File utf8 会带 BOM 把中文打成问号。
-
-## 2026-10-26 第三轮（推理内容 / 并发 / 缓存）
-- **★ 上游 reasoning_content 之前被整体丢弃**（DeepSeek/GLM/Kimi/MiniMax 通用字段）：
-  - Anthropic 侧：新增 thinking 块（`thinking_index`/`thinking_open`），块顺序由 open_text_block 保证「先想再说」；
-  - Responses 侧：新增 `reasoning` item；★ 必须在**第一条正文 delta 之前** flush（`flush_reasoning` 幂等），否则正文已占 output_index 0，再插会让客户端 index 错乱；
-  - 非流式 `openai_to_anthropic`/`openai_to_responses` 同步支持（dialect.rs）。
-- **整表模型缓存改 `Arc<Value>`**：命中路径锁内只做引用计数 +1，过滤/序列化全在锁外（原实现在锁内深拷贝整表）。
-- 测试基线 **354**（core 3 / crypto 21 / pool 33 / registry 13 / relay 153 / server 247 / store 82）。
-
-## 2026-10-26 第四轮（阻塞 IO / 前端表驱动）
-- **async handler 里的阻塞 IO 全部移出**：`/api/backup`、`/api/backup/export`（read_dir+读文件+WAL checkpoint）、`/api/health`（rotlog/archive 扫目录 + panel.db metadata）都改走 `spawn_blocking`。备份/恢复异常回 `ok:false` / 500，不再假装成功。
-- **前端登录抽屉表驱动**：`srcDrawer` 开头的 17 行 `p.id === '...'`（25 个 id）收成 `LOGIN_UI` 表 + 反查表；分组例外收成 `GROUP_OVERRIDE`。交叉校验发现 `codebuddy`/`web-lobster` 无对应 spec（分别是 wb-gateway 多域承载、已并入 lobster），已在表内写明。
-- 前端改完必须 `cargo build -p aigw`（rust-embed）+ 刷新；BUILD 记 `v20261026b`。
-- 测试基线仍 **556**（本轮无新增用例，改的是行为与结构）。
-
-## 2026-10-26 第五轮（lib.rs 继续拆分）
-- **接口前导收敛**：`parse_action_body` / `bad_request` / `action_of` / `required_str` 四个 helper 替掉 10 个分发器里逐字重复的 10 处解析前导、9 处 action 提取、7 处缺 id 校验（旧代码 action 提取有的 trim 有的不 trim）。
-- **路由优先级收敛**：`AppState::pick_preferred(preferred, usable, pick)` 替掉 `spec_for_model` 里 6 处「先 preferred 再 usable」的重复循环。
-- **★ 新模块 `stream.rs`（820 行）**：AnthState / RespState / StreamToolCall / anthropic_stream / responses_stream。
-- 模块规模：lib 15198（生产 7619 + 测试 7579）/ stream 820 / dialect 949 / net 273 / ratelimit 324 / livecfg 235。
-- 测试基线 **560**。
-- ★ 坑：`git show | Out-File` 写出 UTF-16 不可用，取历史文件要用 node `child_process` 直接收 stdout；切代码区间前先核对「上边界是否真的是目标函数起点」。
-
-## 2026-10-26 第六轮（state / models 拆分）
-- **新增 `state.rs`（822 行）**：AppState + 12 个 with_* + 5 个 platform_* 判定 + spec_for_model / resolve_spec / fetch_live_models / warm_models。**`models.rs`（133 行）**：custom_to_spec / free_to_spec / ModelsEntry / models_ttl / 四个 TTL 常量 + WARM_WAIT_CAP。`scheme_ok` 迁入 net.rs。
-- lib.rs 生产代码 **9134 → 6706 行**（−26.6%）。模块：lib 14285 / state 822 / stream 820 / dialect 949 / models 133 / net 286 / ratelimit 324 / livecfg 235。
-- ★ 坑1：`warm_models` 返回 `impl Future + 'static` 却取 `&self` → 异步块捕获引用撑破 'static。改按值 `self`。
-- ★ 坑2：搬 AppState 时把 `#[derive(Clone)]` 留在原文件，AppState 不再 Clone → axum State extractor 全线失效，报 40+ 条 Handler trait 未满足（错误信息完全指向路由，根因在结构体）。
-- ★ 坑3：本仓库 .rs 文件是 **CRLF**，写替换串必须用 `\r?\n` 或按行数组 splice，否则静默不命中。
-- 测试基线 **560**。
-
-## 2026-10-26 第七轮（chat_core 拆分）
-- **`attempt_once`**：`chat_core` 换号循环体里 160 行的「流式/非流式两条分支 + 首帧体检 + 记账 + 自愈重试」抽成独立函数，`chat_core` **435 → 279 行**。
-- ★ 坑：`let account2 = account.clone()` 对 `&str` 是 Copy（仍是借用），抽成独立函数后 `tokio::spawn` 的 `'static` 要求立刻报 E0521。改 `to_string()`。
-- ★ 修：两条分支的凭据自愈重试返回口径不一致（`return ret` 是 `Result<CoreOut, CoreErr>`，本层要三元组）。统一成「只有成功才返回，失败落回原错误分类」。
-- ★ 坑：改动本仓库 `.rs` 必须按**行数组 splice**；多行 `String.replace` 在 CRLF 下静默不命中，而且很容易多删/少删一个 `}`。
-- 测试基线 **560**。
-
-## 2026-10-26 第八轮（store 锁 / auth 抽取）
-- **AccountsStore 落盘移出互斥锁**：`save_locked` → `save_snapshot`（要求调用方已放锁），7 处写方法统一成「改内存 → clone 快照 → drop 锁 → 落盘」。此前「一个账号重新登录」期间所有 `/v1` 转发都卡在 `platform_secret()` 的读锁上（DPAPI 逐条加密 + fsync 都在锁内）。
-- **`callback_warning`**：跳转登录的端口体检抽成纯函数 + 1 条用例。
-- ★ 教训：`custom.rs` 用批量 `splice` 改 6 处调用把文件写坏，只能 `git checkout` 回滚。**同构改动超过 3 处时，先改一处编译验证，再批量**。
-- 测试基线 **561**。
-
-## 2026-10-26 第九轮（custom 锁 / 方法教训）
-- **CustomStore 6 个写方法落盘移出锁**：`save_locked` → `save_snapshot`，与 AccountsStore 同口径。
-- ★★ **本仓库批量改写的正确姿势（踩了 3 次）**：
-  1. `.rs` 是 **CRLF**，多行 `String.replace` 必须先 `replace(/\r\n/g, "\n")` 归一化，否则静默不命中；
-  2. **不要用行号 splice 批量改**（前面插入一行就全错位，会写坏结构体字面量）；
-  3. 用**内容锚点**做替换（连同后续 return/表达式一起匹配），每处独立、可验证；
-  4. 同构改动先改 1 处编译验证，再批量。
-- 测试基线 **561**。
-
-## 2026-10-26 第十轮（补写闸门）
-- **★ 上一轮改造引入的真缺陷已被修掉**：Accounts/Custom 改成「取快照 → 放锁 → 落盘」后，并发写的**落盘顺序与内存更新顺序可能相反**，磁盘留下旧快照（内存对、重启后回退）。
-  `flags.rs` 的注释早就写明「必须在持锁期间落盘，防并发丢更新」——改造时没读到这层约束。
-- **修法**：内存锁管内存、`static SAVE_GATE` 管磁盘写序。读路径彻底解放，写落盘串行。
-- **★ 验证纪律**：新增并发测试后**先临时删掉修复跑一遍**，确认它真的会红（实测 `内存=r3 磁盘=r0`），再加回去。否则测试只是「恰好通过」。
-- 测试基线 **562**。
-
-## 2026-10-26 第十一轮（闸门必须覆盖取快照）
-- **发现**：上一轮的 SAVE_GATE 只包住「写盘」，仍有窗口：A 锁内取快照 v1 → 放锁被抢占 → B 取 v2 先写完 → A 写回 v1。
-- **修法**：各 Store 统一出口 `persist_now()` —— **闸门内取快照 + 写盘**。accounts / custom / keys 全部改走它。闸门实现提到 `atomic.rs`（OnceLock）供共用。
-- **★ 诚实记录**：把 persist_snapshot 改回「锁外取快照」后 keys 并发用例**仍然通过** → 该用例对「快照顺序」这一具体缺陷不敏感，只证明「大量并发写后磁盘==内存」。accounts 那条对「完全没有闸门」敏感（实测红）。
-- 测试基线 **564**。
-
-## 2026-10-26 第十二轮（三处 Store 接闸门 + 自造死锁）
-- **combos / free / flags 统一走 `persist_now()`**（闸门内取快照+写盘），与 accounts/custom/keys 同口径。flags 读路径（`is_model_disabled`，每次路由都问）不再陪写盘等磁盘。
-- **★★ 自造死锁**：free.rs 三处把 `save_locked(&rows)` 机械替换成 `persist_now()` 却**没 drop(rows)**；persist_now 在闸门内再 `inner.lock()` → 同线程二次加锁 = 立即死锁。
-  - 症状：`cargo test` 卡住、cargo 进程 CPU 0.5% 空转、`has been running for over 60 seconds` 刷屏。清进程/删 target 锁都没用。
-  - 定位：**cargo 没有超时**，只能从测试名 + 「卡住的是哪几组」反推；用 `node child_process` 直接跑 cargo 拿到完整输出比 pwsh 管道快且可靠。
-  - 纪律：`save_locked(&x)` → `persist_now()` 的机械替换**必然漏 drop**，逐处确认。
-- **前端 `modalShell(title, body)`**：全站 14 处弹窗同构（遮罩+标题+✕+内容区），已迁移 2 处（代理设置 / 网关信息），剩 5 处手写。
-- 测试基线 **564**。
-
-## 2026-10-26 第十三轮（前端弹窗统一）
-- **`modalShell(title, body, opts)` 覆盖全部弹窗**：手写 `<div class="modal-mask">` 从 8 处降到 1 处（只剩 modalShell 自身）。差异点收进 opts：`drawer` / `id` / `onMask` / `close` / `closable`。
-- 收益：关闭行为只有一处定义（过去漏写 `this.closest('.modal-mask').remove()` 会导致「点 ✕ 关不掉」）。
-- ★ 坑复现：一次改多处 + 行号 splice，前一处替换「未命中」会让后面全部错位 → 写坏文件。**逐处替换 + 每处 node --check** 才稳。
-- BUILD → `v20261026c`；前端改动后必须 `cargo build -p aigw`。
-- 测试基线 **564**。
-
-## 2026-10-26 第十四轮（backup 模块）
-- **新增 `backup.rs`（361 行）**：备份导出/恢复 + 脱敏白名单 + 文件名穿越校验 + .restore-pending 暂存通道 + base64 辅助。lib.rs 生产 6760 → 6440。
-- 模块文档把两条纪律放最前：①导出默认脱敏（白名单制，黑名单是失败开放）②恢复必须留退路（.bak-<ts> + DB 走暂存）。
-- ★ 可见性坑：搬走后测试仍在 lib.rs 引用这些辅助 → 需 `pub(crate)` + `pub(crate) use`；对外的 `pub use` 会报「cannot be re-exported outside」。
-- 测试基线 **564**。
-
-## 2026-10-26 第十五轮（Session::fail）
-- **`Session::fail(msg)`** 收敛 `start()` 19 个分支里手抄 18 遍的「status=error + message」。漏写 status 的那一处会让前端永远停在「等待授权中」。
-- ★ 尝试过抽 `fill_device_session` 辅助统一 Ok 侧，**放弃了**——各平台 state 拼法/文案差异本来就大，强行合并更难读。只收敛真正同构的失败侧。
-- ★ 又一次「测试插错位置」：插进 `raccoon_qr_poll` 函数体，吃掉收尾括号 → 4 个类型不匹配。**正确做法：先加 impl → 编译 → 再替换 → 编译 → 最后插测试（插在 `mod tests` 起始后第 2 行）**。
-- 测试基线 **565**。
-
-## 2026-10-26 第十六轮（start 分派拆分）
-- **`LoginEngine::start` 290 → 47 行**：244 行的 19 分支 if/else 链抽成自由函数 `start_dispatch(client, platform, specs, &mut sess)`。约定：不返回错误，失败就地 `sess.fail()`（要原样呈现给面板）。
-- ★ Rust 结构坑：把自由函数插进 `impl LoginEngine {` 内部（缩进 4 格）→ 编译报 `cannot find function`。自由函数必须在 impl 之外。
-- 测试基线 **565**。
-
-## 2026-10-26 第十七轮（poll 分派拆分）
-- **`LoginEngine::poll` 221 → 89 行**：凭据轮询分派抽成自由函数 `poll_secret(client, &sess) -> Result<String,String>`（136 行）。约定：**不修改会话状态**，只回答「拿到凭据了吗」。
-- 返回值沿用 `Ok("token\u{1}domain")` 哨兵拼接（wb 族要 domain，为一条分支改 Result 类型不划算）。
-- ★ 坑：抽出后函数尾是原赋值语句的 `};` → 缺返回值，编译报 `expected Result, found ()`。补 `secret_raw` 即好。
-- 测试基线 **565**。
-
-## 2026-10-26 第十八轮（验活逻辑抽取）
-- **`auth_action` 232 → 198 行**：`save` 分支里的 48 行验活逻辑抽成 `verify_after_save()`；「按平台类型选失败提示」抽成**纯函数** `verify_failure_hint(spec)` + 1 条用例。
-- 该 hint 的关键约束：扫码类平台（Loomy/小浣熊）**不收 Cookie**，落进兜底文案会把人往错方向带 —— 用例已锁住。
-- 测试基线 **566**。
-
-## 2026-10-26 第十九轮（候选账号抽取）
-- **`chat_core` 279 → 261 行**：候选账号判定抽成 `candidate_accounts(custom, accounts, spec)`，+1 用例锁住 anon / 普通无账号 / 秘塔匿名兜底三条来路。
-- ★ 秘塔兜底最易漏：没有它未登录用户会被判「无可用账号」503，而秘塔本可匿名用。
-- 顺带去掉了签名里没用上的 `st` 参数（只读两个 Store 不该拖整个 AppState）。
-- 测试基线 **567**。
+- 一手参考项目在 `网关项目/_refs/`（27 个仓库，不入库）
+- 文档：`重构调研-2api项目全集.md`、`重构计划-v2.md`、`参考项目全量解析-2026-10-19.md`
+- License 纪律：sub2api=LGPL、cherry-studio/dengyie=AGPL、AIClient2API=GPLv3 → 只参考机制不复制代码

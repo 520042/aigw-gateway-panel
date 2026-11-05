@@ -1,148 +1,145 @@
 name: Build & Release
 
+# ★ 2026-10-29 重写。
+#
+# 旧版本做的是「用 PyInstaller 打包 aigw-panel（Python 版）」，而 Python 版
+# 已在同一轮归档到 legacy/aigw-panel —— 那条流水线从此**构建的是既不维护、
+# 也不再是主线的东西**，且从未验证过 aigw2（Rust，实际主线）。
+#
+# 新版本做两件事：
+#   1. ci —— 三平台 cargo check + cargo test（Windows / Linux / macOS）。
+#      这是唯一能证明「代码真的能在这三个平台上编译并跑过测试」的地方；
+#      本地开发机只有 Windows，跨平台问题（数据目录、凭据加密、路径分隔符）
+#      此前全靠人工 review，实际漏过一次：rust-toolchain.toml 写死
+#      stable-x86_64-pc-windows-msvc，导致 Linux 上 rustup 直接报
+#      `error: target tuple in channel name` —— 连 cargo 都启动不了。
+#   2. release —— 打 v* tag 时产出三平台二进制（附 providers/）。
+#
+# aigw2 的测试不需要任何凭据/网络：全部是本地单测 + 内置 mock 上游。
+
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      version:
-        description: '版本号（如 v1.0.0）'
-        required: true
-        default: 'v1.0.0'
+
+env:
+  CARGO_TERM_COLOR: always
+  # 缩短 CI 时间：aigw2 的依赖树里最重的是 reqwest/rustls/wasmi
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  build-windows:
-    name: Build Windows EXE
-    runs-on: windows-latest
+  ci:
+    name: CI · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: aigw2
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      # ★ 2026-11-06：主线前台已换成 React + Vite + TypeScript。
+      #   rust-embed 在 release 构建时把 web/ 整个目录编进二进制；如果 CI
+      #   只跑 cargo build，产物里会缺 web/app/app.js（面板白屏）。
+      #   所以三个平台都要先构建控制台，再让 Rust 编译把它嵌进去。
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: aigw2/web-src/package-lock.json
 
-      - name: Install PyInstaller
+      - name: Build web console
+        working-directory: aigw2/web-src
         run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
+          npm ci
+          npm run build
 
-      - name: Build with PyInstaller
-        working-directory: aigw-panel
-        run: pyinstaller build.spec --clean --noconfirm
-
-      - name: Rename artifact
-        working-directory: aigw-panel/dist
-        run: |
-          if (Test-Path "aigw-panel.exe") {
-            Rename-Item "aigw-panel.exe" "aigw-panel-windows-x64.exe"
-          }
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          name: aigw-panel-windows-x64
-          path: aigw-panel/dist/*.exe
+          components: rustfmt
 
-  build-linux:
-    name: Build Linux
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      # ★ Windows 上必须显式用 msvc：windows-sys 0.61+ 的 raw-dylib
+      #   在 gnu 工具链上要调 dlltool.exe（GitHub 的 windows runner 没装）。
+      - name: Pin MSVC toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: rustup override set stable-x86_64-pc-windows-msvc
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          workspaces: aigw2
 
-      - name: Install dependencies
+      - name: fmt check
+        run: cargo fmt --all -- --check
+        continue-on-error: true   # 格式不是门禁，先只做提示
+
+      - name: cargo check (all targets)
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Build release binary
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cargo build --workspace --release
+
+      - name: Package (unix)
+        if: startsWith(github.ref, 'refs/tags/') && runner.os != 'Windows'
+        shell: bash
+        working-directory: aigw2
         run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
+          mkdir -p dist
+          cp target/release/aigw dist/
+          cp -r providers dist/
+          tar -czf "aigw-${{ runner.os }}-${{ runner.arch }}.tar.gz" -C dist .
+          ls -lh
 
-      - name: Build with PyInstaller
-        working-directory: aigw-panel
-        run: pyinstaller build.spec --clean --noconfirm
-
-      - name: Rename artifact
-        working-directory: aigw-panel/dist
+      - name: Package (windows)
+        if: startsWith(github.ref, 'refs/tags/') && runner.os == 'Windows'
+        shell: pwsh
+        working-directory: aigw2
         run: |
-          if [ -f "aigw-panel" ]; then
-            mv aigw-panel aigw-panel-linux-x64
-          fi
-          chmod +x aigw-panel-linux-x64
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/aigw.exe dist/
+          Copy-Item -Recurse providers dist/
+          Compress-Archive -Path dist/* -DestinationPath "aigw-Windows-${{ runner.arch }}.zip" -Force
+          Get-ChildItem *.zip | Format-Table Name,Length
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: aigw-panel-linux-x64
-          path: aigw-panel/dist/aigw-panel-linux-x64
-
-  build-macos:
-    name: Build macOS
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-
-      - name: Build with PyInstaller
-        working-directory: aigw-panel
-        run: pyinstaller build.spec --clean --noconfirm
-
-      - name: Rename artifact
-        working-directory: aigw-panel/dist
-        run: |
-          if [ -f "aigw-panel" ]; then
-            mv aigw-panel aigw-panel-macos-universal
-          fi
-          chmod +x aigw-panel-macos-universal
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: aigw-panel-macos-universal
-          path: aigw-panel/dist/aigw-panel-macos-universal
+          name: aigw-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            aigw2/*.tar.gz
+            aigw2/*.zip
+          if-no-files-found: error
 
   release:
     name: Create Release
-    needs: [build-windows, build-linux, build-macos]
+    needs: [ci]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
       - name: List artifacts
-        run: ls -R artifacts/
+        run: ls -lR artifacts/
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            artifacts/aigw-panel-windows-x64/*.exe
-            artifacts/aigw-panel-linux-x64/*
-            artifacts/aigw-panel-macos-universal/*
+          files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
