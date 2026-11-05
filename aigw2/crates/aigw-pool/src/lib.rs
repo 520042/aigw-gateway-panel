@@ -81,6 +81,11 @@ fn backoff_secs(strikes: u32, hint: Option<f64>) -> (f64, u32) {
 }
 const RECENT_YIELD: usize = 2;
 
+/// 熔断参数（对齐 sub2api openai_apikey_health_breaker 缺省：2 分钟 / 10 次 / 5 分钟）。
+const BREAKER_WINDOW: Duration = Duration::from_secs(120);
+const BREAKER_THRESHOLD: u32 = 10;
+const BREAKER_COOLDOWN_SECS: f64 = 300.0;
+
 #[derive(Debug, Clone)]
 struct CoolState {
     until: Instant,
@@ -121,6 +126,16 @@ struct Inner {
     /// account -> 最近一次真实结果（面板「健康」列直接读它）。
     /// 只存内存不落盘：进程重启后旧结论未必成立，重新验活比读历史更准。
     health: HashMap<String, HealthState>,
+    /// account -> (窗口起点, 窗口内失败次数)。
+    ///
+    /// ★ 2026-11-06（借鉴 sub2api openai_apikey_health_breaker）：
+    ///   指数退避只冻单个 (账号,模型) 对——一个号在 10 个模型上各失败一次，
+    ///   每次都从 30s 重新开始，账号级看毫无惩罚。这里按**账号**记窗口内
+    ///   失败数，连续超过阈值就触发熔断：账号级硬冷却 5 分钟，health 标
+    ///   「熔断」，选号彻底跳过，不再逐模型撞上游。
+    ///   参数对齐参照缺省：窗口 2 分钟 / 阈值 10 次 / 冷却 5 分钟。
+    ///   成功一次即清零（与 recent/health 同生命周期语义）。
+    fail_streak: HashMap<String, (Instant, u32)>,
     /// account -> 积分余额快照（值, 记录时刻, **最早到期的资源包时刻** epoch 秒）。
     /// 供「快过期积分优先」选号用：积分少且久未刷新的号先消耗掉，
     /// 避免小余额账号永远排在后面、积分到期作废。
@@ -507,6 +522,10 @@ impl Pool {
             if g.waf.get(a).map(|t| *t > now).unwrap_or(false) {
                 continue;
             }
+            // 熔断账号：任何模型都跳过（breaker 是账号级短路，不是逐模型冷却）
+            if g.fail_streak.get(a).map(|(_, c)| *c >= BREAKER_THRESHOLD).unwrap_or(false) {
+                continue;
+            }
             let inflight_key = (platform.to_string(), a.clone(), model.to_string());
             if g.inflight
                 .get(&inflight_key)
@@ -742,6 +761,7 @@ impl Pool {
                 g.cooldown.remove(&(account.to_string(), model.to_string()));
                 g.waf.remove(account);
                 g.recent.remove(account);
+                g.fail_streak.remove(account);
                 g.health.insert(
                     account.to_string(),
                     HealthState { status: "ok", label: "正常".to_string(), at: now },
@@ -872,6 +892,60 @@ impl Pool {
                     );
                 }
             }
+
+            // ── 账号级失败窗口计数（熔断，借鉴 sub2api breaker）──────────
+            // 429/限流是上游在管节奏、401/WAF 已账号级拉黑、402 有专属硬冷却
+            // ——这三类**不该**计入普通失败窗口（会把「被限流」升级成「熔断」，
+            // 而限流本来就解冻即好）。只有 Transient 类（网络抖动、5xx、
+            // 上游拒绝）才累计：窗口 2 分钟内失败 10 次 = 这个号真的不行了。
+            if matches!(class, ErrorClass::Transient) {
+                let (start, count) = g
+                    .fail_streak
+                    .get(account)
+                    .copied()
+                    .unwrap_or((now, 0u32));
+                let (start, count) = if now.duration_since(start) >= BREAKER_WINDOW {
+                    (now, 0u32)
+                } else {
+                    (start, count)
+                };
+                let count = count + 1;
+                if count >= BREAKER_THRESHOLD {
+                    // 熔断标记保留（带阈值），pick 端按账号级短路；冷却到期后由
+                    // 成功/窗口过期自然清除。不 remove——否则 m2 这类没失败过的
+                    // 模型会立刻把号重新选进候选，熔断形同虚设。
+                    g.fail_streak.insert(account.to_string(), (start, count));
+                    // 账号级硬冷却：所有模型的 (账号,模型) 对一起冻，到期前不放半开探测
+                    for (key, cs) in g.cooldown.iter_mut() {
+                        if key.0 == account {
+                            cs.until = now + Duration::from_secs_f64(BREAKER_COOLDOWN_SECS);
+                            cs.hard = true;
+                            cs.strikes = 0;
+                        }
+                    }
+                    g.health.insert(
+                        account.to_string(),
+                        HealthState {
+                            status: "fail",
+                            label: format!(
+                                "熔断：{} 分钟内连续失败 {} 次，冷却 {} 秒",
+                                BREAKER_WINDOW.as_secs(),
+                                BREAKER_THRESHOLD,
+                                BREAKER_COOLDOWN_SECS as u64
+                            ),
+                            at: now,
+                        },
+                    );
+                    tracing::warn!(
+                        "号池熔断 {account}：{} 分钟内失败 {} 次，账号级冷却 {}s",
+                        BREAKER_WINDOW.as_secs(),
+                        BREAKER_THRESHOLD,
+                        BREAKER_COOLDOWN_SECS as u64
+                    );
+                } else {
+                    g.fail_streak.insert(account.to_string(), (start, count));
+                }
+            }
         }
     }
 
@@ -882,6 +956,7 @@ impl Pool {
             g.waf.remove(account);
             g.recent.remove(account);
             g.health.remove(account);
+            g.fail_streak.remove(account);
             g.cooldown
                 .retain(|(a, _), _| a != account);
             g.inflight
@@ -2194,6 +2269,43 @@ mod reserve_tests {
             pick,
             Some("acc-b".into()),
             "两个都超 50% 阈值时，取使用率较低的 acc-b（60% < 90%）"
+        );
+    }
+
+    /// 熔断（借鉴 sub2api breaker）：窗口内失败达阈值 → 账号级硬冷却 +
+    /// health 标「熔断」；随后任何模型都选不到它，直到冷却结束。
+    /// 单次失败在阈值内不触发。
+    #[test]
+    fn failure_streak_trips_account_breaker() {
+        let p = Pool::new();
+        // 阈值以下：每个 (账号,模型) 各自普通冷却，health 不标熔断
+        for _ in 0..(BREAKER_THRESHOLD - 1) {
+            p.report("plat", "acc-a", "m1", false, ErrorClass::Transient);
+        }
+        assert!(p.health_of("acc-a").is_none(), "未达阈值不该写健康结论");
+        // 达到阈值：熔断
+        p.report("plat", "acc-a", "m1", false, ErrorClass::Transient);
+        let (status, label, _) = p.health_of("acc-a").expect("达阈值必须写健康结论");
+        assert_eq!(status, "fail");
+        assert!(label.contains("熔断"), "{label}");
+        // 账号级：别的模型也选不到（cooldown 里该账号所有 key 都 hard=true）
+        assert_eq!(p.pick("plat", &["acc-a".into()], "m2"), None, "熔断期间换模型也不该选中");
+        // 一次成功即清零（这里冷却还没到期，用成功路径验证）
+        p.report("plat", "acc-a", "m1", true, ErrorClass::Transient);
+        let (status2, _, _) = p.health_of("acc-a").expect("成功写健康结论");
+        assert_eq!(status2, "ok");
+    }
+
+    /// 限流不计入熔断窗口：429 是上游在管节奏，解冻即好，不该升级成账号级熔断。
+    #[test]
+    fn rate_limit_failures_do_not_count_into_breaker() {
+        let p = Pool::new();
+        for _ in 0..(BREAKER_THRESHOLD + 5) {
+            p.report("plat", "acc-b", "m", false, ErrorClass::Rate);
+        }
+        assert!(
+            p.health_of("acc-b").map(|(s, _, _)| s != "fail").unwrap_or(true),
+            "限流不应触发熔断"
         );
     }
 }
