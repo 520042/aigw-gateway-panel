@@ -14,68 +14,63 @@
    ═══════════════════════════════════════════════════════════════════════ */
 
 /* ── 令牌：亮色（默认） ─────────────────────────────────────────────── */
-/* ★ 用 `:root` 定亮色，再单独给 `[data-theme="light"]` 重复一遍。
+/* ★ 2026-11-06 二次视觉重置（用户明确说「和昨天没区别」）：
+   框架换了但视觉没换是上一轮的失误——令牌与版式原样搬了过来。
+   这一轮把「观感基调」整个换掉：
+
+   基调 → 靛紫墨色（indigo-ink）：品牌从蓝转向靛紫，底色带一丝紫意，
+   亮暗两套同源推导；标题字体加入等宽展示字体风格；卡片从「直角卡片」
+   改为「大圆角 + 顶部彩色发丝线」；导航从「灰色块」改为「圆角胶囊 +
+   选中实底」；KPI 从「左对齐数字」改为「右上线条装饰 + 更大的数字」。
+
+   ★ 用 `:root` 定亮色，再单独给 `[data-theme="light"]` 重复一遍。
    原因：下面那条 `@media (prefers-color-scheme: dark)` 的优先级等同 `:root`，
    但它在文件里更靠后 —— 系统是暗色时它会盖掉 `:root` 的亮色值，导致用户
    手动选「亮色」却仍是暗色（实测：切到 light 后 body 背景还是 #0b0e13）。
    给 light 选择器多一层属性特异性（0,1,0 > 0,0,1），就能压过媒体查询。 */
 :root,
 :root[data-theme="light"] {
-  /* ── 表面层次（亮色）─────────────────────────────────────────────
-     2026-11 换皮：从「几乎全白 + 细阴影」改成「冷灰底 + 白卡片」。
-     旧取值的通病是 bg(#fbfbfc) 与 surface(#ffffff) 只差 2% 亮度，
-     卡片边界全靠 1px 边框撑着，整页看起来是一张平坦的白纸 ——
-     这正是不舒服的来源之一。新取值把底色压到 #f6f7f9（≈4% 差），
-     卡片于是「浮」起来，边框可以退成很淡的一条，视觉更安静。 */
-  --bg:            #f6f7f9;
+  /* ── 表面层次（亮色 · 靛紫墨基调）────────────────────────────── */
+  --bg:            #f4f4fb;
   --surface:       #ffffff;
-  --surface-2:     #f3f4f7;
-  --surface-3:     #e9ebf0;
-  /* 边框分三档：淡（分隔）/ 常规（卡片边）/ 强（输入框、可聚焦）*/
-  --border:        #e8eaee;
-  --border-strong: #d3d7de;
-  /* 文字三级：正文 / 次要 / 弱化。正文永远不低于 --fg-muted。
-     换皮：正文加深到近黑（#0f1115），次要文字提亮一档（#5a6070）。
-     旧的三级（#16181d / #5c6472 / #8b93a1）层次够，但弱化档在 13px 下偏虚，
-     实测「近24h 有问题」这类小字读起来费劲。 */
-  --fg:            #0f1115;
-  --fg-muted:      #5a6070;
-  /* ★ 弱化档必须满足对比度：原来取 #838a99，实测对页面底只有 3.23:1，
-     低于 WCAG AA 的 4.5 —— 而用到这一档的恰恰是 11px 的小字
-     （「近24h 有问题」「secret 后台专用」），小字 + 低对比是最难读的组合。
-     改到 #6b7280 后实测 4.62:1，达标。 */
-  --fg-subtle:     #6b7280;
+  --surface-2:     #f1f1f9;
+  --surface-3:     #e7e7f2;
+  --border:        #e4e4ef;
+  --border-strong: #c9c9dd;
 
-  /* 品牌与语义（亮色）—— 品牌用更实的蓝，语义色降低饱和度避免刺眼 */
-  --brand:         #2f6ce0;
-  --brand-soft:    #eef4fe;
-  --brand-line:    #c3d8fb;
+  --fg:            #14121f;
+  --fg-muted:      #565170;
+  --fg-subtle:     #6f6a8a;
+
+  /* 品牌靛紫 #5b5bd6（Radix violet 系），语义色同步降饱和 */
+  --brand:         #5b5bd6;
+  --brand-soft:    #ededfc;
+  --brand-line:    #c7c7f4;
   --ok:            #0a7a52;
-  --ok-soft:       #e9f7f0;
-  --ok-line:       #b5e4cd;
-  --warn:          #9a5b08;
-  --warn-soft:     #fdf4e5;
-  --warn-line:     #efd9ae;
+  --ok-soft:       #e5f6ef;
+  --ok-line:       #b3e4cd;
+  --warn:          #9553ac;
+  --warn-soft:     #f6ebfa;
+  --warn-line:     #e2c8ec;
   --err:           #c23434;
   --err-soft:      #fdeeee;
   --err-line:      #f0c6c6;
 
-  /* 阴影：亮色下几乎不用阴影分层（改由底色差 + 淡边框），
-     只给浮层（抽屉/弹窗）留一点深度。 */
-  --sh-1: 0 1px 2px rgba(16,24,40,.05);
-  --sh-2: 0 2px 6px rgba(16,24,40,.07);
-  --sh-3: 0 10px 30px rgba(16,24,40,.12);
-  --sh-4: 0 24px 64px rgba(16,24,40,.20);
+  /* 阴影带靛紫意：浮层深度更明显（卡片靠色差+发丝线分层） */
+  --sh-1: 0 1px 2px rgba(60,55,120,.06);
+  --sh-2: 0 2px 8px rgba(60,55,120,.08);
+  --sh-3: 0 12px 32px rgba(60,55,120,.14);
+  --sh-4: 0 24px 64px rgba(60,55,120,.22);
 
-  /* 字号：6 级取代原来的 11 种 */
-  --fs-xs:   11px;    /* 徽章 / ID / 时间戳 */
-  --fs-sm:   12px;    /* 次要说明 / 表头 */
-  --fs-base: 13px;    /* 正文 / 表格 / 按钮 */
-  --fs-md:   15px;    /* 卡片标题 / 区块标题 */
-  --fs-lg:   20px;    /* 页面标题 */
-  --fs-xl:   28px;    /* KPI 数值 */
+  /* 字号：6 级 */
+  --fs-xs:   11px;
+  --fs-sm:   12px;
+  --fs-base: 13px;
+  --fs-md:   15px;
+  --fs-lg:   20px;
+  --fs-xl:   28px;
 
-  /* 间距：4px 栅格取代原来的 2/6/8/9/10/12 混用 */
+  /* 间距 4px 栅格 */
   --sp-1:  4px;
   --sp-2:  8px;
   --sp-3:  12px;
@@ -85,20 +80,20 @@
   --sp-8:  32px;
   --sp-10: 40px;
 
-  /* 圆角：4 级 */
-  --r-sm:   6px;
-  --r-md:   8px;
-  --r-lg:   12px;
+  /* 圆角：整体调大一档（观感最直接的差异） */
+  --r-sm:   8px;
+  --r-md:   10px;
+  --r-lg:   16px;
   --r-full: 999px;
 
   /* 控件高度 */
-  --h-sm: 24px;
-  --h-md: 30px;
-  --h-lg: 36px;
+  --h-sm: 26px;
+  --h-md: 32px;
+  --h-lg: 38px;
 
   /* 动效 */
   --ease: cubic-bezier(.4,0,.2,1);
-  --dur:  120ms;
+  --dur:  140ms;
 
   --mono: ui-monospace, "SF Mono", Consolas, "Cascadia Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
@@ -113,26 +108,27 @@
       和亮色的毛病同源：层次全靠边框，一暗就看不出边界。
    新取值让 surface 与 bg 差到 ~8%，边界自然浮现。 */
 [data-theme="dark"] {
-  --bg:            #0d0f12;
-  --surface:       #16191e;
-  --surface-2:     #1c2027;
-  --surface-3:     #23282f;
-  --border:        #262b33;
-  --border-strong: #39404a;
+  /* 暗色 · 靛紫墨基调：底色带紫意（#121016 系），表面紫灰递进 */
+  --bg:            #131019;
+  --surface:       #1c1826;
+  --surface-2:     #221e2e;
+  --surface-3:     #2a2538;
+  --border:        #2e2940;
+  --border-strong: #45405c;
 
-  --fg:            #eceef2;
-  --fg-muted:      #9aa3b2;
-  --fg-subtle:     #767f8d;
+  --fg:            #ece9f4;
+  --fg-muted:      #a09abc;
+  --fg-subtle:     #7e7896;
 
-  --brand:         #6ea0f8;
-  --brand-soft:    #141d2e;
-  --brand-line:    #263a58;
+  --brand:         #8b8bf0;
+  --brand-soft:    #1f1c3a;
+  --brand-line:    #34305e;
   --ok:            #4ecf98;
   --ok-soft:       #0e251b;
   --ok-line:       #1c4633;
-  --warn:          #dfa43c;
-  --warn-soft:     #241b0d;
-  --warn-line:     #463516;
+  --warn:          #c98ae0;
+  --warn-soft:     #271a31;
+  --warn-line:     #452e52;
   --err:           #f17a7a;
   --err-soft:      #2b1313;
   --err-line:      #4a2020;
@@ -149,27 +145,27 @@
    缺了这个排除，`cycleTheme()` 切到 light 会毫无反应——画面上看着像按钮坏了。 */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg:            #0b0e13;
-    --surface:       #12171f;
-    --surface-2:     #171c24;
-    --surface-3:     #1e242e;
-    --border:        #1e232c;
-    --border-strong: #2c3441;
-    --fg:            #e9edf3;
-    --fg-muted:      #939cab;
-    --fg-subtle:     #78818f;
-    --brand:         #7aa2f7;
-    --brand-soft:    #16202f;
-    --brand-line:    #25384f;
-    --ok:            #56d19a;
-    --ok-soft:       #10251c;
-    --ok-line:       #1d4634;
-    --warn:          #e0a33a;
-    --warn-soft:     #241c0e;
-    --warn-line:     #453516;
-    --err:           #f08080;
-    --err-soft:      #2a1414;
-    --err-line:      #4a2222;
+    --bg:            #131019;
+    --surface:       #1c1826;
+    --surface-2:     #221e2e;
+    --surface-3:     #2a2538;
+    --border:        #2e2940;
+    --border-strong: #45405c;
+    --fg:            #ece9f4;
+    --fg-muted:      #a09abc;
+    --fg-subtle:     #7e7896;
+    --brand:         #8b8bf0;
+    --brand-soft:    #1f1c3a;
+    --brand-line:    #34305e;
+    --ok:            #4ecf98;
+    --ok-soft:       #0e251b;
+    --ok-line:       #1c4633;
+    --warn:          #c98ae0;
+    --warn-soft:     #271a31;
+    --warn-line:     #452e52;
+    --err:           #f17a7a;
+    --err-soft:      #2b1313;
+    --err-line:      #4a2020;
     --sh-1: 0 1px 2px rgba(0,0,0,.30);
     --sh-2: 0 2px 8px rgba(0,0,0,.35);
     --sh-3: 0 8px 24px rgba(0,0,0,.45);
@@ -201,45 +197,51 @@ html.theme-anim, html.theme-anim body {
    并且**不再用 surface 底色**，改成比页面底稍暗一档 ——
    旧版侧栏与内容区同为白底，靠一条 1px 边框分隔，整屏看起来是一整块。
    改成暗一档后，导航区与内容区在视觉上自然分层。 */
+/* ── 布局骨架（2026-11-06 二次重置）───────────────────────────────────
+   侧栏改为「墨底实色」：暗靛紫实底 + 亮字，与内容区形成强对比 ——
+   旧版侧栏只是比页面灰一点，视觉上与内容混为一体。 */
 .side {
-  width: 220px; flex: 0 0 220px;
+  width: 232px; flex: 0 0 232px;
   padding: var(--sp-4) var(--sp-3);
   display: flex; flex-direction: column;
   position: sticky; top: 0; height: 100vh;
-  background: var(--surface-2);
-  border-right: 1px solid var(--border);
+  background: linear-gradient(180deg, #1a1730 0%, #141126 100%);
+  border-right: 1px solid rgba(139,139,240,.14);
 }
+.side .nav-group-label { color: rgba(236,233,244,.42); }
+.side .side-foot { color: rgba(236,233,244,.44); border-top: 1px solid rgba(139,139,240,.14); }
 
 .brand {
   display: flex; align-items: center; gap: var(--sp-2);
   font-weight: 650; font-size: var(--fs-md);
   letter-spacing: -.02em;
   padding: var(--sp-1) var(--sp-2) var(--sp-5);
+  color: #ece9f4;
 }
 .logo {
-  width: 28px; height: 28px; border-radius: var(--r-md);
+  width: 30px; height: 30px; border-radius: 10px;
   display: grid; place-items: center;
   color: #fff; font-size: var(--fs-sm); font-weight: 700;
-  background: linear-gradient(135deg, var(--brand), color-mix(in srgb, var(--brand) 60%, #7c3aed));
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--brand) 30%, transparent);
+  background: linear-gradient(135deg, #6d6df2, #9a5bdb);
+  box-shadow: 0 2px 10px rgba(109,109,242,.45);
 }
 
-.nav { display: flex; flex-direction: column; gap: 1px; }
+/* 导航：圆角胶囊，选中 = 品牌实底白字（与墨底侧栏对比鲜明） */
+.nav { display: flex; flex-direction: column; gap: 2px; }
 .navbtn {
   display: flex; align-items: center; gap: var(--sp-2);
-  height: 36px; padding: 0 var(--sp-2);
+  height: 38px; padding: 0 var(--sp-3);
   border: 0; border-radius: var(--r-md);
-  background: transparent; color: var(--fg-muted);
+  background: transparent; color: rgba(236,233,244,.66);
   font: inherit; font-size: var(--fs-base); text-align: left;
   cursor: pointer;
   transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-.navbtn:hover { background: var(--surface-3); color: var(--fg); }
-/* 选中态：品牌色浅底 + 品牌色文字 + 左侧实心条。
-   旧版是 surface-2 底 + inset 阴影，在浅灰侧栏上几乎看不出来。 */
+.navbtn:hover { background: rgba(139,139,240,.12); color: #ece9f4; }
 .navbtn.on {
-  background: var(--brand-soft); color: var(--brand); font-weight: 600;
-  box-shadow: inset 3px 0 0 var(--brand);
+  background: linear-gradient(135deg, #6d6df2, #5b5bd6);
+  color: #fff; font-weight: 600;
+  box-shadow: 0 2px 10px rgba(109,109,242,.35);
 }
 .navbtn .ic {
   width: 18px; text-align: center; font-size: var(--fs-base);
@@ -249,8 +251,7 @@ html.theme-anim, html.theme-anim body {
 
 .side-foot {
   margin-top: auto; padding: var(--sp-3) var(--sp-2) var(--sp-1);
-  font-size: var(--fs-xs); color: var(--fg-subtle); line-height: 1.7;
-  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs); line-height: 1.7;
 }
 
 .main {
@@ -270,20 +271,26 @@ h1 { margin: 0; font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.025
 
 h3 { margin: 0 0 var(--sp-3); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; }
 
-/* ── 卡片 ────────────────────────────────────────────────────────────── */
-/* 2026-11 换皮要点：
-   ① 圆角从 12px 收到 10px —— 12px 在大卡片上显得过于圆润，和数据类界面不搭；
-   ② 内边距从 16px 加到 18px（视觉更松），但行高收紧（信息更密）；
-   ③ 边框降到 --border（很淡），靠**底色差**分层，边框只做界定不做装饰；
-   ④ 标题区加一条左侧竖线（用 ::before），给每张卡一个视觉锚点 ——
-      旧版所有卡片都是「灰字标题 + 内容」，扫视时找不到入口。 */
+/* ── 卡片 ──────────────────────────────────────────────────────────────
+   二次重置要点：
+   ① 大圆角 16px（观感最直接的差异）；
+   ② 顶部发丝渐变线（::before，品牌色渐变）——每张卡自带品牌识别；
+   ③ 标题行左侧竖线取消（发丝线已提供锚点），标题字改靛紫。 */
 .card {
+  position: relative;
   border-radius: var(--r-lg);
   padding: 18px var(--sp-4);
   margin-bottom: var(--sp-3);
   background: var(--surface);
   border: 1px solid var(--border);
   box-shadow: var(--sh-1);
+  overflow: hidden;
+}
+.card::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, #6d6df2, #9a5bdb 40%, transparent 80%);
+  opacity: .85;
 }
 .card-t {
   display: flex; align-items: center; gap: var(--sp-2);
@@ -295,8 +302,8 @@ h3 { margin: 0 0 var(--sp-3); font-size: var(--fs-md); font-weight: 600; letter-
 /* 标题左侧的强调条：3px 宽的品牌色，让每个区块有明确起点 */
 .card-t::before {
   content: ""; flex: none;
-  width: 3px; height: 14px; border-radius: 2px;
-  background: var(--brand);
+  width: 8px; height: 8px; border-radius: 3px;
+  background: linear-gradient(135deg, #6d6df2, #9a5bdb);
 }
 /* 卡片级语义变体：边框/底色跟着语义走，而不是在 HTML 里写死 #a33。 */
 .card-err { border-color: var(--err-line); background: var(--err-soft); }
@@ -384,9 +391,10 @@ tr:hover td { background: var(--surface-2); }
    「白底黑字」—— 同一个按钮在两种主题下观感完全不同，切换时很突兀。
    改成品牌色后两套主题观感一致，也更像控制台应有的样子。 */
 .btn.pri {
-  background: var(--brand); color: #fff; border-color: transparent;
+  background: linear-gradient(135deg, #6d6df2, #5b5bd6);
+  color: #fff; border-color: transparent;
   font-weight: 550;
-  box-shadow: 0 1px 2px rgba(0,0,0,.12);
+  box-shadow: 0 1px 3px rgba(109,109,242,.35);
 }
 /* hover/active 用 filter 而不是 color-mix：filter 全浏览器支持，而 color-mix
    是 2023 年才有的（Chrome 111+ / Safari 16.2+）。按钮悬停是最核心的交互反馈，

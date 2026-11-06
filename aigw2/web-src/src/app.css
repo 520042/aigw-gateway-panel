@@ -3,28 +3,43 @@
    <link> 在运行时引入（不能写成 CSS @import：PostCSS 会把 /style.css 当磁盘
    绝对路径解析，构建时报 ENOENT: C:\style.css）。这里只补新框架引入的类。 */
 
-/* ── 顶栏（新框架新增：原来只有 .hd 里的 h1 + 一小排按钮）── */
+/* ── 顶栏（新框架新增：原来只有 .hd 里的 h1 + 一小排按钮）──
+   2026-11-06 二次重置：顶栏改为玻璃拟态（半透明 + 模糊），滚动时内容
+   从其下方穿过；页面标题加重；状态徽标改靛紫系。 */
 .topbar {
   display: flex; align-items: center; gap: var(--sp-4);
   padding: var(--sp-3) var(--sp-5);
   border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(14px) saturate(1.4);
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
   position: sticky; top: 0; z-index: 20;
 }
 .topbar-ttl { display: flex; align-items: baseline; gap: var(--sp-3); min-width: 0; }
-.topbar-ttl h1 { margin: 0; font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.02em; }
+.topbar-ttl h1 {
+  margin: 0; font-size: var(--fs-lg); font-weight: 700; letter-spacing: -.02em;
+  background: linear-gradient(120deg, var(--fg) 55%, var(--brand));
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
 .topbar-ttl .sub { color: var(--fg-muted); font-size: var(--fs-sm); margin: 0; }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
 
 .status-chip {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: var(--fs-xs); color: var(--fg-muted);
-  padding: 3px 9px; border: 1px solid var(--border);
-  border-radius: var(--r-full); background: var(--surface-2);
+  font-size: var(--fs-xs); color: var(--brand);
+  padding: 4px 11px; border: 1px solid var(--brand-line);
+  border-radius: var(--r-full); background: var(--brand-soft);
+  font-weight: 600;
 }
 .dot-live {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft);
+  animation: dot-pulse 2.2s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--ok-soft); }
+  50% { box-shadow: 0 0 0 6px transparent; }
 }
 
 /* ── 侧栏分组标签（参考项目 nav-group-label）── */
