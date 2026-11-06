@@ -453,7 +453,9 @@ function AuthPanel({ p, onChanged }: { p: Platform; onChanged: () => void }) {
   const inflightRef = useRef(false);
   const aliveRef = useRef(true);
 
-  // 组件卸载 / 换平台时停掉轮询与计时器（否则旧会话继续空转）。
+  // ★ 换平台时：停掉旧会话的轮询与计时器，并把面板**重置回 idle**——
+  //   只 stop 不 reset 的话，豆包的二维码/轮询文案会留在 MiniMax 的面板里
+  //   （实测：切平台后按钮区为空、note 还是旧平台的「等待扫码」）。
   useEffect(() => {
     aliveRef.current = true;
     return () => {
@@ -461,6 +463,14 @@ function AuthPanel({ p, onChanged }: { p: Platform; onChanged: () => void }) {
       if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
       inflightRef.current = false;
     };
+  }, [p.id]);
+
+  // p.id 变化的重置单独放在一个 effect：cleanup 先停旧，body 再清状态。
+  // （合成一个 effect 时 body 会先于旧 cleanup 跑，顺序不对。）
+  useEffect(() => {
+    setPhase({ kind: 'idle' });
+    setPollMsg('');
+    sessionRef.current = { tries: 0, polls: 0 };
   }, [p.id]);
 
   const stop = () => {
