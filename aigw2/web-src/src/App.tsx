@@ -4,20 +4,21 @@ import { api } from './api';
 import { Overview } from './pages/Overview';
 import { Sources } from './pages/Sources';
 import { Accounts } from './pages/Accounts';
+import { Tasks } from './pages/Tasks';
 import { UsagePage } from './pages/UsagePage';
 import { Logs } from './pages/Logs';
 import { Runtime } from './pages/Runtime';
 import { About } from './pages/About';
 
 export type ViewId =
-  | 'overview' | 'sources' | 'accounts' | 'usage' | 'logs' | 'runtime' | 'about';
+  | 'overview' | 'sources' | 'accounts' | 'tasks' | 'usage' | 'logs' | 'runtime' | 'about';
 
 interface NavGroup {
   label: string;
   items: Array<{ id: ViewId; label: string; icon: string }>;
 }
 
-/** 侧栏分组：参考项目的 nav-group-label，比原来 7 个平铺按钮更清楚。 */
+/** 侧栏分组：参考项目的 nav-group-label，比平铺按钮更清楚。 */
 const GROUPS: NavGroup[] = [
   {
     label: '概览',
@@ -34,6 +35,13 @@ const GROUPS: NavGroup[] = [
     ],
   },
   {
+    label: '任务',
+    items: [
+      // 签到覆盖 5 家平台（Lobster / 小浣熊非 WB 系），独立成视图才名副其实。
+      { id: 'tasks', label: '任务中心', icon: '✓' },
+    ],
+  },
+  {
     label: '系统',
     items: [
       { id: 'logs', label: '日志', icon: '≡' },
@@ -46,7 +54,8 @@ const GROUPS: NavGroup[] = [
 const TITLES: Record<ViewId, { title: string; sub: string }> = {
   overview: { title: '总览', sub: '免费 AI 额度 → 本地 OpenAI 兼容端点' },
   sources: { title: '接入源', sub: '官方 API · 订阅反代 · 客户端接入 · 公益站 · 自定义' },
-  accounts: { title: '模型与用量', sub: '账号运维 · WB 任务 · 积分与限额' },
+  accounts: { title: '模型与用量', sub: '账号凭据 · 健康与积分一览' },
+  tasks: { title: '任务中心', sub: '每日签到 · 定时执行 · WB 任务 · 执行记录' },
   usage: { title: '用量明细', sub: 'SQLite(WAL) 台账 · 延迟分位 · 平台归因' },
   logs: { title: '日志', sub: '落盘日志尾部：失败根因的最后一层' },
   runtime: { title: '运行配置', sub: '并发 · 超时 · 重试 · 限流（热更新，无需重启）' },
@@ -55,7 +64,7 @@ const TITLES: Record<ViewId, { title: string; sub: string }> = {
 
 function viewFromHash(): ViewId {
   const h = location.hash.replace(/^#\/?/, '');
-  const valid: ViewId[] = ['overview', 'sources', 'accounts', 'usage', 'logs', 'runtime', 'about'];
+  const valid: ViewId[] = ['overview', 'sources', 'accounts', 'tasks', 'usage', 'logs', 'runtime', 'about'];
   return valid.includes(h as ViewId) ? (h as ViewId) : 'overview';
 }
 
@@ -176,6 +185,7 @@ export function App() {
           {view === 'overview' && <Overview health={health} platforms={platforms} />}
           {view === 'sources' && <Sources platforms={platforms} refresh={refreshPlatforms} />}
           {view === 'accounts' && <Accounts />}
+          {view === 'tasks' && <Tasks />}
           {view === 'usage' && <UsagePage />}
           {view === 'logs' && <Logs />}
           {view === 'runtime' && <Runtime />}
