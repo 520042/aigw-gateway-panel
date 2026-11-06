@@ -118,6 +118,10 @@
   text-align: left; cursor: pointer; user-select: none;
 }
 .src-group-h:hover { background: var(--surface-3); }
+/* 展开组的分组头加重一档：扫视时能立刻看出「这组是开着的」；
+   折叠组保持浅底，形成开/合的自然层级。 */
+.src-group.open .src-group-h { background: var(--brand-soft); color: var(--brand); }
+.src-group.open .src-group-h:hover { background: var(--brand-line); }
 .src-group-h .chev {
   width: 14px; flex: none; color: var(--fg-subtle); font-size: var(--fs-xs);
 }

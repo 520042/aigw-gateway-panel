@@ -198,7 +198,7 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
               const searching = q.trim() !== '' || filter !== 'all';
               const show = searching || groupIsOpen(g);
               return (
-                <div key={g} className="src-group">
+                <div key={g} className={'src-group' + (show ? ' open' : '')}>
                   <button
                     className="src-group-h"
                     onClick={() => toggleGroup(g)}
