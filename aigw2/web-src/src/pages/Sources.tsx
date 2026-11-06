@@ -306,6 +306,26 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
           <span>· {p.models_n} 个模型</span>
           <span>· {p.region ?? '—'}</span>
         </div>
+        {/* 平台级启停：停用后 /v1 不再路由该平台全部模型（legacy 同款操作）。 */}
+        <div className="row" style={{ marginTop: 'var(--sp-2)' }}>
+          <button
+            className={'btn sm ' + (p.enabled ? 'gh' : 'pri')}
+            onClick={async () => {
+              if (!confirm(`${p.enabled ? '停用' : '启用'}平台 ${p.name}？${p.enabled ? '停用后客户端将无法调用它的任何模型。' : ''}`)) return;
+              try {
+                await api.post('/api/platforms', { action: 'toggle_platform', id: p.id, enabled: !p.enabled });
+                onChanged();
+              } catch (e) {
+                alert('操作失败：' + (e instanceof Error ? e.message : String(e)));
+              }
+            }}
+          >
+            {p.enabled ? '⏸ 停用平台' : '▶ 启用平台'}
+          </button>
+          <span className="faint fs-xs">
+            {p.enabled ? '当前参与路由' : '已停用：客户端调它的模型会得到「平台已停用」'}
+          </span>
+        </div>
       </Card>
 
       <Card title="登录">
@@ -323,6 +343,30 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
         </div>
         {credMsg && <Note tone={credMsg.tone === 'ok' ? 'ok' : credMsg.tone === 'err' ? 'err' : undefined}>{credMsg.text}</Note>}
       </Card>
+
+      {(p.accounts?.length ?? 0) > 0 && (
+        <Card title={`账号 · ${p.accounts!.length}`}>
+          <table>
+            <thead>
+              <tr><th>账号</th><th>状态</th><th>健康</th><th>积分</th></tr>
+            </thead>
+            <tbody>
+              {(p.accounts ?? []).map((acc) => (
+                <tr key={acc.id}>
+                  <td><b>{acc.name || acc.id}</b><span className="faint mono fs-xs" style={{ marginLeft: 6 }}>{acc.id.slice(0, 8)}</span></td>
+                  <td><Pill tone={acc.enabled ? 'ok' : 'mut'}>{acc.enabled ? '启用' : '停用'}</Pill>
+                    {acc.needs_relogin && <span className="pill warn" style={{ marginLeft: 4 }}>本机解不开</span>}</td>
+                  <td>{acc.health?.label
+                    ? <span className={'pill ' + (acc.health.status === 'ok' ? 'ok' : 'warn')}>{acc.health.label}</span>
+                    : <span className="faint">未验活</span>}
+                    {acc.cooling_s != null && acc.cooling_s > 0 && <span className="faint fs-xs" style={{ marginLeft: 6 }}>冷却 {Math.round(acc.cooling_s)}s</span>}</td>
+                  <td className="mono">{acc.credit != null ? acc.credit.toLocaleString('en-US') : <span className="faint">未查</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
 
       <Card title={<span>模型 · 已启用 {p.models_on}/{p.models_n}</span>}>
         {p.models.length === 0

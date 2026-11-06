@@ -70,6 +70,16 @@ export interface Platform {
   auth: string;
   region?: string;
   accounts_n: number;
+  /** 该平台的账号明细（掩码名/健康/积分，secret 不下发）。 */
+  accounts?: Array<{
+    id: string;
+    name: string;
+    enabled: boolean;
+    needs_relogin: boolean;
+    health: { status?: string; label?: string; age_secs?: number } | null;
+    cooling_s?: number;
+    credit?: number | null;
+  }>;
   usable: boolean;
   anon: boolean;
   placeholder: boolean;
@@ -84,6 +94,8 @@ export interface Platform {
   recent: { requests: number; success: number; failed: number; cancelled: number } | null;
   last_error: unknown;
   rates?: Record<string, number>;
+  /** 分组（spec 自报，providers/*.toml 的 group 字段）。 */
+  group?: string;
 }
 
 export interface PlatformResponse {
