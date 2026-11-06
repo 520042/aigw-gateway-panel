@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Card, Loading, ErrorBox, useAsync } from '../components';
 import { api } from '../api';
 
@@ -8,6 +8,64 @@ function parseLine(raw: string): LogLine {
   const m = raw.match(/^(\S+)\s+(\w+)\s+(\S+?):\s?([\s\S]*)$/);
   if (!m) return { ts: '', level: '', module: '', msg: raw };
   return { ts: m[1], level: m[2].toUpperCase(), module: m[3], msg: m[4] };
+}
+
+const ROW_H = 24;      // 与 .log-row 的固定 height 一致（2px padding + 19px 内容）
+const OVERSCAN = 10;   // 视口上下各多渲染 10 行，滚动时不露白边
+
+/**
+ * 窗口化渲染（轻量虚拟滚动）：日志页选 1000 行时全量渲染会到 ~5000 个
+ * DOM 节点，滚动与重渲染都变沉。这里只渲染可视区 ± OVERSCAN 行，
+ * 上下占位 div 撑住总高度，滚动条行为与全量渲染一致。
+ * 固定行高是前提——.log-row 用 min-height + nowrap，实际高度恒定。
+ */
+function VirtualLog({ lines }: { lines: string[] }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [range, setRange] = useState({ start: 0, end: 60 });
+
+  const recompute = () => {
+    const el = boxRef.current;
+    if (!el) return;
+    const start = Math.max(0, Math.floor(el.scrollTop / ROW_H) - OVERSCAN);
+    const visible = Math.ceil(el.clientHeight / ROW_H) + OVERSCAN * 2;
+    setRange({ start, end: Math.min(lines.length, start + visible) });
+  };
+
+  useEffect(() => {
+    recompute();
+    const el = boxRef.current;
+    if (!el) return;
+    el.addEventListener('scroll', recompute, { passive: true });
+    const ro = new ResizeObserver(recompute);
+    ro.observe(el);
+    return () => { el.removeEventListener('scroll', recompute); ro.disconnect(); };
+    // lines 变化（换档/过滤/刷新）后行数变，可视区也要重算
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lines.length]);
+
+  const padTop = range.start * ROW_H;
+  const padBottom = Math.max(0, (lines.length - range.end) * ROW_H);
+  const view = lines.slice(range.start, range.end);
+
+  return (
+    <div className="log-box" ref={boxRef}>
+      {lines.length === 0 && <div className="faint">没有匹配的日志行</div>}
+      {padTop > 0 && <div style={{ height: padTop }} />}
+      {view.map((raw, i) => {
+        const l = parseLine(raw);
+        const cls = l.level === 'ERROR' ? 'err' : l.level === 'WARN' ? 'warn' : l.level === 'INFO' ? 'info' : 'dbg';
+        return (
+          <div className={'log-row log-' + cls} key={range.start + i} title={raw}>
+            <span className="log-ts">{l.ts}</span>
+            <span className="log-lv">{l.level || '—'}</span>
+            <span className="log-mod">{l.module}</span>
+            <span className="log-msg">{l.msg}</span>
+          </div>
+        );
+      })}
+      {padBottom > 0 && <div style={{ height: padBottom }} />}
+    </div>
+  );
 }
 
 export function Logs() {
@@ -46,23 +104,7 @@ export function Logs() {
         </div>
       }
     >
-      {loading ? <Loading /> : (
-        <div className="log-box">
-          {(data?.lines ?? []).map((raw, i) => {
-            const l = parseLine(raw);
-            const cls = l.level === 'ERROR' ? 'err' : l.level === 'WARN' ? 'warn' : l.level === 'INFO' ? 'info' : 'dbg';
-            return (
-              <div className={'log-row log-' + cls} key={i}>
-                <span className="log-ts">{l.ts}</span>
-                <span className="log-lv">{l.level || '—'}</span>
-                <span className="log-mod">{l.module}</span>
-                <span className="log-msg">{l.msg}</span>
-              </div>
-            );
-          })}
-          {data && data.lines.length === 0 && <div className="faint">没有匹配的日志行</div>}
-        </div>
-      )}
+      {loading ? <Loading /> : <VirtualLog lines={data?.lines ?? []} />}
       {data && (
         <div className="faint small mt-2">
           日志文件约 {Math.round((data.file_size ?? 0) / 1024)} KiB（尾部 256 KiB 窗口内查找）

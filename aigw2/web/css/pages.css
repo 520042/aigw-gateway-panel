@@ -143,6 +143,9 @@ tbody tr:hover td { background: var(--surface-3); }
   border-radius: 4px;
   font-size: var(--fs-xs);
   line-height: 1.6;
+  /* 窗口化渲染要求行高恒定（24px）：2px padding + 19px 行内容 ≈ 24px。 */
+  height: 24px;
+  align-items: center;
 }
 .log-row:hover { background: var(--surface-2); }
 
@@ -172,6 +175,12 @@ tbody tr:hover td { background: var(--surface-3); }
 .log-msg {
   color: var(--fg);
   overflow-wrap: anywhere;
+  /* 2026-11-06：日志改窗口化渲染（只画可视区行），前提是**行高恒定**。
+     单行 24px；长消息截断显示，title 里看全文（悬停即出）。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* 级别配色：徽章底色 + 文字色，保证暗亮两套都醒目 */
