@@ -154,3 +154,6 @@ aigw2/crates/*/src/._*
 /.mimosa/
 /.auto/
 /.zcode/
+
+# 2026-11-06 补：UI 重置核验截图（本机走查产物，不入库）
+/_ui_reset_*.png
