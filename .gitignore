@@ -164,3 +164,5 @@ aigw2/crates/*/src/._*
 /_ui_full_*.png
 /_ui_groups*.png
 /_ui_polish*.png
+/_ui_logs.png
+/_ui_vlog.png
