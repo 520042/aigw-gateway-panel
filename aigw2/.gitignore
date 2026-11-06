@@ -33,3 +33,6 @@
 /_test_out*.txt
 /_run.out
 /_run.err
+# legacy vanilla 面板：React 重构后的回滚保险。源码在 git 历史（10caab0 及之前
+# 的 aigw2/web/app.js），运行时不再嵌入二进制（rust-embed exclude）、不再部署。
+/web/app.js
