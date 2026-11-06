@@ -729,6 +729,10 @@ code {
   }
   .brand { padding: 0 var(--sp-2) 0 0; flex: 0 0 auto; }
   .nav { flex-direction: row; gap: 2px; }
+  /* 横排时分组标签（概览/资源与用量/系统）只会把导航挤成三段断层，
+     隐藏后 7 个入口连成一条；分组语义交给竖排（宽屏）承载。 */
+  .nav-group { margin-bottom: 0; display: contents; }
+  .side .nav-group-label { display: none; }
   .navbtn { height: var(--h-md); white-space: nowrap; }
   .side-foot { display: none; }
   .main { padding: var(--sp-3); }
