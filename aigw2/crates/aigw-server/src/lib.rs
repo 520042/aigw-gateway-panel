@@ -110,8 +110,14 @@ pub use net::{
 
 /// 前端静态资源。`$CARGO_MANIFEST_DIR/../../web` = workspace 根的 `web/`。
 /// debug 构建默认动态读盘（改文件刷新即生效），release 构建内嵌进二进制。
+///
+/// ★ 2026-11-06 精简：`app.js`（legacy vanilla 面板，305KB）已不被 React
+///   index 引用，但仍被嵌入 → 二进制白涨 305KB。用 `exclude` 从嵌入集剔除；
+///   源码保留在 `web/app.js`（回滚靠 git 历史 `git show`），部署目录不再含它。
+///   注意 exclude 是相对 folder 的 glob。
 #[derive(RustEmbed)]
 #[folder = "$CARGO_MANIFEST_DIR/../../web"]
+#[exclude = "app.js"]
 struct Web;
 
 fn forbidden(msg: &str) -> Response {
