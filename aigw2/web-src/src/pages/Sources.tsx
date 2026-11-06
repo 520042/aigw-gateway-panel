@@ -80,7 +80,17 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
   const [filter, setFilter] = useState<Filter>('all');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState<string | null>(null);
-  const [showHelp, setShowHelp] = useState(true);
+  // 快速开始引导：首次访问展开，之后默认收起（老用户每次划过它是负担）。
+  const [showHelp, setShowHelp] = useState(() => {
+    try { return localStorage.getItem('aigw-src-help-seen') === null; }
+    catch { return true; }
+  });
+  const toggleHelp = () => {
+    setShowHelp((v) => {
+      try { localStorage.setItem('aigw-src-help-seen', '1'); } catch { /* 忽略 */ }
+      return !v;
+    });
+  };
   // 分组折叠：`collapsed` 只记录**用户手动改过**的组（含 localStorage 持久化），
   // 没动过的组跟 GROUP_META.open 走（custom/client/free 默认展开，official/sub 收起）。
   // 搜索/筛选时强制全展开——用户在找东西，折叠是障碍。
@@ -172,7 +182,7 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
       )}
 
       <div className="srcbar2">
-        <button className="btn sm gh" onClick={() => setShowHelp((v) => !v)}>怎么用 {showHelp ? '▴' : '▾'}</button>
+        <button className="btn sm gh" onClick={toggleHelp}>怎么用 {showHelp ? '▴' : '▾'}</button>
         <span className="faint small ml-auto">管理操作已移到「模型与用量 → WB 任务」</span>
       </div>
 

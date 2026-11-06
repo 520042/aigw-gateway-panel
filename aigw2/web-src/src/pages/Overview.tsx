@@ -127,7 +127,7 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
         </Card>
       </div>
 
-      <Card title="后台任务" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>每天自动执行 · 详情见「模型与用量」</span>}>
+      <Card title="后台任务" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>每天自动执行 · 签到与 WB 任务见「任务中心」</span>}>
         {tasks.length === 0 ? <div className="faint small">暂无任务记录</div> : (
           <div className="task-ledger">
             {tasks.map(([k, t]) => (
