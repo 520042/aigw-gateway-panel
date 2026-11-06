@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Card, Kpi, Pill, Note, Loading } from '../components';
 import { api, type Platform, type PlatformResponse } from '../api';
 
@@ -344,8 +344,13 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
           {p.login_url && <>注册地址：<a href={p.login_url} target="_blank" rel="noopener noreferrer">{p.login_url}</a>。</>}
         </Note>
         {p.notes && <div className="note">{p.notes}</div>}
-        <div className="row">
-          <input className="q mono" placeholder="粘贴凭据…" id={'cred-' + p.id} />
+        {/* ★ 设备码 / 跳转授权 / 扫码登录入口（2026-11-06 补回——React 重构时丢失）：
+            后端 POST /api/auth action=start 对每类平台返回不同形状
+            （qr_image/qr_text / login_url / user_code），这里分支渲染，
+            并按 legacy 同款自调度轮询直到 success/过期。 */}
+        {['qr', 'device', 'oauth'].includes(a.kind) && <AuthPanel p={p} onChanged={onChanged} />}
+        <div className="row" style={{ marginTop: 'var(--sp-2)' }}>
+          <input className="q mono" placeholder="粘贴凭据（手动方式）…" id={'cred-' + p.id} />
           <button className="btn pri" onClick={() => saveCred(false)}>保存凭据</button>
           {a.kind === 'one_click' && (
             <button className="btn" onClick={() => saveCred(true)}>从本机客户端导入</button>
@@ -402,5 +407,192 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
         {p.models.length > 0 && <div className="faint fs-xs mt-2">点击芯片切换该模型的启用/停用（按裸模型名记账，跨平台生效）。</div>}
       </Card>
     </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   登录授权面板（2026-11-06 补回——React 重构时整条登录链路丢失）。
+   与 legacy authStart/authPoll 同状态机，按平台类型三分支：
+   · qr：显示二维码（服务端 qr_image / 前端文本兜底）+ 自调度轮询
+   · 跳转授权：显式「打开授权页」链接（window.open 会被拦）+ 自动轮询
+   · 设备码：user_code 单独成行 + 手动查询按钮
+   过期自动重试 3 次（豆包/百度二维码只有 1–3 分钟）。
+   ═══════════════════════════════════════════════════════════════════════ */
+interface StartResp {
+  ok?: boolean; status?: string; message?: string;
+  login_url?: string; qr_image?: string; qr_text?: string;
+  user_code?: string; callback_warning?: string; id?: string;
+}
+interface PollResp {
+  ok?: boolean; message?: string;
+  session?: { status?: string; message?: string };
+}
+
+const QR_HINTS: Record<string, string> = {
+  'apk-doubao': '用豆包 / 抖音 App 扫码，在手机上确认登录',
+  'apk-kuku': '用百度 App / 百度网盘 App 扫一扫，在手机上确认登录',
+  'apk-loomy': '用微信扫一扫，在手机上确认登录',
+  'apk-raccoon': '用微信扫一扫（进入「商汤小浣熊」小程序），在手机上确认登录',
+  'apk-metaso': '用微信扫一扫，在手机上确认登录',
+  'web-glm': '用微信扫一扫，在手机上确认登录',
+};
+
+function AuthPanel({ p, onChanged }: { p: Platform; onChanged: () => void }) {
+  type Phase =
+    | { kind: 'idle' }
+    | { kind: 'busy' }
+    | { kind: 'qr'; img?: string; text?: string; hint: string }
+    | { kind: 'redirect'; url: string; code?: string; warn?: string }
+    | { kind: 'manual'; code?: string }
+    | { kind: 'done'; text: string }
+    | { kind: 'fail'; text: string };
+  const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
+  const [pollMsg, setPollMsg] = useState('');
+  const sessionRef = useRef<{ id?: string; tries: number; polls: number }>({ tries: 0, polls: 0 });
+  const timerRef = useRef<number | null>(null);
+  const inflightRef = useRef(false);
+  const aliveRef = useRef(true);
+
+  // 组件卸载 / 换平台时停掉轮询与计时器（否则旧会话继续空转）。
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+      inflightRef.current = false;
+    };
+  }, [p.id]);
+
+  const stop = () => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    inflightRef.current = false;
+  };
+
+  const poll = async () => {
+    const id = sessionRef.current.id;
+    if (!id || inflightRef.current || !aliveRef.current) return;
+    inflightRef.current = true;
+    let r: PollResp;
+    try {
+      r = await api.post<PollResp>('/api/auth', { action: 'poll', id });
+    } catch (e) {
+      inflightRef.current = false;
+      if (aliveRef.current) setPollMsg('查询失败：' + (e instanceof Error ? e.message : String(e)));
+      return;
+    }
+    inflightRef.current = false;
+    if (!aliveRef.current || sessionRef.current.id !== id) return; // 换了新会话：丢弃旧响应
+
+    if (r.ok && r.session?.status === 'success') {
+      stop();
+      setPhase({ kind: 'done', text: '✓ ' + (r.session.message || '登录成功，已入库') });
+      setPollMsg('');
+      onChanged();
+      return;
+    }
+    const msg = r.session?.message || r.message || '还没完成，稍后再查';
+    const expired = msg.includes('过期') || msg.includes('失效') || msg.includes('已取消');
+    const waiting = msg.includes('等待授权中');
+    // 二维码过期是常态（豆包/百度 1–3 分钟）：自动换一张，最多 3 次。
+    if (expired) {
+      if (sessionRef.current.tries < 3) {
+        sessionRef.current.tries += 1;
+        setPollMsg(`二维码已过期，正在自动刷新（第 ${sessionRef.current.tries} 次）…`);
+        timerRef.current = window.setTimeout(() => { if (aliveRef.current) void start(); }, 600);
+        return;
+      }
+      stop();
+      setPollMsg(msg + '——请点「开始登录」重新生成。');
+      return;
+    }
+    setPollMsg(msg);
+    if (waiting) {
+      sessionRef.current.polls += 1;
+      if (sessionRef.current.polls > 150) { // 3s × 150 ≈ 7.5 分钟
+        stop();
+        setPollMsg('等太久了（约 7 分钟还没拿到授权回调）。可能这次授权页没走完，或本机回调端口被占用——请把浏览器跳转后地址栏的完整 URL 粘贴到下方「粘贴凭据」框提交。');
+        return;
+      }
+    }
+    // 自调度：轮询回来再排下一次（库库长轮询 ~30s，setInterval 会叠请求——legacy 教训）
+    timerRef.current = window.setTimeout(() => { if (aliveRef.current) void poll(); }, waiting ? 3000 : 1200);
+  };
+
+  const start = async () => {
+    stop();
+    sessionRef.current = { tries: 0, polls: 0 };
+    setPhase({ kind: 'busy' });
+    setPollMsg('');
+    let r: StartResp;
+    try {
+      r = await api.post<StartResp>('/api/auth', { action: 'start', platform: p.id });
+    } catch (e) {
+      setPhase({ kind: 'fail', text: '启动失败：' + (e instanceof Error ? e.message : String(e)) });
+      return;
+    }
+    if (!aliveRef.current) return;
+    if (r.status === 'error' || r.ok === false) {
+      setPhase({ kind: 'fail', text: r.message || '启动失败' });
+      return;
+    }
+    sessionRef.current.id = r.id;
+    if (r.qr_image || r.qr_text) {
+      setPhase({ kind: 'qr', img: r.qr_image, text: r.qr_text, hint: QR_HINTS[p.id] ?? '扫码并在手机上确认登录' });
+      timerRef.current = window.setTimeout(() => { if (aliveRef.current) void poll(); }, 1200);
+      return;
+    }
+    if (r.login_url) {
+      // 必须显式给可点链接：window.open 弹窗拦截很常见，只靠它用户会失去所有入口。
+      window.open(r.login_url, '_blank', 'noopener');
+      setPhase({ kind: 'redirect', url: r.login_url, code: r.user_code || undefined, warn: r.callback_warning || undefined });
+      timerRef.current = window.setTimeout(() => { if (aliveRef.current) void poll(); }, 1500);
+      return;
+    }
+    setPhase({ kind: 'manual', code: r.user_code || undefined });
+  };
+
+  return (
+    <div className="auth-panel">
+      {phase.kind === 'idle' && (
+        <button className="btn pri" onClick={start}>
+          {p.id.startsWith('apk-doubao') ? '生成扫码二维码' : '开始登录'}
+        </button>
+      )}
+      {phase.kind === 'busy' && <span className="faint">正在生成授权会话…</span>}
+      {phase.kind === 'qr' && (
+        <div>
+          <div className="qrwrap">
+            {phase.img
+              ? <img className="qr" src={phase.img} alt="二维码" style={{ width: 200, height: 200 }} />
+              : <div className="note">此平台返回的是二维码文本（需手动机具）：{phase.text}</div>}
+          </div>
+          <div className="faint fs-xs" style={{ textAlign: 'center' }}>{phase.hint}（二维码有有效期，失效后自动重试）</div>
+        </div>
+      )}
+      {phase.kind === 'redirect' && (
+        <div>
+          <div className="note">已打开授权页，等待你在浏览器里完成授权…</div>
+          {phase.code && <div className="usercode">设备码：<b>{phase.code}</b>（在授权页里输入）</div>}
+          <div className="row">
+            <a className="btn pri" href={phase.url} target="_blank" rel="noopener noreferrer">打开授权页 →</a>
+          </div>
+          {phase.warn && <Note tone="warn">{phase.warn}</Note>}
+        </div>
+      )}
+      {phase.kind === 'manual' && (
+        <div>
+          <div className="note">已生成授权会话</div>
+          {phase.code && <div className="usercode">输入设备码：<b>{phase.code}</b></div>}
+          <button className="btn" onClick={() => void poll()}>授权完成后，点这里查询</button>
+        </div>
+      )}
+      {phase.kind === 'done' && <Note tone="ok">{phase.text}</Note>}
+      {phase.kind === 'fail' && <Note tone="err">{phase.text}</Note>}
+      {pollMsg && (
+        <div className="note mt-2">{pollMsg}
+          {phase.kind !== 'done' && phase.kind !== 'fail' && <span className="faint fs-xs">（自动轮询中…）</span>}
+        </div>
+      )}
+    </div>
   );
 }
