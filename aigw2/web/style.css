@@ -65,49 +65,6 @@
   /* 字号：6 级 */
   --fs-xs:   11px;
   --fs-sm:   12px;
-  --fs-base: 13px;
-  --fs-md:   15px;
-  --fs-lg:   20px;
-  --fs-xl:   28px;
-
-  /* 间距 4px 栅格 */
-  --sp-1:  4px;
-  --sp-2:  8px;
-  --sp-3:  12px;
-  --sp-4:  16px;
-  --sp-5:  20px;
-  --sp-6:  24px;
-  --sp-8:  32px;
-  --sp-10: 40px;
-
-  /* 圆角：整体调大一档（观感最直接的差异） */
-  --r-sm:   8px;
-  --r-md:   10px;
-  --r-lg:   16px;
-  --r-full: 999px;
-
-  /* 控件高度 */
-  --h-sm: 26px;
-  --h-md: 32px;
-  --h-lg: 38px;
-
-  /* 动效 */
-  --ease: cubic-bezier(.4,0,.2,1);
-  --dur:  140ms;
-
-  --mono: ui-monospace, "SF Mono", Consolas, "Cascadia Mono", monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-          "Microsoft YaHei", system-ui, sans-serif;
-}
-
-/* ── 令牌：暗色 ──────────────────────────────────────────────────────── */
-/* 2026-11 换皮：从「蓝黑 (#0b0e13) + 偏冷表面」改成「中性黑 (#0d0f12) +
-   灰阶递进」。旧暗色的问题有两处：
-   ① 底色偏蓝，长时间看偏冷发闷；中性的灰黑更耐看；
-   ② 表面与底色的差只有 ~5%，加上边框也偏暗，卡片糊成一片 ——
-      和亮色的毛病同源：层次全靠边框，一暗就看不出边界。
-   新取值让 surface 与 bg 差到 ~8%，边界自然浮现。 */
-[data-theme="dark"] {
   /* 暗色 · 靛紫墨基调：底色带紫意（#121016 系），表面紫灰递进 */
   --bg:            #131019;
   --surface:       #1c1826;
@@ -183,9 +140,6 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 /* 主题切换时整页颜色过渡一次，不逐元素动画 */
-html.theme-anim, html.theme-anim body {
-  transition: background-color 200ms var(--ease), color 200ms var(--ease);
-}
 @media (prefers-reduced-motion: reduce) {
   html.theme-anim, html.theme-anim body { transition: none; }
 }
@@ -267,7 +221,6 @@ html.theme-anim, html.theme-anim body {
 }
 h1 { margin: 0; font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.025em; line-height: 1.3; }
 .sub { color: var(--fg-muted); font-size: var(--fs-sm); margin-top: 3px; }
-.hdbtns { margin-left: auto; display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
 
 h3 { margin: 0 0 var(--sp-3); font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; }
 
@@ -341,8 +294,6 @@ h3 { margin: 0 0 var(--sp-3); font-size: var(--fs-md); font-weight: 600; letter-
 .kpi .ex { color: var(--fg-subtle); font-size: var(--fs-xs); line-height: 1.5; }
 /* 成功/失败的 KPI 数字单独上色。必须带上 `.kpi .vl` 前缀压过上面的
    `color: var(--fg)`（0,2,0 > 0,1,0），否则写了不生效。 */
-.kpi .vl.v-ok  { color: var(--ok); }
-.kpi .vl.v-err { color: var(--err); }
 
 /* ── 徽章 ────────────────────────────────────────────────────────────── */
 .pill {
@@ -441,25 +392,11 @@ textarea.q {
 
 /* 说明块。
    2026-11 换皮：左侧加一条 3px 语义色竖线，正文颜色统一到 --fg（不再用语义色
-   当正文色）。旧版 oknote/errnote 整块用语义色当文字色（深绿/深红），
-   在长文本下对比强烈、读起来刺眼；改成「淡底 + 竖线 + 正常文字色」，
-   语义靠竖线和底色传达，正文保持易读。 */
-.note {
-  border-radius: var(--r-md);
-  padding: var(--sp-2) var(--sp-3);
-  font-size: var(--fs-sm); line-height: 1.7;
-  margin: var(--sp-2) 0;
-  background: var(--brand-soft);
-  border: 1px solid var(--brand-line);
-  border-left: 3px solid var(--brand);
-  color: var(--fg);
-}
 .note a { color: var(--brand); text-decoration: none; }
 .note a:hover { text-decoration: underline; }
 .note .warn { color: var(--warn); }
 .oknote   { background: var(--ok-soft);   border-color: var(--ok-line);   border-left-color: var(--ok); }
 .errnote  { background: var(--err-soft);  border-color: var(--err-line);  border-left-color: var(--err); }
-.warnnote { background: var(--warn-soft); border-color: var(--warn-line); border-left-color: var(--warn); }
 /* 语义文字色：只在「这个数字/这行字本身有褒贬」时用，不当装饰色。
    走令牌而不是 #e5a23c / #f06a6a —— 那两个值在亮色底上对比度不够，
    切主题时也不会跟着变。 */
@@ -500,11 +437,6 @@ code {
   border-radius: var(--r-md);
   overflow: hidden;
 }
-.srcbar-i {
-  display: flex; align-items: baseline; gap: 5px;
-  padding: var(--sp-2) var(--sp-4);
-  border-left: 1px solid var(--border);
-}
 .srcbar-i:first-child { border-left: 0; }
 .srcbar-i i { color: var(--fg-muted); font-size: var(--fs-xs); font-style: normal; }
 .srcbar-i b { font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
@@ -515,48 +447,22 @@ code {
 }
 
 /* ── 接入源：分组 ────────────────────────────────────────────────────── */
-.srcgroup { padding: var(--sp-3) var(--sp-4); border-radius: var(--r-lg); }
-.srcgroup-hd {
-  display: flex; align-items: center; gap: var(--sp-3);
-  cursor: pointer; user-select: none; padding: 2px;
-}
 .srcgroup-hd b { font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; }
 .srcgroup-hd .faint { font-size: var(--fs-sm); }
-.sg-arrow { color: var(--fg-subtle); font-size: var(--fs-xs); width: 14px; text-align: center; }
 
-.srcgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: var(--sp-2); margin-top: var(--sp-3); }
 
 /* ── 接入源：平台卡片 ────────────────────────────────────────────────── */
 /* transition 点名属性：200+ 卡片时 transition:all 会让主线程卡死（铁律①）。
    hover 不用 transform：每张卡片提合成层同样是灾难（实测）。 */
-.srccard {
-  border-radius: var(--r-md);
-  padding: var(--sp-3);
-  display: flex; flex-direction: column; gap: var(--sp-2);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
-}
 .srccard:hover { border-color: var(--border-strong); box-shadow: var(--sh-2); }
 .srccard.off { opacity: .5; }
-.srcname { font-weight: 550; font-size: var(--fs-base); line-height: 1.4; }
 .srcname .mono { font-weight: 400; font-size: var(--fs-xs); color: var(--fg-subtle); }
-.srcmeta { display: flex; gap: 4px; flex-wrap: wrap; }
 .srccard .row { margin-top: auto; padding-top: 2px; gap: var(--sp-1); }
 .srccard .btn { align-self: flex-start; }
 
 /* 卡片上的账号摘要条（原来的内联样式迁到这里） */
-.src-acct-bar {
-  display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
-  padding: var(--sp-1) var(--sp-2); margin: 2px 0 4px;
-  font-size: var(--fs-xs);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-}
 
 /* 抽屉里的「手动粘贴」折叠区 */
-.src-paste { margin-top: var(--sp-3); }
 .src-paste > summary {
   cursor: pointer; color: var(--fg-muted); font-size: var(--fs-sm);
   padding: var(--sp-1) 0; list-style: none;
@@ -566,79 +472,19 @@ code {
 .src-paste[open] > summary::before { content: "▾ "; }
 
 /* ── 下拉菜单 ────────────────────────────────────────────────────────── */
-.menu-wrap { position: relative; }
-.menu-pop {
-  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40;
-  min-width: 250px; padding: var(--sp-1);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-md);
-  box-shadow: var(--sh-3);
-}
-.menu-sec {
-  font-size: var(--fs-xs); color: var(--fg-subtle);
-  padding: var(--sp-2) var(--sp-2) var(--sp-1);
-}
-.menu-item {
-  display: block; width: 100%; text-align: left;
-  background: none; border: 0; color: var(--fg);
-  font: inherit; font-size: var(--fs-base);
-  padding: 7px var(--sp-2); border-radius: var(--r-sm); cursor: pointer;
-}
 .menu-item:hover { background: var(--surface-2); }
 
 /* ── 抽屉内分区 ──────────────────────────────────────────────────────── */
-.srcsec { margin: 2px 0 var(--sp-3); }
-.srcsec-h {
-  display: flex; align-items: center;
-  font-size: var(--fs-sm); font-weight: 600; color: var(--fg-muted);
-  margin: 0 0 var(--sp-1); padding-bottom: 5px;
-  border-bottom: 1px solid var(--border);
-}
 
 /* ── 模型开关清单 ────────────────────────────────────────────────────── */
-.mlist {
-  max-height: 240px; overflow: auto;
-  margin: var(--sp-2) 0 var(--sp-1); padding: 2px var(--sp-2);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-}
-.mrow {
-  display: flex; align-items: center; gap: var(--sp-2);
-  padding: 5px 0; border-bottom: 1px solid var(--border);
-}
 .mrow:last-child { border-bottom: none; }
 .mrow .mono { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mrow .btn { flex: 0 0 auto; }
 
 /* ── 弹窗 / 抽屉 ─────────────────────────────────────────────────────── */
-.modal-mask {
-  position: fixed; inset: 0; z-index: 50;
-  background: rgba(8,10,14,.45);
-  display: flex; align-items: flex-start; justify-content: center;
-  padding: 6vh var(--sp-4); overflow: auto;
-}
-.modal {
-  width: min(560px, 100%);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-lg);
-  box-shadow: var(--sh-4);
-  animation: pop 160ms var(--ease) both;
-}
-.modal.drawer { width: min(620px, 100%); }
 @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.99); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .modal { animation: none; } }
 
-.modal-hd {
-  display: flex; align-items: center; gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4);
-  border-bottom: 1px solid var(--border);
-  font-weight: 600; font-size: var(--fs-md); letter-spacing: -.01em;
-  position: sticky; top: 0; background: var(--surface); z-index: 1;
-  border-radius: var(--r-lg) var(--r-lg) 0 0;
-}
 .modal-hd .x {
   margin-left: auto; cursor: pointer; color: var(--fg-subtle);
   font-weight: 400; font-size: var(--fs-md); line-height: 1;
@@ -648,17 +494,11 @@ code {
 }
 .modal-hd .x:hover { background: var(--err-soft); color: var(--err); }
 
-.modal-bd { padding: var(--sp-4); }
 .modal-bd label {
   display: block; font-size: var(--fs-sm); color: var(--fg-muted);
   margin: var(--sp-3) 0 var(--sp-1); font-weight: 500;
 }
 .modal-bd .q { width: 100%; }
-.modal-foot {
-  display: flex; gap: var(--sp-2); justify-content: flex-end;
-  margin-top: var(--sp-4); padding-top: var(--sp-3);
-  border-top: 1px solid var(--border);
-}
 
 /* ── 关于页 KV ───────────────────────────────────────────────────────── */
 .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-2); margin-top: var(--sp-2); }
@@ -666,29 +506,15 @@ code {
 .kv span { display: block; font-size: var(--fs-xs); color: var(--fg-subtle); margin-bottom: 3px; }
 .kv b { font-size: var(--fs-base); word-break: break-all; font-weight: 550; }
 
-.docs { font-size: var(--fs-sm); line-height: 1.75; color: var(--fg); margin: var(--sp-2) 0; }
 .docs li { margin: 6px 0; }
 .docs p { margin: 6px 0; }
 
 /* ── 用量可视化 ──────────────────────────────────────────────────────── */
-.donut-total { font-size: var(--fs-xl); font-weight: 650; fill: var(--fg); }
-.donut-cap { font-size: var(--fs-xs); fill: var(--fg-subtle); }
-.bar-row { display: flex; align-items: center; gap: var(--sp-2); margin: 6px 0; }
-.bar-lb { width: 140px; flex: 0 0 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--fg-muted); }
-.bar-tr { flex: 1; height: 8px; background: var(--surface-3); border-radius: var(--r-full); overflow: hidden; }
-.bar-fill { height: 100%; border-radius: var(--r-full); background: var(--brand); }
-.bar-v { width: 86px; flex: 0 0 86px; text-align: right; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 
 /* ── 账号行（表格 hover） ───────────────────────────────────────────── */
-.acct-row:hover { background: var(--surface-2); }
 /* 展开列表里的账号行：虚线分隔 + 一行内紧凑排布。
    原来写在 HTML 里用了 var(--line2) —— 那个变量从没定义过，整条 border 声明
    直接被浏览器丢弃，行之间其实没有分隔线（视觉上一直靠 padding 撑）。 */
-.acct-sep {
-  border-top: 1px dashed var(--border-strong);
-  padding: 5px 0; cursor: pointer;
-}
-.acct-line { gap: var(--sp-2); font-size: var(--fs-sm); align-items: center; margin: 0; }
 
 /* ── 小卡网格 ────────────────────────────────────────────────────────── */
 .mini-grid { display: grid; gap: var(--sp-2); grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
@@ -704,14 +530,6 @@ code {
 .qr svg { display: block; border-radius: var(--r-sm); }
 
 /* ── 主题切换按钮 ────────────────────────────────────────────────────── */
-.theme-toggle {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: var(--h-md); padding: 0 var(--sp-2);
-  border: 1px solid var(--border); border-radius: var(--r-sm);
-  background: var(--surface); color: var(--fg-muted);
-  font: inherit; font-size: var(--fs-sm); cursor: pointer;
-  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
-}
 .theme-toggle:hover { background: var(--surface-2); color: var(--fg); }
 
 /* ── 响应式 ─────────────────────────────────────────────────────────── */
@@ -793,7 +611,6 @@ code {
 
 /* 虚拟滚动的视口与内层 */
 .src-list-vp { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
-.src-list-inner { position: relative; }
 
 .src-row {
   position: absolute; left: 0; right: 0;
@@ -819,71 +636,28 @@ code {
   font-variant-numeric: tabular-nums;
 }
 /* 分组标题行（也是虚拟化的一部分：算进行高里） */
-.src-row.grp {
-  font-size: var(--fs-xs); font-weight: 600; color: var(--fg-muted);
-  text-transform: uppercase; letter-spacing: .04em;
-  background: var(--surface-2); cursor: default; height: 26px;
-}
 .src-row.grp:hover { background: var(--surface-2); }
 
 .src-detail-col { min-width: 0; }
 
 /* 详情头部 */
-.sd-hd {
-  display: flex; align-items: flex-start; gap: var(--sp-3);
-  padding: var(--sp-4);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  margin-bottom: var(--sp-3);
-}
 .sd-hd .ttl { flex: 1; min-width: 0; }
 .sd-hd h2 { margin: 0; font-size: var(--fs-md); font-weight: 650; letter-spacing: -.02em; }
 .sd-hd .mt { margin-top: 5px; display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--fg-subtle); }
 .sd-hd .acts { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
 
 /* 详情分区 */
-.sd-sec {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  margin-bottom: var(--sp-3);
-  overflow: hidden;
-}
-.sd-sec-h {
-  display: flex; align-items: center; gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-4);
-  border-bottom: 1px solid var(--border);
-  font-size: var(--fs-xs); font-weight: 600;
-  color: var(--fg-muted); text-transform: uppercase; letter-spacing: .04em;
-}
-.sd-sec-b { padding: var(--sp-3) var(--sp-4); }
 
 /* 扫码区：二维码与说明并排 */
-.sd-qr { display: flex; gap: var(--sp-4); align-items: flex-start; flex-wrap: wrap; }
-.sd-qr .qrimg { flex: 0 0 auto; }
-.sd-qr .qrcopy { flex: 1; min-width: 200px; }
 .sd-qr .qrcopy .t { font-size: var(--fs-base); font-weight: 550; margin-bottom: var(--sp-1); }
 .sd-qr .qrcopy .d { font-size: var(--fs-sm); line-height: 1.6; color: var(--fg-muted); }
 
 /* 详情里的 KV 行 */
-.sd-kv {
-  display: flex; justify-content: space-between; gap: var(--sp-3);
-  padding: 6px 0; font-size: var(--fs-sm);
-  border-bottom: 1px solid var(--border);
-}
 .sd-kv:last-child { border-bottom: 0; }
 .sd-kv > span:first-child { color: var(--fg-muted); }
 .sd-kv > span:last-child { font-variant-numeric: tabular-nums; font-weight: 500; }
 
 /* 详情里的模型清单 */
-.sd-models { display: flex; flex-direction: column; gap: 2px; }
-.sd-mrow {
-  display: flex; align-items: center; gap: var(--sp-2);
-  padding: 5px var(--sp-2); border-radius: var(--r-sm);
-  font-size: var(--fs-sm);
-  transition: background-color var(--dur) var(--ease);
-}
 .sd-mrow:hover { background: var(--surface-2); }
 .sd-mrow .mono { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -918,11 +692,8 @@ code {
    刻意不做成 Tailwind 那样的大全 —— 我们只有 4000 行 JS，一套 20 个类够用，
    多了反而没人记得住哪个是哪个。
    ═══════════════════════════════════════════════════════════════════════ */
-.mt-1 { margin-top: var(--sp-1); }
 .mt-2 { margin-top: var(--sp-2); }
 .mt-3 { margin-top: var(--sp-3); }
-.mt-4 { margin-top: var(--sp-4); }
-.mb-2 { margin-bottom: var(--sp-2); }
 .mb-3 { margin-bottom: var(--sp-3); }
 .ml-auto { margin-left: auto; }
 .ml-2 { margin-left: var(--sp-2); }
@@ -934,27 +705,11 @@ code {
 .pointer { cursor: pointer; }
 .w-auto { width: auto; }
 /* 纵向内边距：列表行/占位行用它撑出节奏，避免每处写 padding:5px 0 这种手调值 */
-.py-1 { padding-top: var(--sp-1); padding-bottom: var(--sp-1); }
-.py-2 { padding-top: var(--sp-2); padding-bottom: var(--sp-2); }
 /* 行内横排：图标 + 文字 + 值连成一行，不换行。
    gap 用 4/6/8 三档而非每处手写 —— 这三种是在现有页面里真正出现过的值。 */
-.iflex { display: flex; align-items: center; gap: var(--sp-1); }
-.iflex-2 { display: flex; align-items: center; gap: 6px; }
-.iflex-3 { display: flex; align-items: center; gap: var(--sp-2); }
-.iflex-top { display: flex; align-items: flex-start; gap: var(--sp-2); }
 /* 滚动容器：内容多时内部滚，不撑破卡片 */
-.scroll-y-sm { max-height: 160px; overflow: auto; }
-.scroll-y { max-height: 320px; overflow: auto; }
 /* 日志预格式化：1.55 行高是为了让 ERROR/WARN 行在长日志里更好扫。 */
-.log-pre {
-  font-size: var(--fs-xs); line-height: 1.55;
-  white-space: pre-wrap; word-break: break-all;
-}
-.log-pre-l { max-height: 68vh; overflow: auto; }
 /* 表格列宽（宽窄固定，避免长内容把布局顶变形） */
-.col-narrow { width: 72px; }
-.col-act { width: 92px; }
-.col-mid { width: 260px; }
 
 /* details/summary：折叠区块的统一观感
    —— 默认的三角标记在各浏览器不一致，这里统一成 ▸/▾ 并与文字基线对齐。 */
