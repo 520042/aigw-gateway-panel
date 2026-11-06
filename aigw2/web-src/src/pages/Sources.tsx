@@ -45,12 +45,61 @@ const isAuto = (p: Platform) => ['one_click', 'qr', 'device', 'oauth'].includes(
 
 type Filter = 'all' | 'auto' | 'qr' | 'bad';
 
+/** 分组规则（与 legacy srcGroupOf 同口径，用户拍板 + spec 自报优先）：
+ *  ① spec 自报 group 优先（providers/*.toml 的 group 字段，后端随行下发）；
+ *  ② 没声明再按 id 前缀推导。只看前缀会归错组（文件名习惯≠契约），也不能按
+ *     auth 判（api_key 同时被开放平台/客户端凭据源/60 多个公益站使用）。 */
+const SRC_GROUPS = ['custom', 'official', 'sub', 'client', 'free'] as const;
+type SrcGroup = (typeof SRC_GROUPS)[number];
+const GROUP_OVERRIDE: Record<'official' | 'free', string[]> = {
+  official: ['apk-coze', 'kimi-code', 'codex'],
+  // 免密免 Key 车道一律进「公益站」：没有账号也没有凭据，归到「客户端接入」
+  // 会让人以为需要先登录。anon-ovh / anon-zen 同族但 id 前缀不是 free-，点名。
+  free: ['anon-zen', 'anon-ovh', 'kilo', 'pollinations'],
+};
+const GROUP_META: Record<SrcGroup, { t: string; desc: string; open: boolean }> = {
+  custom:   { t: '自定义 API', desc: '自填 名称/协议/URL/Key', open: true },
+  official: { t: '开放平台 API', desc: '官方 API Key 直连', open: false },
+  sub:      { t: '订阅反代', desc: '订阅账号 OAuth 授权 → 网关反代', open: false },
+  client:   { t: '客户端接入', desc: '网页版 / 客户端凭据（Cookie / Token）', open: true },
+  free:     { t: '公益站 · 免费车道', desc: '公益中转聚合 + 免 Key 车道', open: true },
+};
+function srcGroupOf(p: Platform): SrcGroup {
+  if ((p as { group?: string }).group && SRC_GROUPS.includes((p as { group?: string }).group as SrcGroup)) {
+    return (p as { group?: string }).group as SrcGroup;
+  }
+  if (p.id.startsWith('custom-')) return 'custom';
+  if (p.id.startsWith('api-') || GROUP_OVERRIDE.official.includes(p.id)) return 'official';
+  if (p.id.startsWith('sub-')) return 'sub';
+  if (p.id.startsWith('free-') || GROUP_OVERRIDE.free.includes(p.id)) return 'free';
+  return 'client';
+}
+
 export function Sources({ platforms, refresh }: { platforms: PlatformResponse | null; refresh: () => void }) {
   // 平台清单由框架层拉取一次传入；保存凭据/导入后调 refresh() 让框架层重取。
   const [filter, setFilter] = useState<Filter>('all');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(true);
+  // 分组折叠：`collapsed` 只记录**用户手动改过**的组（含 localStorage 持久化），
+  // 没动过的组跟 GROUP_META.open 走（custom/client/free 默认展开，official/sub 收起）。
+  // 搜索/筛选时强制全展开——用户在找东西，折叠是障碍。
+  const [userToggled, setUserToggled] = useState<Record<string, boolean>>(() => {
+    try { return JSON.parse(localStorage.getItem('aigw-src-fold') ?? '{}') as Record<string, boolean>; }
+    catch { return {}; }
+  });
+  const toggleGroup = (g: string) => {
+    setUserToggled((old) => {
+      const isOpenNow = groupIsOpen(g);
+      const next = { ...old, [g]: !isOpenNow };
+      try { localStorage.setItem('aigw-src-fold', JSON.stringify(next)); } catch { /* 忽略 */ }
+      return next;
+    });
+  };
+  const groupIsOpen = (g: string): boolean => {
+    if (userToggled[g] !== undefined) return userToggled[g];
+    return GROUP_META[g as SrcGroup]?.open ?? true;
+  };
 
   const data = platforms;
 
@@ -140,21 +189,44 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
           </div>
           <div className="src-list-vp">
             {rows.length === 0 && <div className="faint p-3">没有匹配的平台</div>}
-            {rows.map((p) => {
-              const a = accessOf(p);
-              const tag = ['manual', 'none'].includes(a.kind) ? null : a.kind;
+            {/* 按分组渲染：分组头可点折叠；默认收起 official/sub（与 legacy 同）。
+                搜索/筛选时强制全展开（用户在找东西，折叠是障碍）。 */}
+            {SRC_GROUPS.map((g) => {
+              const gRows = rows.filter((p) => srcGroupOf(p) === g);
+              if (gRows.length === 0) return null;
+              const meta = GROUP_META[g];
+              const searching = q.trim() !== '' || filter !== 'all';
+              const show = searching || groupIsOpen(g);
               return (
-                <button
-                  key={p.id}
-                  className={'src-row static' + (current?.id === p.id ? ' on' : '')}
-                  title={`${p.name} · ${p.id} · ${a.way}`}
-                  onClick={() => setSel(p.id)}
-                >
-                  <span className={'dot ' + (p.anon ? 'on' : p.accounts_n > 0 ? 'ok' : 'off')} />
-                  <span className="nm">{p.name}</span>
-                  {tag && <span className={'ac-tag ac-' + tag} title={a.way}>{LABEL[tag]}</span>}
-                  {p.accounts_n > 0 && <span className="bd">{p.accounts_n}</span>}
-                </button>
+                <div key={g} className="src-group">
+                  <button
+                    className="src-group-h"
+                    onClick={() => toggleGroup(g)}
+                    title={meta.desc}
+                  >
+                    <span className="chev">{show ? '▾' : '▸'}</span>
+                    {meta.t}
+                    <span className="faint fs-xs">{gRows.length}</span>
+                    {gRows.some((p) => p.accounts_n > 0) && <span className="dot g-ok" />}
+                  </button>
+                  {show && gRows.map((p) => {
+                    const a = accessOf(p);
+                    const tag = ['manual', 'none'].includes(a.kind) ? null : a.kind;
+                    return (
+                      <button
+                        key={p.id}
+                        className={'src-row static' + (current?.id === p.id ? ' on' : '')}
+                        title={`${p.name} · ${p.id} · ${a.way}`}
+                        onClick={() => setSel(p.id)}
+                      >
+                        <span className={'dot ' + (p.anon ? 'on' : p.accounts_n > 0 ? 'ok' : 'off')} />
+                        <span className="nm">{p.name}</span>
+                        {tag && <span className={'ac-tag ac-' + tag} title={a.way}>{LABEL[tag]}</span>}
+                        {p.accounts_n > 0 && <span className="bd">{p.accounts_n}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
               );
             })}
           </div>

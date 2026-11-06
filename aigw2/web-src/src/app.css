@@ -102,6 +102,31 @@
 .src-row.static { position: static; height: auto; min-height: 32px; padding: 4px var(--sp-3); }
 .src-list-vp { max-height: 62vh; overflow-y: auto; }
 
+/* ── 分组（2026-11-06 恢复 legacy 的分组结构）────────────────────────
+   用户反馈：205 行纯平铺「一竖排太拥挤」。改为：
+   ① 分组头可点折叠（默认 official/sub 收起，与 legacy 同）；
+   ② 收起时组内行不渲染 —— 205 行常态只渲染 ~130 行；
+   ③ 左栏 272px 改为可宽可窄不强制 —— 分组头自带缩进层次，不再拥挤。 */
+.src-group { margin-bottom: 2px; }
+.src-group-h {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; min-height: 30px;
+  padding: 4px var(--sp-3);
+  border: 0; border-radius: var(--r-sm);
+  background: var(--surface-2); color: var(--fg);
+  font: inherit; font-size: var(--fs-sm); font-weight: 650;
+  text-align: left; cursor: pointer; user-select: none;
+}
+.src-group-h:hover { background: var(--surface-3); }
+.src-group-h .chev {
+  width: 14px; flex: none; color: var(--fg-subtle); font-size: var(--fs-xs);
+}
+.src-group-h .faint { margin-left: auto; }
+.src-group-h .dot.g-ok {
+  width: 6px; height: 6px; margin-left: 4px;
+  background: var(--ok); border-radius: 50%;
+}
+
 /* 小工具 */
 .p-3 { padding: var(--sp-3); }
 .mb-3 { margin-bottom: var(--sp-3); }
