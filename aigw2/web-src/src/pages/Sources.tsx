@@ -102,6 +102,11 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
   };
 
   const data = platforms;
+  // 模型停用集合（裸模型名，后端 flags 记账口径）——详情栏模型芯片据此着色。
+  const disabledModels = useMemo(
+    () => new Set(data?.disabled_models ?? []),
+    [data],
+  );
 
   const rows = useMemo(() => {
     if (!data) return [];
@@ -233,18 +238,35 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
         </div>
 
         <div className="src-detail-col">
-          {current ? <PlatformDetail p={current} onChanged={refresh} /> : <div className="empty">没有匹配的平台</div>}
+          {current ? <PlatformDetail p={current} disabledModels={disabledModels} onChanged={refresh} /> : <div className="empty">没有匹配的平台</div>}
         </div>
       </div>
     </>
   );
 }
 
-function PlatformDetail({ p, onChanged }: { p: Platform; onChanged: () => void }) {
+function PlatformDetail({ p, disabledModels, onChanged }: {
+  p: Platform;
+  disabledModels: Set<string>;
+  onChanged: () => void;
+}) {
   const a = accessOf(p);
   // 保存/导入的即时状态：验活要打上游（实测最长 15s+），alert 是模态的、
   // 会把整页冻住——期间必须让用户看到「正在验活」，否则以为卡死。
   const [credMsg, setCredMsg] = useState<{ tone: 'ok' | 'err' | 'busy'; text: string } | null>(null);
+  // 模型开关的即时反馈；实际状态以 onChanged() 重取后的 disabledModels 为准。
+  const [modelMsg, setModelMsg] = useState('');
+  const toggleModel = async (model: string) => {
+    const bare = model.includes('@') ? model.slice(0, model.lastIndexOf('@')) : model;
+    setModelMsg(`正在切换 ${bare}…`);
+    try {
+      await api.post('/api/platforms', { action: 'toggle_model', model: bare });
+      setModelMsg('');
+      onChanged();
+    } catch (e) {
+      setModelMsg('切换失败：' + (e instanceof Error ? e.message : String(e)));
+    }
+  };
   const saveCred = (fromClient: boolean) => {
     const el = document.getElementById('cred-' + p.id) as HTMLInputElement | null;
     if (!fromClient) {
@@ -305,7 +327,25 @@ function PlatformDetail({ p, onChanged }: { p: Platform; onChanged: () => void }
       <Card title={<span>模型 · 已启用 {p.models_on}/{p.models_n}</span>}>
         {p.models.length === 0
           ? <div className="faint">这个平台没有声明模型清单（live 拉取）</div>
-          : <div className="model-chips">{p.models.map((m) => <span className="pill mut mono" key={m}>{m}</span>)}</div>}
+          : <div className="model-chips">
+              {p.models.map((m) => {
+                const bare = m.includes('@') ? m.slice(0, m.lastIndexOf('@')) : m;
+                const off = disabledModels.has(bare);
+                return (
+                  <button
+                    key={m}
+                    className={'model-chip mono' + (off ? ' off' : '')}
+                    title={off ? `${bare} 已停用，点击启用` : `${bare} 启用中，点击停用`}
+                    onClick={() => toggleModel(m)}
+                  >
+                    {bare}
+                    {off && <span className="chip-x">已停</span>}
+                  </button>
+                );
+              })}
+            </div>}
+        {modelMsg && <Note>{modelMsg}</Note>}
+        {p.models.length > 0 && <div className="faint fs-xs mt-2">点击芯片切换该模型的启用/停用（按裸模型名记账，跨平台生效）。</div>}
       </Card>
     </>
   );

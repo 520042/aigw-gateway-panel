@@ -56,6 +56,27 @@
 .table-scroll { overflow-x: auto; }
 .detail-meta { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-sm); color: var(--fg-muted); }
 .model-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+/* 可点击的模型芯片：启用=正常芯片，停用=划线灰芯片。 */
+.model-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px; border-radius: var(--r-full);
+  border: 1px solid var(--brand-line);
+  background: var(--brand-soft); color: var(--brand);
+  font-family: var(--mono); font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: background-color var(--dur) var(--ease),
+              border-color var(--dur) var(--ease),
+              color var(--dur) var(--ease);
+}
+.model-chip:hover { border-color: var(--brand); }
+.model-chip.off {
+  background: var(--surface-2); color: var(--fg-subtle);
+  border-color: var(--border); text-decoration: line-through;
+}
+.model-chip .chip-x {
+  font-size: 10px; font-weight: 600;
+  color: var(--err); text-decoration: none;
+}
 .loading { padding: var(--sp-5); text-align: center; }
 .task-ledger { display: flex; flex-direction: column; gap: 4px; }
 .task-ledger-row {
