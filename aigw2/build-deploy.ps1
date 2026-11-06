@@ -116,6 +116,10 @@ Copy-Item $exe (Join-Path $dest "aigw.exe") -Force
 $srcProv = Join-Path $repo "providers"
 $dstProv = Join-Path $dest "providers"
 New-Item -ItemType Directory -Force -Path $dstProv | Out-Null
+# ★ providers 是**纯仓库派生物**（无本地状态），同步用「清空再拷」而不是
+#   只增不删——否则仓库里删掉的 spec 在部署目录残留且仍会被启动加载
+#   （实测：api-bailian.toml 仓库已删，部署端还在，平台数对不上）。
+Remove-Item (Join-Path $dstProv "*.toml") -Force -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $srcProv "*.toml") $dstProv -Force
 $n = (Get-ChildItem $dstProv -Filter *.toml).Count
 Write-Host "providers: $n 份 toml"
