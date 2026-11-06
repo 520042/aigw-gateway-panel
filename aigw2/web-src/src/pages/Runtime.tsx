@@ -26,6 +26,55 @@ const PRESETS: Array<[string, string]> = [
   ['param_override', '参数覆盖'],
 ];
 
+/** 每条管线的 enabled 判据（响应形状各异，逐个对齐实测）。 */
+function enabledOf(id: string, v: unknown): boolean | null {
+  const j = v as { cfg?: Record<string, unknown>; mode?: unknown } | null;
+  if (!j) return null;
+  switch (id) {
+    case 'sysprompt': return Boolean(j.cfg?.system_prompt);
+    case 'history_trim': return Boolean(j.cfg?.enabled);
+    case 'think_tags': return j.mode != null;
+    case 'model_map': return Object.keys(j.cfg?.mapping ?? {}).length > 0;
+    case 'param_override': return Boolean(j.cfg?.enabled);
+    default: return null;
+  }
+}
+
+function PipelineCard() {
+  // 5 条管线各一个 GET；并行拉，全部完成才渲染（避免闪空态）。
+  const [states, setStates] = useState<Record<string, unknown> | null>(null);
+  const [err, setErr] = useState('');
+  const load = () => {
+    Promise.all(PRESETS.map(([id]) => api.get<unknown>('/api/' + id)))
+      .then((vs) => { setStates(Object.fromEntries(PRESETS.map(([id], i) => [id, vs[i]]))); setErr(''); })
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)));
+  };
+  useEffect(load, []);
+  return (
+    <Card title="请求处理管线" extra={
+      <button className="btn sm gh" style={{ marginLeft: 'auto', fontWeight: 400 }} onClick={load}>刷新</button>
+    }>
+      {err ? <ErrorBox message={err} onRetry={load} /> : !states ? <Loading /> : (
+        <div className="preset-grid">
+          {PRESETS.map(([id, name]) => {
+            const on = enabledOf(id, states[id]);
+            return (
+              <div className="preset-chip" key={id}>
+                <span className={'pill ' + (on ? 'ok' : 'mut')}>{on ? '开启' : on === false ? '未启用' : '—'}</span>
+                <b>{name}</b>
+                <span className="faint fs-xs mono">/api/{id}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="faint small mt-2">
+        状态实时读取；配置端点为 <code className="mono">POST /api/&lt;管线名&gt;</code>（legacy 脚本或 curl 可调）。
+      </div>
+    </Card>
+  );
+}
+
 export function Runtime() {
   const { data, error, loading, reload } = useAsync<RuntimeCfg>(() => api.get('/api/runtime'), []);
   const [draft, setDraft] = useState<Record<string, number>>({});
@@ -80,19 +129,7 @@ export function Runtime() {
         {msg && <Note tone={msg.startsWith('✔') ? 'ok' : 'err'}>{msg}</Note>}
       </Card>
 
-      <Card title="请求处理管线">
-        <div className="preset-grid">
-          {PRESETS.map(([id, name]) => (
-            <div className="preset-chip" key={id}>
-              <span className="pill brand">{name}</span>
-              <span className="faint fs-xs mono">/api/{id}</span>
-            </div>
-          ))}
-        </div>
-        <div className="faint small mt-2">
-          这些配置各有独立端点，面板「接入源」与「模型与用量」页会分别展示对应的开关与效果。
-        </div>
-      </Card>
+      <PipelineCard />
     </>
   );
 }
