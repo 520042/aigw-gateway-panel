@@ -409,8 +409,11 @@ cargo build --release -p aigw
 | `aigw-server` | axum 路由 + 门禁 + 协议转换 + rust-embed 前端 |
 | `aigw` | 二进制入口（CLI / 装配 / 安装器 / 体检 / doctor） |
 
-> ⚠️ `aigw-server/src/lib.rs` 目前约 **1.47 万行**，其中约一半是内联 `mod tests`。
-> 拆分是已识别的待办（见 `../项目优化清单.md`），不是"还没想到"。
+> ⚠️ `aigw-server/src/lib.rs` 目前约 **1.47 万行**，其中约一半是内联 `mod tests`
+> （174+48 个测试）。**评估过拆分并放弃**：tests 内联是 Rust 惯用法（可访问
+> 私有项），拆出去需暴露 92 个 `pub(crate)` 符号，负收益。产品逻辑大块
+> （转发核心、平台 handlers）耦合度高，保持现状；可独立成模块的
+> （errlog/tasks/stream/livecfg 等）均已拆出。
 
 ### WB 任务中心
 
