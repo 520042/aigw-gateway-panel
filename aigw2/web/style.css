@@ -28,44 +28,87 @@
    但它在文件里更靠后 —— 系统是暗色时它会盖掉 `:root` 的亮色值，导致用户
    手动选「亮色」却仍是暗色（实测：切到 light 后 body 背景还是 #0b0e13）。
    给 light 选择器多一层属性特异性（0,1,0 > 0,0,1），就能压过媒体查询。 */
-:root,
+/* ★ light 选择器用双属性 [data-theme="light"][data-theme="light"] 抬特异性：
+   media 暗色块里 :root:not([data-theme="light"]) 的特异性是 (0,2,0)，
+   单属性 (0,1,1) 压不过它 —— 实测 Windows 深色模式下用户选了亮色仍然渲染暗色。 */
+:root[data-theme="light"][data-theme="light"],
 :root[data-theme="light"] {
-  /* ── 表面层次（亮色 · 靛紫墨基调）────────────────────────────── */
-  --bg:            #f4f4fb;
+  /* ── 表面层次（亮色 · 2026-11-06 对齐参考项目：中性灰白 + 蓝）────
+     Agent2API / sub2api 浅色控制台配色：底 #f1f5f9（slate-100）、
+     卡片纯白、边框 #e2e8f0（slate-200）、文字近黑 #0f172a（slate-900）。 */
+  --bg:            #f1f5f9;
   --surface:       #ffffff;
-  --surface-2:     #f1f1f9;
-  --surface-3:     #e7e7f2;
-  --border:        #e4e4ef;
-  --border-strong: #c9c9dd;
+  --surface-2:     #f8fafc;
+  --surface-3:     #eef2f7;
+  --border:        #e2e8f0;
+  --border-strong: #cbd5e1;
 
-  --fg:            #14121f;
-  --fg-muted:      #565170;
-  --fg-subtle:     #6f6a8a;
+  --fg:            #0f172a;
+  --fg-muted:      #64748b;
+  --fg-subtle:     #7c8ba1;
 
-  /* 品牌靛紫 #5b5bd6（Radix violet 系），语义色同步降饱和 */
-  --brand:         #5b5bd6;
-  --brand-soft:    #ededfc;
-  --brand-line:    #c7c7f4;
-  --ok:            #0a7a52;
-  --ok-soft:       #e5f6ef;
-  --ok-line:       #b3e4cd;
-  --warn:          #9553ac;
-  --warn-soft:     #f6ebfa;
-  --warn-line:     #e2c8ec;
-  --err:           #c23434;
-  --err-soft:      #fdeeee;
-  --err-line:      #f0c6c6;
+  /* 品牌蓝 #2563eb（blue-600），参考项目同款主色 */
+  --brand:         #2563eb;
+  --brand-soft:    #eff6ff;
+  --brand-line:    #bfdbfe;
+  --ok:            #059669;
+  --ok-soft:       #ecfdf5;
+  --ok-line:       #a7f3d0;
+  --warn:          #9a5b08;
+  --warn-soft:     #fdf4e5;
+  --warn-line:     #efd9ae;
+  --err:           #dc2626;
+  --err-soft:      #fef2f2;
+  --err-line:      #fecaca;
 
-  /* 阴影带靛紫意：浮层深度更明显（卡片靠色差+发丝线分层） */
-  --sh-1: 0 1px 2px rgba(60,55,120,.06);
-  --sh-2: 0 2px 8px rgba(60,55,120,.08);
-  --sh-3: 0 12px 32px rgba(60,55,120,.14);
-  --sh-4: 0 24px 64px rgba(60,55,120,.22);
+  /* 阴影：参考项目的极轻中性阴影 */
+  --sh-1: 0 1px 2px rgba(15,23,42,.05);
+  --sh-2: 0 2px 6px rgba(15,23,42,.07);
+  --sh-3: 0 10px 30px rgba(15,23,42,.12);
+  --sh-4: 0 24px 64px rgba(15,23,42,.20);
 
   /* 字号：6 级 */
   --fs-xs:   11px;
   --fs-sm:   12px;
-  /* 暗色 · 靛紫墨基调：底色带紫意（#121016 系），表面紫灰递进 */
+  --fs-base: 13px;
+  --fs-md:   15px;
+  --fs-lg:   20px;
+  --fs-xl:   28px;
+
+  /* 间距 4px 栅格 */
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  20px;
+  --sp-6:  24px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+
+  /* 圆角：整体调大一档（观感最直接的差异） */
+  --r-sm:   8px;
+  --r-md:   10px;
+  --r-lg:   16px;
+  --r-full: 999px;
+
+  /* 控件高度 */
+  --h-sm: 26px;
+  --h-md: 32px;
+  --h-lg: 38px;
+
+  /* 动效 */
+  --ease: cubic-bezier(.4,0,.2,1);
+  --dur:  140ms;
+
+  --mono: ui-monospace, "SF Mono", Consolas, "Cascadia Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", system-ui, sans-serif;
+}
+
+/* ── 令牌：暗色 ────────────────────────────────────────────────────────
+   2026-11-06：保持靛紫墨暗色（暗色主题用户可选），亮色默认已对齐参考
+   项目的浅色专业控制台。 */
+[data-theme="dark"] {
   --bg:            #131019;
   --surface:       #1c1826;
   --surface-2:     #221e2e;
@@ -154,48 +197,50 @@ body {
 /* ── 布局骨架（2026-11-06 二次重置）───────────────────────────────────
    侧栏改为「墨底实色」：暗靛紫实底 + 亮字，与内容区形成强对比 ——
    旧版侧栏只是比页面灰一点，视觉上与内容混为一体。 */
+/* 2026-11-06 对齐参考项目（Agent2API 截图）：浅色侧栏——与内容区同底色、
+   以 1px 边框分隔，选中项 = 品牌蓝浅底 + 蓝字 + 左侧蓝条。暗色主题下
+   自动跟随 --surface-2 深色变量。 */
 .side {
   width: 232px; flex: 0 0 232px;
   padding: var(--sp-4) var(--sp-3);
   display: flex; flex-direction: column;
   position: sticky; top: 0; height: 100vh;
-  background: linear-gradient(180deg, #1a1730 0%, #141126 100%);
-  border-right: 1px solid rgba(139,139,240,.14);
+  background: var(--surface-2);
+  border-right: 1px solid var(--border);
 }
-.side .nav-group-label { color: rgba(236,233,244,.42); }
-.side .side-foot { color: rgba(236,233,244,.44); border-top: 1px solid rgba(139,139,240,.14); }
+.side .nav-group-label { color: var(--fg-subtle); }
+.side .side-foot { color: var(--fg-subtle); border-top: 1px solid var(--border); }
 
 .brand {
   display: flex; align-items: center; gap: var(--sp-2);
   font-weight: 650; font-size: var(--fs-md);
   letter-spacing: -.02em;
   padding: var(--sp-1) var(--sp-2) var(--sp-5);
-  color: #ece9f4;
+  color: var(--fg);
 }
 .logo {
   width: 30px; height: 30px; border-radius: 10px;
   display: grid; place-items: center;
   color: #fff; font-size: var(--fs-sm); font-weight: 700;
-  background: linear-gradient(135deg, #6d6df2, #9a5bdb);
-  box-shadow: 0 2px 10px rgba(109,109,242,.45);
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  box-shadow: 0 2px 8px rgba(37,99,235,.35);
 }
 
-/* 导航：圆角胶囊，选中 = 品牌实底白字（与墨底侧栏对比鲜明） */
+/* 导航：圆角项，选中 = 品牌蓝浅底 + 蓝字 + 左侧蓝条（Agent2API 同款） */
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .navbtn {
   display: flex; align-items: center; gap: var(--sp-2);
   height: 38px; padding: 0 var(--sp-3);
   border: 0; border-radius: var(--r-md);
-  background: transparent; color: rgba(236,233,244,.66);
+  background: transparent; color: var(--fg-muted);
   font: inherit; font-size: var(--fs-base); text-align: left;
   cursor: pointer;
   transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-.navbtn:hover { background: rgba(139,139,240,.12); color: #ece9f4; }
+.navbtn:hover { background: var(--surface-3); color: var(--fg); }
 .navbtn.on {
-  background: linear-gradient(135deg, #6d6df2, #5b5bd6);
-  color: #fff; font-weight: 600;
-  box-shadow: 0 2px 10px rgba(109,109,242,.35);
+  background: var(--brand-soft); color: var(--brand); font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--brand);
 }
 .navbtn .ic {
   width: 18px; text-align: center; font-size: var(--fs-base);
@@ -242,7 +287,7 @@ h3 { margin: 0 0 var(--sp-3); font-size: var(--fs-md); font-weight: 600; letter-
 .card::before {
   content: "";
   position: absolute; top: 0; left: 0; right: 0; height: 2px;
-  background: linear-gradient(90deg, #6d6df2, #9a5bdb 40%, transparent 80%);
+  background: linear-gradient(90deg, var(--brand), var(--brand-line) 40%, transparent 80%);
   opacity: .85;
 }
 .card-t {
@@ -256,7 +301,7 @@ h3 { margin: 0 0 var(--sp-3); font-size: var(--fs-md); font-weight: 600; letter-
 .card-t::before {
   content: ""; flex: none;
   width: 8px; height: 8px; border-radius: 3px;
-  background: linear-gradient(135deg, #6d6df2, #9a5bdb);
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
 }
 /* 卡片级语义变体：边框/底色跟着语义走，而不是在 HTML 里写死 #a33。 */
 .card-err { border-color: var(--err-line); background: var(--err-soft); }
@@ -342,7 +387,7 @@ tr:hover td { background: var(--surface-2); }
    「白底黑字」—— 同一个按钮在两种主题下观感完全不同，切换时很突兀。
    改成品牌色后两套主题观感一致，也更像控制台应有的样子。 */
 .btn.pri {
-  background: linear-gradient(135deg, #6d6df2, #5b5bd6);
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
   color: #fff; border-color: transparent;
   font-weight: 550;
   box-shadow: 0 1px 3px rgba(109,109,242,.35);

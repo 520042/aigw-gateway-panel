@@ -92,8 +92,11 @@ export function App() {
   //   每次切视图整页卸载重建的话，两个页面来回切一次就拉两遍。
   //   放这里取一次传下去；子页仍可 reload（来自家机制）。
   const [platforms, setPlatforms] = useState<PlatformResponse | null>(null);
+  // ★ 默认亮色（2026-11-06）：参考项目的设计语言是浅色专业控制台；
+  //   'auto' 跟随系统在深色模式的 Windows 上会落进暗色，观感不如参考。
+  //   index.html 的 FOUC 脚本已同步此默认。
   const [theme, setTheme] = useState<'light' | 'dark' | 'auto'>(() =>
-    loadPref('aigw-theme', ['light', 'dark'], 'auto') as 'light' | 'dark' | 'auto',
+    loadPref('aigw-theme', ['light', 'dark'], 'light') as 'light' | 'dark' | 'auto',
   );
 
   // ★ 供子页写操作后刷新平台清单（保存凭据 / 导入 / 启停平台都会改变它）。
@@ -115,8 +118,8 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (theme === 'auto') document.documentElement.removeAttribute('data-theme');
-    else document.documentElement.setAttribute('data-theme', theme);
+    // 'auto' 也显式落成亮色（跟随系统在深色 Windows 上观感差，见上注）。
+    document.documentElement.setAttribute('data-theme', theme === 'auto' ? 'light' : theme);
     try { localStorage.setItem('aigw-theme', theme); } catch { /* 存不了只影响下次打开 */ }
   }, [theme]);
 

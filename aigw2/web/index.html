@@ -5,13 +5,16 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>aigw v2 · 控制台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231a1730'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='%238b8bf0'%3E%E2%97%88%3C/text%3E%3C/svg%3E">
-<!-- 主题在样式表之前定下来，避免首帧闪白（FOUC）。 -->
+<!-- 主题在样式表之前定下来，避免首帧闪白（FOUC）。
+     ★ 2026-11-06：默认**亮色**——参考项目（Agent2API / sub2api）的设计语言
+       是浅色专业控制台，暗色只在用户显式选择后启用。 -->
 <script>
 (function () {
   try {
-    var t = localStorage.getItem('aigw-theme') || 'auto';
+    var t = localStorage.getItem('aigw-theme') || 'light';
     if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
-  } catch (e) {}
+    else document.documentElement.setAttribute('data-theme', 'light');
+  } catch (e) { document.documentElement.setAttribute('data-theme', 'light'); }
 })();
 </script>
 <!-- 运行时样式：复用现有设计令牌与页面级规则。顺序有意义，主干必须在前。 -->
