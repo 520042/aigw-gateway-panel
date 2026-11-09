@@ -10,7 +10,12 @@ import {
 
 /* WB 日常任务的完整结果（对齐 workbuddy2api growth_plan / Agent2API 结果面板）：
    每账号一组汇总 + 步骤链 + 18 项任务各自的完成状态。 */
-interface GrowthStep { step?: string; ok?: boolean; message?: string; action?: string; tasks?: GrowthTask[]; [k: string]: unknown }
+interface GrowthStep {
+  step?: string; ok?: boolean; message?: string; action?: string;
+  tasks?: GrowthTask[]; todo?: Array<{ code: string; name: string; current?: number; target?: number }>;
+  errors?: Array<{ code: string; name: string; error: string }>;
+  [k: string]: unknown;
+}
 interface GrowthTask { code: string; name: string; status: string; credit?: number | null }
 interface GrowthAccount {
   account: string;
@@ -52,7 +57,10 @@ function GrowthResult({ resp, onClose }: { resp: GrowthResp; onClose: () => void
       {accounts.map((a) => {
         const r = a.result;
         const listStep = (r.steps ?? []).find((s) => s.action === 'list' || Array.isArray(s.tasks));
+        const claimStep = (r.steps ?? []).find((s) => s.action === 'claim');
         const tasks = listStep?.tasks ?? [];
+        const todo = claimStep?.todo ?? [];
+        const errors = claimStep?.errors ?? [];
         return (
           <details className="growth-acc" key={a.account} open={accounts.length === 1}>
             <summary>
@@ -83,6 +91,27 @@ function GrowthResult({ resp, onClose }: { resp: GrowthResp; onClose: () => void
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+            {/* 参照 WorkBuddy-Daily 的「待办分布 + 失败原因」：用户不用翻日志 */}
+            {(todo.length > 0 || errors.length > 0) && (
+              <div className="growth-tasks">
+                {todo.length > 0 && <>
+                  <div className="faint fs-xs mb-2">待完成（{todo.length} 项，进度未达标）</div>
+                  <div className="growth-task-grid">
+                    {todo.map((t) => (
+                      <div className="growth-task" key={t.code || t.name}>
+                        <span className="pill warn">待完成</span>
+                        <span>{t.name}</span>
+                        {t.current != null && t.target != null &&
+                          <span className="faint fs-xs">{t.current}/{t.target}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </>}
+                {errors.length > 0 && <div className="note errnote mt-2">
+                  {errors.map((x) => `${x.name}：${x.error}`).join('；')}
+                </div>}
               </div>
             )}
           </details>

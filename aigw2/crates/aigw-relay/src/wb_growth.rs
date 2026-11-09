@@ -310,11 +310,18 @@ fn task_completed(t: &Value) -> bool {
     if let Some(p) = t.get("progress").and_then(|x| x.as_object()) {
         let cur = p.get("current").and_then(|x| x.as_i64()).unwrap_or(0);
         let target = p.get("target").and_then(|x| x.as_i64()).unwrap_or(1);
-        if cur >= target { return true; }
+        // ★ WorkBuddy-Daily（562★，2026-11-07 更新）明确：领奖按
+        //   progress.current >= progress.target 补领，不依赖 accept_status
+        //   （它可能延迟或回滚，把「已达标未领」误判成「已领取」）。
+        return cur >= target;
     }
     t.get("completed").and_then(|x| x.as_bool())
         .or_else(|| t.get("done").and_then(|x| x.as_bool()))
         .unwrap_or(false)
+}
+/// 达标但尚未领奖的任务 = 需要打 claim 接口的（幂等补缺）。
+fn task_claimable(t: &Value) -> bool {
+    task_completed(t) && !task_claimed(t)
 }
 fn task_reward(t: &Value) -> Value {
     t.get("reward_credit").or_else(|| t.get("credit"))
@@ -420,31 +427,41 @@ pub async fn run_all_growth(
         "action": "light_events", "lit": lit, "last_error": report_err,
     }));
 
-    // ④ 领奖（逐个尝试，已领过的会如实报错）
+    // ④ 领奖：按进度扫描「达标未领」任务补领（WorkBuddy-Daily 口径），
+    //   已领 / 未达标分别计数并进待办分布，不再静默跳过。
     let mut credit = 0i64;
     let mut energy = 0i64;
     let mut claimed = 0;
+    let mut already = 0;
+    let mut unmet: Vec<Value> = Vec::new();
+    let mut claim_errors: Vec<Value> = Vec::new();
     for t in &tasks {
-        let Some(code) = task_code(t) else { continue };
-        if task_claimed(t) { continue; }
-        if let Ok((c, e)) = claim_reward(http, web_base, token, code).await {
-            credit += c;
-            energy += e;
-            claimed += 1;
+        let code = task_code(t).unwrap_or("");
+        let name = task_title(t).unwrap_or(code);
+        if task_claimed(t) { already += 1; continue; }
+        if !task_completed(t) {
+            unmet.push(json!({"code":code, "name":name,
+                "current": t.pointer("/progress/current").cloned().unwrap_or(Value::Null),
+                "target": t.pointer("/progress/target").cloned().unwrap_or(Value::Null)}));
+            continue;
+        }
+        if code.is_empty() { continue; }
+        match claim_reward(http, web_base, token, code).await {
+            Ok((c, e)) => { credit += c; energy += e; claimed += 1; }
+            Err(e) => claim_errors.push(json!({"code":code,"name":name,"error":e})),
         }
     }
     steps.push(json!({
         "step": "逐项领奖",
-        "ok": claimed > 0 || total > 0,
-        "message": if claimed > 0 {
-            format!("本次领取 {claimed} 项，+{credit} 积分 / +{energy} 能量")
-        } else { "今日任务均已领取（幂等跳过，无需重复领奖）".to_string() },
+        "ok": claim_errors.is_empty(),
+        "message": format!("本次领取 {claimed} 项 / +{credit} 积分 · 今日已领 {already} 项 · 待完成 {todo_n} 项", todo_n = unmet.len()),
         "action": "claim", "claimed": claimed, "credit": credit, "energy": energy,
+        "already": already, "todo": unmet, "errors": claim_errors,
     }));
     json!({
-        "ok": true,
-        "summary": format!("任务清单 {total} 项 · 待接受 {pending_n} 项 · 事件链 {lit} 组 · 本次领奖 {claimed} 项 / +{credit} 积分",
-            pending_n = pending.len()),
+        "ok": claim_errors.is_empty(),
+        "summary": format!("任务清单 {total} 项 · 待接受 {pending_n} 项 · 事件链 {lit} 组 · 本次领奖 {claimed} 项 / +{credit} 积分 · 待完成 {todo_n} 项",
+            pending_n = pending.len(), todo_n = unmet.len()),
         "total_tasks": total,
         "pending": pending.len(),
         "lit_groups": lit,
@@ -475,6 +492,25 @@ mod tests {
         assert!(task_claimed(&t));
         assert!(task_completed(&t));
         assert_eq!(task_reward(&t), json!(100));
+    }
+
+    #[test]
+    fn progress_reached_but_accept_status_stale_is_still_claimable() {
+        // WorkBuddy-Daily 的关键口径：progress 达标就该补领，
+        // accept_status 可能延迟/回滚，不能只看它判断「已领取」。
+        let t = json!({
+            "task_code": "template_5", "title": "使用模板5次",
+            "accept_status": "accepted",
+            "progress": {"current": 5, "target": 5}, "reward_credit": 100
+        });
+        assert!(task_completed(&t));
+        assert!(!task_claimed(&t));
+        assert!(task_claimable(&t));
+        let claimed = json!({
+            "task_code": "template_5", "accept_status": "claimed",
+            "progress": {"current": 5, "target": 5}
+        });
+        assert!(!task_claimable(&claimed));
     }
 
     #[test]
