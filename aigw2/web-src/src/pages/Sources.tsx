@@ -248,7 +248,7 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
         </div>
 
         <div className="src-detail-col">
-          {current ? <PlatformDetail p={current} disabledModels={disabledModels} onChanged={refresh} /> : <div className="empty">没有匹配的平台</div>}
+          {current ? <PlatformDetail key={current.id} p={current} disabledModels={disabledModels} onChanged={refresh} /> : <div className="empty">没有匹配的平台</div>}
         </div>
       </div>
     </>
@@ -339,15 +339,18 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
       </Card>
 
       <Card title="登录">
-        <Note>
-          <b>凭据来源：</b>{a.way}。<br />
-          {p.login_url && <>注册地址：<a href={p.login_url} target="_blank" rel="noopener noreferrer">{p.login_url}</a>。</>}
-        </Note>
-        {p.notes && <div className="note">{p.notes}</div>}
-        {/* ★ 设备码 / 跳转授权 / 扫码登录入口（2026-11-06 补回——React 重构时丢失）：
-            后端 POST /api/auth action=start 对每类平台返回不同形状
-            （qr_image/qr_text / login_url / user_code），这里分支渲染，
-            并按 legacy 同款自调度轮询直到 success/过期。 */}
+        {/* 只给一句话：怎么登录。平台 notes 是给排查用的技术档案，
+            默认折叠（用户明确要求「不要多事」），想看再点开。 */}
+        <div className="faint small">{a.way}</div>
+        {p.notes && (
+          <details className="src-notes">
+            <summary>详细说明 / 排查资料</summary>
+            <div className="note mt-2">{p.notes}
+              {p.login_url && <>注册地址：<a href={p.login_url} target="_blank" rel="noopener noreferrer">{p.login_url}</a></>}
+            </div>
+          </details>
+        )}
+        {/* ★ 设备码 / 跳转授权 / 扫码登录入口：按后端返回形状分支渲染 + 自调度轮询。 */}
         {['qr', 'device', 'oauth'].includes(a.kind) && <AuthPanel p={p} onChanged={onChanged} />}
         <div className="row" style={{ marginTop: 'var(--sp-2)' }}>
           <input className="q mono" placeholder="粘贴凭据（手动方式）…" id={'cred-' + p.id} />

@@ -129,6 +129,10 @@
    ② 收起时组内行不渲染 —— 205 行常态只渲染 ~130 行；
    ③ 左栏 272px 改为可宽可窄不强制 —— 分组头自带缩进层次，不再拥挤。 */
 .src-group { margin-bottom: 2px; }
+/* 平台技术档案：默认折叠，避免登录卡被几百字说明淹没（用户要求精简）。 */
+.src-notes { margin: var(--sp-2) 0; font-size: var(--fs-xs); color: var(--fg-muted); }
+.src-notes summary { cursor: pointer; width: fit-content; }
+.src-notes .note { max-height: 220px; overflow: auto; line-height: 1.6; }
 .src-group-h {
   display: flex; align-items: center; gap: 6px;
   width: 100%; min-height: 30px;

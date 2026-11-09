@@ -315,6 +315,46 @@ tbody tr:hover td { background: var(--surface-3); }
 }
 .wb-rec-foot .faint { margin-right: auto; }
 
+/* ── WB 日常任务执行明细（2026-11-07 对齐 workbuddy2api growth_plan 的结果面板）── */
+.growth-result {
+  margin-top: var(--sp-3); border: 1px solid var(--border);
+  border-radius: var(--r-md); background: var(--surface); overflow: hidden;
+}
+.growth-result-hd {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.growth-result-hd .btn { margin-left: auto; }
+.growth-summary {
+  display: flex; flex-wrap: wrap; gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm);
+  border-bottom: 1px solid var(--border);
+}
+.growth-acc { border-bottom: 1px solid var(--border); }
+.growth-acc:last-child { border-bottom: 0; }
+.growth-acc > summary {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3); cursor: pointer; font-size: var(--fs-sm);
+}
+.growth-acc > summary .fs-xs { margin-left: auto; }
+.growth-steps { padding: 0 var(--sp-3) var(--sp-2); }
+.growth-step {
+  display: flex; align-items: baseline; gap: var(--sp-2);
+  padding: 3px 0; font-size: var(--fs-sm);
+}
+.growth-step .fs-xs { margin-left: auto; }
+.growth-tasks { padding: var(--sp-2) var(--sp-3) var(--sp-3); border-top: 1px dashed var(--border); }
+.growth-task-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 5px;
+}
+.growth-task {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 3px 6px; border-radius: var(--r-sm);
+  background: var(--surface-2); font-size: var(--fs-xs);
+}
+.growth-task > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 @media (max-width: 900px) {
   .wb-center-grid { grid-template-columns: 1fr; }
 }

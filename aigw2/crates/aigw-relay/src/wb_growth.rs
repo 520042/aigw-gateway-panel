@@ -285,6 +285,42 @@ pub async fn claim_reward(
 ///
 /// 流程：读清单 → 接受未完成任务 → 逐个点亮（事件链/真实对话）→ 领取奖励。
 /// 返回逐任务结果，失败不阻断其余。
+/// 上游任务对象的字段兼容。
+///
+/// ★ 2026-11-07 实测（GET /v2/activity/growth/tasks）：字段已从旧版的
+///   `taskCode/taskName/claimed/completed` 改成
+///   `task_code/title/accept_status/progress/reward_credit`。
+///   旧的 `taskCode` 取不到 → pending 恒 0、逐项领奖整段被跳过，
+///   用户点「立即执行」只看到事件链跑了一下，以为只做一项。
+///   两版都认，避免上游再次改名时又静默失效。
+fn task_code(t: &Value) -> Option<&str> {
+    t.get("task_code").or_else(|| t.get("taskCode")).and_then(|x| x.as_str())
+}
+fn task_title(t: &Value) -> Option<&str> {
+    t.get("title").or_else(|| t.get("taskName"))
+        .or_else(|| t.get("name")).and_then(|x| x.as_str())
+}
+fn task_claimed(t: &Value) -> bool {
+    if let Some(s) = t.get("accept_status").and_then(|x| x.as_str()) {
+        return s.eq_ignore_ascii_case("claimed") || s.eq_ignore_ascii_case("done");
+    }
+    t.get("claimed").and_then(|x| x.as_bool()).unwrap_or(false)
+}
+fn task_completed(t: &Value) -> bool {
+    if let Some(p) = t.get("progress").and_then(|x| x.as_object()) {
+        let cur = p.get("current").and_then(|x| x.as_i64()).unwrap_or(0);
+        let target = p.get("target").and_then(|x| x.as_i64()).unwrap_or(1);
+        if cur >= target { return true; }
+    }
+    t.get("completed").and_then(|x| x.as_bool())
+        .or_else(|| t.get("done").and_then(|x| x.as_bool()))
+        .unwrap_or(false)
+}
+fn task_reward(t: &Value) -> Value {
+    t.get("reward_credit").or_else(|| t.get("credit"))
+        .or_else(|| t.get("reward")).cloned().unwrap_or(Value::Null)
+}
+
 pub async fn run_all_growth(
     http: &Client,
     base: &str,
@@ -300,21 +336,46 @@ pub async fn run_all_growth(
         Err(e) => return json!({"ok": false, "message": format!("读任务清单失败：{e}"), "steps": steps}),
     };
     let total = tasks.len();
-    // ② 接受未完成的任务
+    // ★ 2026-11-07：把上游任务清单（裁剪成展示字段）放进结果里——
+    //   参考项目（MiraiHub / WorkBuddy-Daily）的结果面板是**逐任务**显示的，
+    //   只回一句「点亮 14 组」用户无从知道 18 个任务各自是已完成还是本次领到。
+    //   按 completed / claimed 归一出 status，前端不必再猜字段名。
+    let task_rows: Vec<Value> = tasks
+        .iter()
+        .map(|t| {
+            let code = task_code(t).unwrap_or("").to_string();
+            let name = task_title(t).unwrap_or(&code).to_string();
+            let claimed = task_claimed(t);
+            let completed = task_completed(t);
+            json!({
+                "code": code,
+                "name": name,
+                "status": if claimed { "claimed" } else if completed { "completed" } else { "pending" },
+                "credit": task_reward(t),
+            })
+        })
+        .collect();
+    steps.push(json!({"step":"读取任务清单","ok":true,"action":"list","total":total,"tasks":task_rows,
+                      "message":format!("上游返回 {total} 项任务")}));
+    // ② 接受未完成的任务（accept_status != claimed）
     let pending: Vec<String> = tasks
         .iter()
-        .filter(|t| {
-            let done = t.get("completed").and_then(|x| x.as_bool())
-                .or_else(|| t.get("claimed").and_then(|x| x.as_bool()))
-                .unwrap_or(false);
-            !done
-        })
-        .filter_map(|t| t.get("taskCode").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .filter(|t| !task_claimed(t))
+        .filter_map(|t| task_code(t).map(|s| s.to_string()))
         .collect();
-    if !pending.is_empty() {
+    // ★ 2026-11-07 对齐 workbuddy2api-master/admin/growth_plan.py：
+    //   每个动作一条 {step, ok, message}，逐账号结果里能直接展开看「做了什么」。
+    //   之前只回 4 条聚合（accept/light/claim），前端只能显示一句总览，
+    //   用户以为「只做了一项」——其实是展示丢了细节。
+    if pending.is_empty() {
+        steps.push(json!({"step":"接受任务","ok":true,"message":"今日任务均已接受/完成，无需重复接受"}));
+    } else {
         match accept_tasks(http, base, token, &pending).await {
-            Ok(()) => steps.push(json!({"action":"accept","ok":true,"count":pending.len()})),
-            Err(e) => steps.push(json!({"action":"accept","ok":false,"message":e})),
+            Ok(()) => steps.push(json!({"step":"接受任务","ok":true,
+                       "message":format!("新接受 {} 个任务", pending.len()),
+                       "action":"accept","count":pending.len()})),
+            Err(e) => steps.push(json!({"step":"接受任务","ok":false,"message":e,
+                       "action":"accept","count":pending.len()})),
         }
     }
     // ③ 逐个点亮（事件链上报；失败不阻断）
@@ -351,25 +412,39 @@ pub async fn run_all_growth(
             lit += 1;
         }
     }
-    steps.push(json!({"action":"light_events","ok":lit>0,"lit":lit,"last_error":report_err}));
+    steps.push(json!({
+        "step": "事件链点亮", "ok": lit > 0,
+        "message": if lit > 0 {
+            format!("点亮 {lit} 组：对话 / Buddy App / 模板 / 灵感 / 设计画布 / 自动化 / 资料库 / 技能 / 专家链")
+        } else { format!("事件链上报失败：{report_err}") },
+        "action": "light_events", "lit": lit, "last_error": report_err,
+    }));
 
     // ④ 领奖（逐个尝试，已领过的会如实报错）
     let mut credit = 0i64;
     let mut energy = 0i64;
     let mut claimed = 0;
     for t in &tasks {
-        let Some(code) = t.get("taskCode").and_then(|x| x.as_str()) else { continue };
-        let already = t.get("claimed").and_then(|x| x.as_bool()).unwrap_or(false);
-        if already { continue; }
+        let Some(code) = task_code(t) else { continue };
+        if task_claimed(t) { continue; }
         if let Ok((c, e)) = claim_reward(http, web_base, token, code).await {
             credit += c;
             energy += e;
             claimed += 1;
         }
     }
-    steps.push(json!({"action":"claim","ok":claimed>0,"claimed":claimed,"credit":credit,"energy":energy}));
+    steps.push(json!({
+        "step": "逐项领奖",
+        "ok": claimed > 0 || total > 0,
+        "message": if claimed > 0 {
+            format!("本次领取 {claimed} 项，+{credit} 积分 / +{energy} 能量")
+        } else { "今日任务均已领取（幂等跳过，无需重复领奖）".to_string() },
+        "action": "claim", "claimed": claimed, "credit": credit, "energy": energy,
+    }));
     json!({
         "ok": true,
+        "summary": format!("任务清单 {total} 项 · 待接受 {pending_n} 项 · 事件链 {lit} 组 · 本次领奖 {claimed} 项 / +{credit} 积分",
+            pending_n = pending.len()),
         "total_tasks": total,
         "pending": pending.len(),
         "lit_groups": lit,
@@ -378,4 +453,39 @@ pub async fn run_all_growth(
         "energy": energy,
         "steps": steps,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ★ 上游任务字段漂移回归：2026-11-07 实测为
+    ///   task_code / title / accept_status / progress / reward_credit。
+    ///   旧代码只认 taskCode，结果 18 项任务全部被判「无需接受/无需领奖」，
+    ///   面板只剩事件链一条——用户看到「只做一项」。
+    #[test]
+    fn parses_current_upstream_task_shape() {
+        let t = json!({
+            "task_code": "playbook_prompt", "title": "探索优秀灵感",
+            "accept_status": "claimed", "progress": {"current": 1, "target": 1},
+            "reward_credit": 100
+        });
+        assert_eq!(task_code(&t), Some("playbook_prompt"));
+        assert_eq!(task_title(&t), Some("探索优秀灵感"));
+        assert!(task_claimed(&t));
+        assert!(task_completed(&t));
+        assert_eq!(task_reward(&t), json!(100));
+    }
+
+    #[test]
+    fn parses_legacy_task_shape() {
+        let t = json!({
+            "taskCode": "chat_5", "taskName": "桌面端对话",
+            "claimed": false, "completed": false, "credit": 20
+        });
+        assert_eq!(task_code(&t), Some("chat_5"));
+        assert_eq!(task_title(&t), Some("桌面端对话"));
+        assert!(!task_claimed(&t));
+        assert_eq!(task_reward(&t), json!(20));
+    }
 }

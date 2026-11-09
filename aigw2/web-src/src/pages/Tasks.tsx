@@ -8,6 +8,90 @@ import {
   type TaskRecord,
 } from '../api';
 
+/* WB 日常任务的完整结果（对齐 workbuddy2api growth_plan / Agent2API 结果面板）：
+   每账号一组汇总 + 步骤链 + 18 项任务各自的完成状态。 */
+interface GrowthStep { step?: string; ok?: boolean; message?: string; action?: string; tasks?: GrowthTask[]; [k: string]: unknown }
+interface GrowthTask { code: string; name: string; status: string; credit?: number | null }
+interface GrowthAccount {
+  account: string;
+  result: {
+    ok?: boolean; message?: string; summary?: string;
+    total_tasks?: number; pending?: number; lit_groups?: number;
+    claimed?: number; credit?: number; energy?: number;
+    steps?: GrowthStep[];
+  };
+}
+interface GrowthResp { ok?: boolean; message?: string; accounts?: GrowthAccount[] }
+
+const STEP_LABEL: Record<string, string> = {
+  list: '读取任务清单', accept: '接受任务', light_events: '事件链点亮', claim: '逐项领奖',
+};
+const TASK_STATUS: Record<string, string> = {
+  claimed: '已领取', completed: '已完成', pending: '待完成',
+};
+
+function GrowthResult({ resp, onClose }: { resp: GrowthResp; onClose: () => void }) {
+  const accounts = resp.accounts ?? [];
+  const total = accounts.reduce((n, a) => n + (a.result.total_tasks ?? 0), 0);
+  const done = accounts.reduce((n, a) => n + (a.result.claimed ?? 0), 0);
+  const credit = accounts.reduce((n, a) => n + (a.result.credit ?? 0), 0);
+  const failed = accounts.filter((a) => a.result.ok === false).length;
+  return (
+    <div className="growth-result">
+      <div className="growth-result-hd">
+        <b>WB 日常任务 · 执行明细</b>
+        <button className="btn sm gh" onClick={onClose}>关闭</button>
+      </div>
+      <div className="growth-summary">
+        <span>账号 <b>{accounts.length}</b></span>
+        <span>每账号任务 <b>{accounts.length ? Math.round(total / accounts.length) : 0}</b> 项</span>
+        <span>本次领取 <b>{done}</b> 项</span>
+        <span>获得 <b>{credit}</b> 积分</span>
+        {failed > 0 && <span className="c-err">失败 {failed} 个账号</span>}
+      </div>
+      {accounts.map((a) => {
+        const r = a.result;
+        const listStep = (r.steps ?? []).find((s) => s.action === 'list' || Array.isArray(s.tasks));
+        const tasks = listStep?.tasks ?? [];
+        return (
+          <details className="growth-acc" key={a.account} open={accounts.length === 1}>
+            <summary>
+              <span className={r.ok === false ? 'c-err' : 'c-ok'}>{r.ok === false ? '✗' : '✓'}</span>
+              <b>{a.account}</b>
+              <span className="faint fs-xs">{r.summary ?? r.message ?? '执行完成'}</span>
+            </summary>
+            <div className="growth-steps">
+              {(r.steps ?? []).filter((s) => s.action !== 'list').map((s, i) => (
+                <div className="growth-step" key={i}>
+                  <span className={s.ok ? 'c-ok' : 'c-warn'}>{s.ok ? '✓' : '·'}</span>
+                  <b>{s.step ?? STEP_LABEL[s.action ?? ''] ?? s.action ?? `步骤 ${i + 1}`}</b>
+                  <span className="faint fs-xs">{s.message ?? ''}</span>
+                </div>
+              ))}
+            </div>
+            {tasks.length > 0 && (
+              <div className="growth-tasks">
+                <div className="faint fs-xs mb-2">任务清单（{tasks.length} 项）</div>
+                <div className="growth-task-grid">
+                  {tasks.map((t) => (
+                    <div className="growth-task" key={t.code || t.name} title={t.code}>
+                      <span className={'pill ' + (t.status === 'pending' ? 'warn' : 'ok')}>
+                        {TASK_STATUS[t.status] ?? t.status}
+                      </span>
+                      <span>{t.name}</span>
+                      {t.credit != null && <span className="faint fs-xs">+{t.credit}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
 const pad = (n: number) => String(n).padStart(2, '0');
 const hhmm = (h: number, m: number) => `${pad(h)}:${pad(m)}`;
 
@@ -59,6 +143,7 @@ export function Tasks() {
   const [time, setTime] = useState('09:00');
   const [picked, setPicked] = useState<string[]>([]);
   const [msg, setMsg] = useState('');
+  const [growthResult, setGrowthResult] = useState<GrowthResp | null>(null);
   const [busy, setBusy] = useState(false);
 
   // 配置到位后同步本地表单；之后用户编辑不会被后台轮询覆盖。
@@ -109,6 +194,10 @@ export function Tasks() {
   const runAction = async (payload: Record<string, unknown>, label: string) => {
     if (!confirm(`确认${label}？这是对上游的主动写操作。`)) return;
     setBusy(true);
+    // ★ growth「一键全做」走完整结果面板，不再压缩成一句话：
+    //   后端返回逐账号 + 逐步骤 + 18 项任务清单（对齐 workbuddy2api growth_plan）。
+    const isGrowth = payload.action === 'growth' && payload.growth_action === undefined;
+    if (isGrowth) { setGrowthResult(null); setMsg('正在执行 WB 日常任务（事件链 + 逐项领奖）…'); }
     try {
       const r = await api.post('/api/checkin', payload) as {
         ok?: boolean; message?: string;
@@ -147,8 +236,19 @@ export function Tasks() {
         if (failN) parts.push(`失败 ${failN}`);
         return parts.join(' · ') + (firstErr ? `；首个失败：${firstErr}` : '');
       };
-      const detail = r.message ?? summarize();
-      setMsg(r?.ok ? `✔ ${label}：${detail || '完成'}` : `✗ ${r?.message ?? '执行失败'}`);
+      if (isGrowth) {
+        const g = r as GrowthResp;
+        setGrowthResult(g);
+        const accs = g.accounts ?? [];
+        const done = accs.reduce((n, a) => n + (a.result.claimed ?? 0), 0);
+        const perAccount = accs.length ? (accs[0].result.total_tasks ?? 0) : 0;
+        setMsg(accs.length
+          ? `✔ ${label}完成：${accs.length} 个账号 / 每账号 ${perAccount} 项任务 / 本次领取 ${done} 项（明细见下方）`
+          : `✗ ${r.message ?? '没有可执行的 WB 账号'}`);
+      } else {
+        const detail = r.message ?? summarize();
+        setMsg(r?.ok ? `✔ ${label}：${detail || '完成'}` : `✗ ${r?.message ?? '执行失败'}`);
+      }
     } catch (e) { setMsg('执行失败：' + (e instanceof Error ? e.message : String(e))); }
     finally { setBusy(false); }
   };
@@ -229,7 +329,7 @@ export function Tasks() {
                 </div>
               </div>
               <div className="wb-task-row">
-                <div className="wb-task-info"><b>WB 日常任务</b><span className="faint fs-xs">仅 WB 系账号 · 17 项闭环，全新账号约 +1950 积分</span></div>
+                <div className="wb-task-info"><b>WB 日常任务</b><span className="faint fs-xs">仅 WB 系账号 · 逐项接受 + 事件链点亮 + 逐项领奖</span></div>
                 <div className="acts">
                   <button className="btn sm pri" disabled={busy} onClick={() => runAction({ action: 'growth', platform: 'wb-gateway' }, 'WB 任务')}>立即执行</button>
                   <button className={'btn sm ' + (currentCfg.daily_growth ? 'pri' : 'gh')} disabled={busy}
@@ -281,6 +381,7 @@ export function Tasks() {
       {tab === 'accounts' && <AccountsTab ac={ac} />}
 
       {msg && <div className="note mt-2">{msg}</div>}
+      {growthResult && <GrowthResult resp={growthResult} onClose={() => setGrowthResult(null)} />}
     </Card>
   );
 }
