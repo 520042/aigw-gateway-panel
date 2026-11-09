@@ -398,6 +398,7 @@ export function Tasks() {
           setPicked={setPicked}
           dailyCheckin={currentCfg.daily_checkin}
           dailyGrowth={currentCfg.daily_growth}
+          nextRun={currentCfg.next_run}
           busy={busy}
           onSave={saveCfg}
           onToggle={toggle}
@@ -467,22 +468,27 @@ function AccountsTab({ ac }: { ac: ReturnType<typeof useAsync<AccountsResponse>>
 }
 
 function ScheduleTab({
-  platforms, time, setTime, picked, setPicked, dailyCheckin, dailyGrowth, busy, onSave, onToggle, onRun,
+  platforms, time, setTime, picked, setPicked,
+  dailyCheckin, dailyGrowth, nextRun, busy, onSave, onToggle, onRun,
 }: {
   platforms: Array<{ id: string; name: string }>;
   time: string; setTime: (s: string) => void;
   picked: string[]; setPicked: (ids: string[]) => void;
-  dailyCheckin: boolean; dailyGrowth: boolean; busy: boolean;
+  dailyCheckin: boolean; dailyGrowth: boolean; nextRun?: number | null; busy: boolean;
   onSave: () => void;
   onToggle: (kind: 'checkin' | 'growth', on: boolean) => void;
   onRun: () => void;
 }) {
+  const nextTxt = dailyCheckin && nextRun
+    ? new Date(nextRun * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    : null;
   return (
     <div className="wb-tab-body">
       <div className="wb-sched-summary">
         <div>
           <b>每天 {time}（北京时间）</b>
           <div className="faint fs-xs">改动下一轮即生效，不用重启；错过时点后等到次日同一时刻。</div>
+          {nextTxt && <div className="faint fs-xs mt-2">下次自动执行：{nextTxt}（MiraiHub 同款计划行）</div>}
         </div>
         <Pill tone={dailyCheckin ? 'ok' : 'mut'}>{dailyCheckin ? '定时签到已开启' : '定时签到已关闭'}</Pill>
       </div>
