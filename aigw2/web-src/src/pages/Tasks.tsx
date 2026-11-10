@@ -169,12 +169,16 @@ function singleActionText(act: string, res: Record<string, unknown>): string {
       return p ? `抽到 ${String(p)}` : '抽奖已处理（次数为 0 或已抽过）';
     }
     case 'travel_depart': {
+      if (res.empty) return '今天已经出发过了（上游每日一次限制）';
       const loc = (inner.location ?? {}) as Record<string, unknown>;
-      return loc.name ? `猫猫已出发前往 ${String(loc.name)}` : '已出发旅行';
+      if (loc.name) return `猫猫已出发前往 ${String(loc.name)}`;
+      const arrive = inner.arrive_at ?? inner.arrive_time;
+      return arrive ? `猫猫已出发，预计 ${String(arrive)} 到站` : '已出发旅行';
     }
     case 'travel_claim': {
+      if (res.empty) return '没有可领的旅行奖励（猫还在路上或已领过）';
       const rw = inner.reward ?? inner.credit ?? inner.gift;
-      return rw ? `领到 ${String(rw)}` : '旅行奖励已领取（或尚未到站）';
+      return rw ? `领到 ${String(rw)}` : '旅行奖励已领取';
     }
     default:
       return '完成';

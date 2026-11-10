@@ -2683,13 +2683,41 @@ async fn run_single_growth(
         if let Some(codes) = req.get("task_codes") {
             body = Some(json!({"taskCodes": codes}));
         }
+    } else if action == "travel_depart" {
+        // ★ 2026-11-10 实测：不带 location_id → 上游 400 invalid request。
+        //   参考 workbuddy2api admin/backend.py:travel_depart：4 个地点收益/
+        //   时长完全相同，固定用 4（古镇客栈），允许面板覆盖。
+        let loc = req.get("location_id").and_then(|v| v.as_i64()).unwrap_or(4);
+        body = Some(json!({"location_id": loc}));
+    } else if action == "travel_claim" {
+        // 新接口只接受空 JSON（旧 record_id 字段会被部分网关拒绝）。
+        body = Some(json!({}));
     }
     match aigw_relay::wb_checkin::growth_call(http, base, secret, action, body).await {
         Ok(v) => {
             // 顺手把能量/积分写进号池快照（供「快过期优先」选号用）
             json!({"ok": true, "action": action, "data": v})
         }
-        Err(e) => json!({"ok": false, "action": action, "message": e}),
+        Err(e) => {
+            // ★ travel_claim 的 403「no unclaimed travel」不是失败，是「今天
+            //   没有可领的旅行奖励」（猫还在路上/已领过）。当成 fail 会在
+            //   面板上制造假告警，按空状态处理。
+            //   同理 travel_depart 的 403「daily limit reached」= 今天已出发过，
+            //   是上游的每日一次限制（不是错误）。
+            let empty_travel = action == "travel_claim"
+                && (e.contains("no unclaimed travel") || e.contains("403"));
+            let depart_limited = action == "travel_depart" && e.contains("daily limit");
+            if empty_travel || depart_limited {
+                let msg = if depart_limited {
+                    "今天已经出发过了（上游每日一次限制）"
+                } else {
+                    "没有可领的旅行奖励（猫还在路上或已领过）"
+                };
+                json!({"ok": true, "action": action, "empty": true, "message": msg})
+            } else {
+                json!({"ok": false, "action": action, "message": e})
+            }
+        }
     }
 }
 
