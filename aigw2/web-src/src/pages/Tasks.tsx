@@ -135,6 +135,52 @@ function GrowthResult({ resp, onClose }: { resp: GrowthResp; onClose: () => void
   );
 }
 
+/** 单次动作的上游响应 → 一行人话（每个动作关心的字段不同）。 */
+function singleActionText(act: string, res: Record<string, unknown>): string {
+  const ok = res.ok !== false;
+  const data = ((res.data ?? {}) as Record<string, unknown>);
+  const inner = ((data.data ?? data) as Record<string, unknown>);
+  const num = (v: unknown) => (typeof v === 'number' ? v : undefined);
+  if (!ok) {
+    const msg = (res.message ?? data.msg ?? '上游失败') as string;
+    return `✗ ${String(msg).slice(0, 60)}`;
+  }
+  switch (act) {
+    case 'growth_profile': {
+      const lv = num(inner.level), done = num(inner.completed), total = num(inner.total);
+      return `成长等级 Lv.${lv ?? '—'} · 任务 ${done ?? '—'}/${total ?? '—'}${inner.max_level ? '（已满级）' : ''}`;
+    }
+    case 'buddy_quota': {
+      const bal = num(inner.balance), cost = num(inner.cost_per_open), aff = num(inner.affordable);
+      return `能量 ${bal ?? '—'} · 可开 ${aff ?? 0} 次（每次 ${cost ?? '—'} 能量）`;
+    }
+    case 'buddy_open': {
+      const n = Array.isArray(inner.results) ? inner.results.length : num(inner.opened);
+      return `开盲盒 ${n ?? 0} 个`;
+    }
+    case 'streak_redeem': {
+      const got = Array.isArray(res.redeemed) ? res.redeemed.length : 0;
+      const tiers = Array.isArray(res.redeemed)
+        ? (res.redeemed as Array<Record<string, unknown>>).filter((x) => x.ok !== false).length : 0;
+      return got ? `兑换 ${tiers}/${got} 档成功` : '无可兑换档位';
+    }
+    case 'lottery_draw': {
+      const p = inner.prize ?? inner.reward ?? inner.name;
+      return p ? `抽到 ${String(p)}` : '抽奖已处理（次数为 0 或已抽过）';
+    }
+    case 'travel_depart': {
+      const loc = (inner.location ?? {}) as Record<string, unknown>;
+      return loc.name ? `猫猫已出发前往 ${String(loc.name)}` : '已出发旅行';
+    }
+    case 'travel_claim': {
+      const rw = inner.reward ?? inner.credit ?? inner.gift;
+      return rw ? `领到 ${String(rw)}` : '旅行奖励已领取（或尚未到站）';
+    }
+    default:
+      return '完成';
+  }
+}
+
 const pad = (n: number) => String(n).padStart(2, '0');
 const hhmm = (h: number, m: number) => `${pad(h)}:${pad(m)}`;
 
@@ -288,6 +334,13 @@ export function Tasks() {
         setMsg(accs.length
           ? `✔ ${label}完成：${accs.length} 个账号 / 每账号 ${perAccount} 项任务 / 本次领取 ${done} 项（明细见下方）`
           : `✗ ${r.message ?? '没有可执行的 WB 账号'}`);
+      } else if (payload.growth_action !== undefined) {
+        // ★ 单次动作（成长概览 / 盲盒配额 / 抽奖 / 旅行…）：每个都有可读数据，
+        //   不能只回一句「已执行」。按动作把关键字段翻成人话（对齐 MiraiHub
+        //   growth_center 的统计卡与 state 映射）。
+        const act = String(payload.growth_action);
+        const rows = (r.accounts ?? []) as Array<{ account?: string; result?: Record<string, unknown> }>;
+        setMsg(`✔ ${label}：${rows.map((a) => `${(a.account ?? '').slice(0, 10)} ${singleActionText(act, a.result ?? {})}`).join('；') || '完成'}`);
       } else {
         const detail = r.message ?? summarize();
         setMsg(r?.ok ? `✔ ${label}：${detail || '完成'}` : `✗ ${r?.message ?? '执行失败'}`);
