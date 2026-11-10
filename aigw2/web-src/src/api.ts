@@ -177,6 +177,9 @@ export interface TaskRecord {
   account: string;
   outcome: string;
   detail: string;
+  /** 逐动作明细（MiraiHub growth_center「查看 N 项明细」同款）；旧记录为空。 */
+  steps?: Array<{ step: string; ok: boolean; message: string; reward?: number }>;
+  step_count?: number;
 }
 
 export interface TaskRecordsResponse {

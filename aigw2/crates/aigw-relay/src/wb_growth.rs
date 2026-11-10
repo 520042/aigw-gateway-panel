@@ -323,6 +323,24 @@ fn task_completed(t: &Value) -> bool {
 fn task_claimable(t: &Value) -> bool {
     task_completed(t) && !task_claimed(t)
 }
+/// 需要打 accept 接口的：既未领取、也**未接受**。
+///
+/// ★ 2026-11-07 实测：`accept_status` 有三档（pending / accepted / claimed）。
+///   旧代码把 accepted 也当成「待接受」重复 POST accept，上游直接回
+///   `400 invalid ...`，每次执行都多出一条失败记录——那其实是无害的重复请求。
+fn task_needs_accept(t: &Value) -> bool {
+    if task_claimed(t) { return false; }
+    match t.get("accept_status").and_then(|x| x.as_str()) {
+        Some(s) => s.eq_ignore_ascii_case("pending") || s.is_empty(),
+        None => !t.get("claimed").and_then(|x| x.as_bool()).unwrap_or(false),
+    }
+}
+/// 只能人工完成的任务（关注公众号等）：事件链永远点不亮，不算失败。
+fn task_manual_only(t: &Value) -> bool {
+    let code = task_code(t).unwrap_or("");
+    let title = task_title(t).unwrap_or("");
+    code.contains("wechat") || title.contains("公众号") || title.contains("关注")
+}
 fn task_reward(t: &Value) -> Value {
     t.get("reward_credit").or_else(|| t.get("credit"))
         .or_else(|| t.get("reward")).cloned().unwrap_or(Value::Null)
@@ -364,10 +382,11 @@ pub async fn run_all_growth(
         .collect();
     steps.push(json!({"step":"读取任务清单","ok":true,"action":"list","total":total,"tasks":task_rows,
                       "message":format!("上游返回 {total} 项任务")}));
-    // ② 接受未完成的任务（accept_status != claimed）
+    // ② 接受未完成的任务（只接受 accept_status=pending 的；
+    //    accepted 重复接受会被上游 400 拒绝）
     let pending: Vec<String> = tasks
         .iter()
-        .filter(|t| !task_claimed(t))
+        .filter(|t| task_needs_accept(t))
         .filter_map(|t| task_code(t).map(|s| s.to_string()))
         .collect();
     // ★ 2026-11-07 对齐 workbuddy2api-master/admin/growth_plan.py：
@@ -458,16 +477,21 @@ pub async fn run_all_growth(
         "action": "claim", "claimed": claimed, "credit": credit, "energy": energy,
         "already": already, "todo": unmet, "errors": claim_errors,
     }));
+    // 待办里区分「机器做不了、只能人工点」的项（关注公众号等）。
+    let manual: Vec<Value> = tasks.iter().filter(|t| task_manual_only(t) && !task_claimed(t))
+        .map(|t| json!({"code": task_code(t).unwrap_or(""), "name": task_title(t).unwrap_or("")}))
+        .collect();
     json!({
         "ok": claim_errors.is_empty(),
-        "summary": format!("任务清单 {total} 项 · 待接受 {pending_n} 项 · 事件链 {lit} 组 · 本次领奖 {claimed} 项 / +{credit} 积分 · 待完成 {todo_n} 项",
-            pending_n = pending.len(), todo_n = unmet.len()),
+        "summary": format!("任务清单 {total} 项 · 待接受 {pending_n} 项 · 事件链 {lit} 组 · 本次领奖 {claimed} 项 / +{credit} 积分 · 待完成 {todo_n} 项 · 需人工 {manual_n} 项",
+            pending_n = pending.len(), todo_n = unmet.len(), manual_n = manual.len()),
         "total_tasks": total,
         "pending": pending.len(),
         "lit_groups": lit,
         "claimed": claimed,
         "credit": credit,
         "energy": energy,
+        "manual_tasks": manual,
         "steps": steps,
     })
 }
@@ -511,6 +535,29 @@ mod tests {
             "progress": {"current": 5, "target": 5}
         });
         assert!(!task_claimable(&claimed));
+    }
+
+    /// accept_status 三档：只有 pending 才该打 accept。
+    /// 实测 accepted 重复接受 → 上游 400 invalid，每次执行都多一条假失败。
+    #[test]
+    fn only_pending_needs_accept() {
+        let pending = json!({"task_code":"a","accept_status":"pending"});
+        let accepted = json!({"task_code":"b","accept_status":"accepted"});
+        let claimed = json!({"task_code":"c","accept_status":"claimed"});
+        assert!(task_needs_accept(&pending));
+        assert!(!task_needs_accept(&accepted));
+        assert!(!task_needs_accept(&claimed));
+    }
+
+    /// 关注公众号类任务机器做不了，必须标成「需人工」而不是失败。
+    #[test]
+    fn wechat_task_is_manual_only() {
+        let t = json!({"task_code":"wb_wechat_oa_subscribe_task",
+            "title":"关注「腾讯 WorkBuddy」官方公众号","accept_status":"accepted",
+            "progress":{"current":0,"target":1}});
+        assert!(task_manual_only(&t));
+        assert!(!task_completed(&t));
+        assert!(!task_claimable(&t));
     }
 
     #[test]

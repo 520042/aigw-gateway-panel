@@ -23,6 +23,7 @@ interface GrowthAccount {
     ok?: boolean; message?: string; summary?: string;
     total_tasks?: number; pending?: number; lit_groups?: number;
     claimed?: number; credit?: number; energy?: number;
+    manual_tasks?: Array<{ code: string; name: string }>;
     steps?: GrowthStep[];
   };
 }
@@ -94,8 +95,21 @@ function GrowthResult({ resp, onClose }: { resp: GrowthResp; onClose: () => void
               </div>
             )}
             {/* 参照 WorkBuddy-Daily 的「待办分布 + 失败原因」：用户不用翻日志 */}
-            {(todo.length > 0 || errors.length > 0) && (
+            {(todo.length > 0 || errors.length > 0 || (r.manual_tasks ?? []).length > 0) && (
               <div className="growth-tasks">
+                {(r.manual_tasks ?? []).length > 0 && <>
+                  <div className="faint fs-xs mb-2">
+                    需人工完成（{(r.manual_tasks ?? []).length} 项，脚本做不了）
+                  </div>
+                  <div className="growth-task-grid">
+                    {(r.manual_tasks ?? []).map((t) => (
+                      <div className="growth-task" key={t.code || t.name}>
+                        <span className="pill mut">需手动</span>
+                        <span>{t.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>}
                 {todo.length > 0 && <>
                   <div className="faint fs-xs mb-2">待完成（{todo.length} 项，进度未达标）</div>
                   <div className="growth-task-grid">
@@ -544,6 +558,39 @@ function ScheduleTab({
   );
 }
 
+function RecordRow({ r }: { r: TaskRecord }) {
+  const steps = r.steps ?? [];
+  return (
+    <>
+      <tr className="wb-record-row">
+        <td className="mono fs-xs">{timeText(r.ts)}</td>
+        <td>{r.task}</td>
+        <td>{SOURCE_LABEL[r.source] ?? r.source}</td>
+        <td><b>{r.account || '—'}</b><br /><span className="faint mono fs-xs">{r.platform || '—'}</span></td>
+        <td><span className={'pill ' + (r.outcome === 'success' ? 'ok' : r.outcome === 'already' ? 'brand' : 'err')}>
+          {OUTCOME_LABEL[r.outcome] ?? r.outcome}
+        </span></td>
+        <td className="faint">
+          {r.detail || '—'}
+          {/* 展开逐动作明细：只对带 steps 的记录显示（新记录才有）。 */}
+          {steps.length > 0 && (
+            <details className="wb-rec-steps">
+              <summary>查看 {steps.length} 项明细</summary>
+              {steps.map((s, i) => (
+                <div className="wb-rec-step" key={i}>
+                  <span className={s.ok ? 'c-ok' : 'c-err'}>{s.ok ? '✓' : '!'}</span>
+                  <b>{s.step || '步骤'}</b>
+                  <span className="faint fs-xs">{s.message}{s.reward ? ` · +${s.reward} 积分` : ''}</span>
+                </div>
+              ))}
+            </details>
+          )}
+        </td>
+      </tr>
+    </>
+  );
+}
+
 function RecordsTab() {
   const [range, setRange] = useState('all');
   const [outcome, setOutcome] = useState('all');
@@ -601,16 +648,7 @@ function RecordsTab() {
             <tbody>
               {rows.length === 0 && <tr><td colSpan={6}><Empty>没有符合条件的执行记录</Empty></td></tr>}
               {rows.map((r: TaskRecord, i: number) => (
-                <tr className="wb-record-row" key={`${r.ts}-${r.account}-${i}`}>
-                  <td className="mono fs-xs">{timeText(r.ts)}</td>
-                  <td>{r.task}</td>
-                  <td>{SOURCE_LABEL[r.source] ?? r.source}</td>
-                  <td><b>{r.account || '—'}</b><br /><span className="faint mono fs-xs">{r.platform || '—'}</span></td>
-                  <td><span className={'pill ' + (r.outcome === 'success' ? 'ok' : r.outcome === 'already' ? 'brand' : 'err')}>
-                    {OUTCOME_LABEL[r.outcome] ?? r.outcome}
-                  </span></td>
-                  <td className="faint">{r.detail || '—'}</td>
-                </tr>
+                <RecordRow key={`${r.ts}-${r.account}-${i}`} r={r} />
               ))}
             </tbody>
           </table>

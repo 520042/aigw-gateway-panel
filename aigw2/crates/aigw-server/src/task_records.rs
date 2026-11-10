@@ -14,6 +14,17 @@ use std::sync::OnceLock;
 /// 只保留最近 600 条：每天几个账号跑两轮，足够覆盖半年以上。
 const CAP: usize = 600;
 
+/// 一次执行里的一个动作（对齐 MiraiHub growth_center 的 historyHTML steps：
+/// `查看 N 项明细` 展开 step / ok / message / reward）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecordStep {
+    pub step: String,
+    pub ok: bool,
+    pub message: String,
+    #[serde(default)]
+    pub reward: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
     /// unix 秒。
@@ -27,6 +38,9 @@ pub struct TaskRecord {
     /// success / already / failed。
     pub outcome: String,
     pub detail: String,
+    /// 逐动作明细（旧记录没有此字段时按空处理）。
+    #[serde(default)]
+    pub steps: Vec<RecordStep>,
 }
 
 impl TaskRecord {
@@ -46,7 +60,24 @@ impl TaskRecord {
             account: account.to_string(),
             outcome: outcome.to_string(),
             detail: safe_detail(detail),
+            steps: Vec::new(),
         }
+    }
+
+    /// 带逐动作明细的记录（growth 一键全做 / 自动巡检用）。
+    pub fn with_steps(mut self, raw: &[Value]) -> Self {
+        self.steps = raw
+            .iter()
+            .map(|s| RecordStep {
+                step: s.get("step").or_else(|| s.get("action"))
+                    .and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                ok: s.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+                message: safe_detail(s.get("message").and_then(|x| x.as_str()).unwrap_or("")),
+                reward: s.get("credit").or_else(|| s.get("reward"))
+                    .and_then(|x| x.as_i64()).unwrap_or(0),
+            })
+            .collect();
+        self
     }
 }
 
@@ -176,6 +207,8 @@ pub fn query(data_dir: Option<&Path>, params: &HashMap<String, String>) -> Value
                 "ts": r.ts, "source": r.source, "task": r.task,
                 "platform": r.platform, "account": r.account,
                 "outcome": r.outcome, "detail": r.detail,
+                "steps": r.steps,
+                "step_count": r.steps.len(),
             })
         })
         .collect();
@@ -284,10 +317,10 @@ mod tests {
             vec![
                 TaskRecord { ts: now, source: "manual".into(), task: "checkin".into(),
                     platform: "wb-gateway".into(), account: "a".into(),
-                    outcome: "success".into(), detail: "签到完成".into() },
+                    outcome: "success".into(), detail: "签到完成".into(), steps: vec![] },
                 TaskRecord { ts: now, source: "schedule".into(), task: "growth".into(),
                     platform: "wb-gateway".into(), account: "b".into(),
-                    outcome: "failed".into(), detail: "过期".into() },
+                    outcome: "failed".into(), detail: "过期".into(), steps: vec![] },
             ],
         );
         let mut p = HashMap::new();
@@ -297,6 +330,35 @@ mod tests {
         assert_eq!(v["shown"], json!(1));
         p.insert("outcome".into(), "failed".into());
         assert_eq!(query(Some(tmp.path()), &p)["total"], json!(1));
+    }
+
+    #[test]
+    fn steps_survive_roundtrip_and_are_redacted() {
+        let raw = vec![
+            json!({"step":"读取任务清单","ok":true,"message":"上游返回 18 项任务"}),
+            json!({"step":"逐项领奖","ok":true,"message":"本次领取 3 项","credit":300}),
+        ];
+        let rec = TaskRecord::new("manual", "growth:all", "wb-gateway", "a", "success", "完成")
+            .with_steps(&raw);
+        assert_eq!(rec.steps.len(), 2);
+        assert_eq!(rec.steps[1].reward, 300);
+        // 敏感内容不落台账
+        let dirty = vec![json!({"step":"x","ok":false,
+            "message":"HTTP 401 Bearer abcdefghijklmnopqrstuvwxyz012345"})];
+        let rec2 = TaskRecord::new("manual", "growth:all", "p", "a", "failed", "失败")
+            .with_steps(&dirty);
+        assert!(rec2.steps[0].message.contains("已隐去"));
+        assert!(!rec2.steps[0].message.contains("abcdefghij"));
+    }
+
+    /// 老台账（没有 steps 字段）必须仍能读出来，否则升级后面板一片空白。
+    #[test]
+    fn legacy_records_without_steps_still_parse() {
+        let legacy = json!([{"ts":1.0,"source":"manual","task":"checkin",
+            "platform":"p","account":"a","outcome":"success","detail":"签到完成"}]);
+        let rows: Vec<TaskRecord> = serde_json::from_value(legacy).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].steps.is_empty());
     }
 
     #[test]

@@ -2501,7 +2501,13 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
                             .get("message")
                             .and_then(|x| x.as_str())
                             .filter(|s| !s.trim().is_empty())
+                            .or_else(|| r.get("summary").and_then(|x| x.as_str()))
                             .unwrap_or(if ok { "执行完成" } else { "执行失败" });
+                        // ★ 逐动作明细入台账（对齐 MiraiHub growth_center 的
+                        //   「查看 N 项明细」）：只留 step/ok/message/reward，
+                        //   safe_detail 会再过一遍脱敏。
+                        let steps = r.get("steps").and_then(|x| x.as_array())
+                            .cloned().unwrap_or_default();
                         task_records::TaskRecord::new(
                             "manual",
                             &format!("growth:{}", single.as_deref().unwrap_or("all")),
@@ -2509,7 +2515,7 @@ async fn checkin_claim_all(State(st): State<AppState>, body: Bytes) -> Response 
                             a.get("account").and_then(|x| x.as_str()).unwrap_or(""),
                             if ok { "success" } else { "failed" },
                             detail,
-                        )
+                        ).with_steps(&steps)
                     })
                     .collect(),
             );

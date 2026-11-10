@@ -355,6 +355,15 @@ tbody tr:hover td { background: var(--surface-3); }
 }
 .growth-task > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 台账记录行的「查看 N 项明细」展开（对齐 MiraiHub growth_center historyHTML） */
+.wb-rec-steps { margin-top: 4px; }
+.wb-rec-steps > summary { cursor: pointer; width: fit-content; font-size: var(--fs-xs); }
+.wb-rec-step {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 2px 0; font-size: var(--fs-xs);
+}
+.wb-rec-step .fs-xs { margin-left: auto; }
+
 @media (max-width: 900px) {
   .wb-center-grid { grid-template-columns: 1fr; }
 }

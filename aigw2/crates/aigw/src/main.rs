@@ -1093,6 +1093,8 @@ async fn main() {
                                 )
                                 .await;
                                 let ok = r.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                                let steps = r.get("steps").and_then(|x| x.as_array())
+                                    .cloned().unwrap_or_default();
                                 aigw_server::task_records::append(
                                     st6.data_dir.as_deref(),
                                     vec![aigw_server::task_records::from_summary(
@@ -1100,7 +1102,7 @@ async fn main() {
                                         &format!("领取 {} 项 +{} 积分",
                                             r.get("claimed").and_then(|x| x.as_i64()).unwrap_or(0),
                                             r.get("credit").and_then(|x| x.as_i64()).unwrap_or(0)),
-                                    )],
+                                    ).with_steps(&steps)],
                                 );
                                 let credit = r.get("credit").and_then(|x| x.as_i64()).unwrap_or(0);
                                 let claimed = r.get("claimed").and_then(|x| x.as_i64()).unwrap_or(0);
