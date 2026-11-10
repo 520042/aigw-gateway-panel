@@ -183,7 +183,7 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
 
       <div className="srcbar2">
         <button className="btn sm gh" onClick={toggleHelp}>怎么用 {showHelp ? '▴' : '▾'}</button>
-        <span className="faint small ml-auto">管理操作已移到「模型与用量 → WB 任务」</span>
+        <span className="faint small ml-auto">签到 / WB 任务与账号验活在「任务中心」</span>
       </div>
 
       <div className="src-split">

@@ -5652,7 +5652,7 @@ async fn chat_core(st: &AppState, mut v: Value) -> Result<ChatCoreOut, ChatCoreE
                             };
                             (
                                 format!("冷却、凭据隔离或 Token 限额触顶（{n} 个号触顶）"),
-                                format!("触顶的号窗口翻页后自动恢复（{left}内），无需重新登录；也可到「模型与用量」页调整或清除限额。"),
+                                format!("触顶的号窗口翻页后自动恢复（{left}内），无需重新登录；也可在「运行配置」页调整限流参数。"),
                             )
                         }
                         None => (

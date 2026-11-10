@@ -1049,7 +1049,7 @@ async fn main() {
                     let st6 = st5.clone();
                     async move {
                         if !st6.flags.daily_growth() {
-                            return Ok("自动 WB 任务未开启（「模型与用量」页可打开），跳过".to_string());
+                            return Ok("自动 WB 任务未开启（「任务中心 → 定时签到」可打开），跳过".to_string());
                         }
                         let mut lines: Vec<String> = Vec::new();
                         // ★ 按 **signer == "wb"** 枚举，不写死平台 id：
