@@ -563,6 +563,13 @@ function ScheduleTab({
         </div>
         <Pill tone={dailyCheckin ? 'ok' : 'mut'}>{dailyCheckin ? '定时签到已开启' : '定时签到已关闭'}</Pill>
       </div>
+      {/* 勾了平台但两个开关都关着时，勾选不会生效——不提示的话用户以为设置好了。 */}
+      {!dailyCheckin && !dailyGrowth && picked.length > 0 && (
+        <Note tone="warn">
+          已勾选 {picked.length} 个平台，但「定时签到」和「定时 WB 任务」都处于关闭状态，
+          到点不会执行。点上面的开关打开后才会按此时刻自动跑。
+        </Note>
+      )}
 
       <div className="wb-sched-row">
         <div className="wb-sched-line">
