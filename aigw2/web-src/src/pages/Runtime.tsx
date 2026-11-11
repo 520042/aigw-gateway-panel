@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Card, Loading, ErrorBox, Note, useAsync } from '../components';
+import { Card, Loading, ErrorBox, Note, Empty, Pill, useAsync } from '../components';
 import { api } from '../api';
 
 interface RuntimeField { name: string; default: number; min: number; max: number }
@@ -131,7 +131,153 @@ export function Runtime() {
 
       <PipelineCard />
       <ProxyCard />
+      <CombosCard />
+      <PoolCard />
     </>
+  );
+}
+
+/** 模型链（GET/POST /api/combos）。
+ *
+ * ★ 2026-11-10：/api/combos 一直有完整增删改（add/update/remove），
+ *   但界面零入口——而实际已经在跑 `combo:kilo-fallback` 这条链。
+ *   模型链是「主模型挂了自动换下一个」的开关，看不见就等于没法管。 */
+interface ComboRow {
+  id: string; name: string; models: string[]; strategy: string;
+  enabled: boolean; sticky_limit: number;
+  effective?: string[]; unavailable?: string[];
+}
+
+function CombosCard() {
+  const list = useAsync<{ rows?: ComboRow[]; count?: number }>(
+    () => api.get('/api/combos'), [],
+  );
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const act = async (body: Record<string, unknown>, done: string) => {
+    setBusy(true);
+    try {
+      await api.post('/api/combos', body);
+      setMsg('✔ ' + done);
+      list.reload();
+    } catch (e) { setMsg('失败：' + (e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(false); }
+  };
+
+  const rows = list.data?.rows ?? [];
+
+  return (
+    <Card title="模型链" extra={
+      <span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>
+        主模型不可用时按顺序换下一个 · {rows.length} 条
+      </span>
+    }>
+      {list.loading && !list.data ? <Loading /> : list.error ? <ErrorBox message={list.error} onRetry={list.reload} /> : (
+        <>
+          {rows.length === 0 && <Empty>还没有模型链。用下面的表单新建一条，或直接调 POST /api/combos。</Empty>}
+          {rows.map((c) => (
+            <div className="combo-row" key={c.id}>
+              <div className="combo-hd">
+                <b>{c.name}</b>
+                <Pill tone={c.enabled ? 'ok' : 'mut'}>{c.enabled ? '启用' : '停用'}</Pill>
+                <span className="faint fs-xs">{c.strategy} · sticky {c.sticky_limit}</span>
+                <div className="combo-acts">
+                  <button className="btn sm gh" disabled={busy}
+                    onClick={() => act({ action: 'update', id: c.id, enabled: !c.enabled },
+                      `${c.enabled ? '已停用' : '已启用'} ${c.name}`)}>
+                    {c.enabled ? '停用' : '启用'}
+                  </button>
+                  <button className="btn sm gh" disabled={busy}
+                    onClick={() => { if (confirm(`删除模型链 ${c.name}？`)) act({ action: 'remove', id: c.id }, `已删除 ${c.name}`); }}>
+                    删除
+                  </button>
+                </div>
+              </div>
+              <div className="combo-models">
+                {c.models.map((m) => {
+                  const bad = (c.unavailable ?? []).includes(m);
+                  return (
+                    <span className={'model-chip' + (bad ? ' off' : '')} key={m} title={bad ? '当前不可用（上游没有这个模型）' : m}>
+                      {m}{bad ? ' ✕' : ''}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+          {msg && <Note tone={msg.startsWith('✔') ? 'ok' : 'err'}>{msg}</Note>}
+        </>
+      )}
+    </Card>
+  );
+}
+
+/** 号池实时快照（GET /api/pool，POST action=thaw）。
+ *
+ * ★ 一直有后端但没界面：账号卡在冷却/WAF 里时，用户只能等它自己过期，
+ *   而 thaw 就是「立刻解冻」。排障时这是最需要的按钮。 */
+interface PoolSnapshot {
+  cooling?: Array<Record<string, unknown>>;
+  waf?: Array<Record<string, unknown>>;
+  inflight?: Array<Record<string, unknown>>;
+  max_inflight?: number;
+  sticky_entries?: number;
+  sticky_max_entries?: number;
+}
+
+function PoolCard() {
+  const snap = useAsync<PoolSnapshot>(() => api.get('/api/pool'), []);
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const thaw = async (account: string) => {
+    setBusy(true);
+    try {
+      await api.post('/api/pool', { action: 'thaw', account });
+      setMsg(`✔ 已解冻 ${account}`);
+      snap.reload();
+    } catch (e) { setMsg('解冻失败：' + (e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(false); }
+  };
+
+  const d = snap.data ?? {};
+  const cooling = d.cooling ?? [];
+  const waf = d.waf ?? [];
+  const inflight = d.inflight ?? [];
+  const keyOf = (x: Record<string, unknown>, i: number) =>
+    String(x.account ?? x.id ?? x.key ?? `#${i}`);
+
+  return (
+    <Card title="号池状态" extra={
+      <span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>
+        进行中 {inflight.length}/{d.max_inflight ?? '—'} · 冷却 {cooling.length} · WAF {waf.length} · 粘性 {d.sticky_entries ?? 0}/{d.sticky_max_entries ?? '—'}
+      </span>
+    }>
+      {snap.loading && !snap.data ? <Loading /> : snap.error ? <ErrorBox message={snap.error} onRetry={snap.reload} /> : (
+        <>
+          {cooling.length === 0 && waf.length === 0 && (
+            <Empty>没有账号在冷却或限速中，号池健康。</Empty>
+          )}
+          {[...cooling.map((x) => ({ x, kind: '冷却' })), ...waf.map((x) => ({ x, kind: 'WAF' }))]
+            .map(({ x, kind }, i) => (
+              <div className="pool-row" key={kind + keyOf(x, i)}>
+                <Pill tone="warn">{kind}</Pill>
+                <b className="mono fs-xs">{keyOf(x, i)}</b>
+                <span className="faint fs-xs">
+                  {x.until != null ? `到 ${new Date(Number(x.until) * 1000).toLocaleTimeString('zh-CN')}` : ''}
+                  {x.reason != null ? ` · ${String(x.reason)}` : ''}
+                  {x.left_s != null ? ` · 剩 ${String(x.left_s)}s` : ''}
+                </span>
+                <button className="btn sm gh ml-auto" disabled={busy} onClick={() => thaw(keyOf(x, i))}>
+                  立即解冻
+                </button>
+              </div>
+            ))}
+          {msg && <Note tone={msg.startsWith('✔') ? 'ok' : 'err'}>{msg}</Note>}
+        </>
+      )}
+    </Card>
   );
 }
 

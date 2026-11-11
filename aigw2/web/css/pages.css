@@ -364,6 +364,25 @@ tbody tr:hover td { background: var(--surface-3); }
 }
 .wb-rec-step .fs-xs { margin-left: auto; }
 
+/* 模型链（运行配置页）：一条链一行，模型芯片标注不可用 */
+.combo-row {
+  padding: var(--sp-2) 0; border-bottom: 1px solid var(--border);
+}
+.combo-row:last-child { border-bottom: 0; }
+.combo-hd {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+.combo-acts { margin-left: auto; display: flex; gap: 6px; }
+.combo-models { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+
+/* 号池状态：冷却/WAF 一行一个，右侧「立即解冻」 */
+.pool-row {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 5px 0; border-bottom: 1px solid var(--border); font-size: var(--fs-sm);
+}
+.pool-row:last-child { border-bottom: 0; }
+
 @media (max-width: 900px) {
   .wb-center-grid { grid-template-columns: 1fr; }
 }
