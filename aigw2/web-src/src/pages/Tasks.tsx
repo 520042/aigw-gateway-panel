@@ -559,7 +559,7 @@ function ScheduleTab({
         <div>
           <b>每天 {time}（北京时间）</b>
           <div className="faint fs-xs">改动下一轮即生效，不用重启；错过时点后等到次日同一时刻。</div>
-          {nextTxt && <div className="faint fs-xs mt-2">下次自动执行：{nextTxt}（MiraiHub 同款计划行）</div>}
+          {nextTxt && <div className="faint fs-xs mt-2">下次自动执行：{nextTxt}</div>}
         </div>
         <Pill tone={dailyCheckin ? 'ok' : 'mut'}>{dailyCheckin ? '定时签到已开启' : '定时签到已关闭'}</Pill>
       </div>
@@ -615,13 +615,29 @@ function ScheduleTab({
   );
 }
 
+/** 台账 task 标识 → 人话（growth:xxx 是「WB 任务 · 某动作」）。 */
+const TASK_LABEL: Record<string, string> = {
+  checkin: '每日签到',
+  'growth:all': 'WB 日常任务',
+  'growth:tasks_list': 'WB · 任务清单',
+  'growth:growth_profile': 'WB · 成长概览',
+  'growth:streak_redeem': 'WB · 连登兑换',
+  'growth:lottery_draw': 'WB · 限时抽奖',
+  'growth:travel_depart': 'WB · 猫猫旅行',
+  'growth:travel_claim': 'WB · 领旅行奖励',
+  'growth:buddy_quota': 'WB · 盲盒配额',
+  'growth:buddy_open': 'WB · 开盲盒',
+  'growth:overview': 'WB · 概览',
+};
+const taskLabel = (t: string) => TASK_LABEL[t] ?? t;
+
 function RecordRow({ r }: { r: TaskRecord }) {
   const steps = r.steps ?? [];
   return (
     <>
       <tr className="wb-record-row">
         <td className="mono fs-xs">{timeText(r.ts)}</td>
-        <td>{r.task}</td>
+        <td title={r.task}>{taskLabel(r.task)}</td>
         <td>{SOURCE_LABEL[r.source] ?? r.source}</td>
         <td><b>{r.account || '—'}</b><br /><span className="faint mono fs-xs">{r.platform || '—'}</span></td>
         <td><span className={'pill ' + (r.outcome === 'success' ? 'ok' : r.outcome === 'already' ? 'brand' : 'err')}>
@@ -651,6 +667,7 @@ function RecordRow({ r }: { r: TaskRecord }) {
 function RecordsTab() {
   const [range, setRange] = useState('all');
   const [outcome, setOutcome] = useState('all');
+  const [kind, setKind] = useState('all');
   const [q, setQ] = useState('');
   const [page, setPage] = useState(0);
   const [draft, setDraft] = useState('');
@@ -663,13 +680,15 @@ function RecordsTab() {
 
   const query = useMemo(() => ({
     range, outcome, q, limit: pageSize, offset: page * pageSize,
-  }), [range, outcome, q, page]);
+    // 后端一直支持 task 筛选，但面板此前没有入口 —— 补上（后端有心跳，前端接）。
+    ...(kind === 'all' ? {} : { task: kind }),
+  }), [range, outcome, q, page, kind]);
 
   const rec = useAsync<TaskRecordsResponse>(
     () => api.get('/api/task-records?' + new URLSearchParams(
       Object.entries(query).map(([k, v]) => [k, String(v)]),
     ).toString()),
-    [range, outcome, q, page],
+    [range, outcome, q, page, kind],
   );
 
   const rows = rec.data?.rows ?? [];
@@ -690,6 +709,17 @@ function RecordsTab() {
           <option value="success">成功领取</option>
           <option value="already">今日已领</option>
           <option value="failed">失败</option>
+        </select>
+        <select className="q w-auto" value={kind} onChange={(e) => { setKind(e.target.value); setPage(0); }}>
+          <option value="all">全部任务</option>
+          <option value="checkin">每日签到</option>
+          <option value="growth:all">WB 日常任务</option>
+          <option value="growth:growth_profile">WB · 成长概览</option>
+          <option value="growth:buddy_quota">WB · 盲盒配额</option>
+          <option value="growth:travel_depart">WB · 猫猫旅行</option>
+          <option value="growth:travel_claim">WB · 领旅行奖励</option>
+          <option value="growth:streak_redeem">WB · 连登兑换</option>
+          <option value="growth:lottery_draw">WB · 限时抽奖</option>
         </select>
         <input className="q" placeholder="搜索账号 / 平台 / 说明…" value={draft} onChange={(e) => setDraft(e.target.value)} />
         <button className="btn sm gh" onClick={rec.reload}>刷新</button>
