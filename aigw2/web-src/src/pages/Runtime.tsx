@@ -130,6 +130,84 @@ export function Runtime() {
       </Card>
 
       <PipelineCard />
+      <ProxyCard />
     </>
+  );
+}
+
+/** 出站代理（GET/POST /api/proxy）。
+ *
+ * ★ 2026-11-10：这个端点和它的三个模式一直都在后端，但界面从来没入口——
+ *   代理配错时用户只能改配置文件，而走代理是所有上游请求的总开关。
+ *   放在运行配置页最下面（比并发/超时更少动，但出错影响全局）。 */
+function ProxyCard() {
+  const proxy = useAsync<{
+    mode?: string; modes?: string[]; url?: string; ok?: boolean;
+  }>(() => api.get('/api/proxy'), []);
+  const [mode, setMode] = useState('direct');
+  const [url, setUrl] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!proxy.data) return;
+    setMode(proxy.data.mode ?? 'direct');
+    setUrl(proxy.data.url ?? '');
+  }, [proxy.data]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.post('/api/proxy', { mode, url });
+      setMsg('✔ 已保存并立即生效');
+      proxy.reload();
+    } catch (e) { setMsg('保存失败：' + (e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(false); }
+  };
+
+  const MODE_HINT: Record<string, string> = {
+    direct: '直连（不走代理）',
+    global: '全部上游请求走代理',
+    bypass_cn: '国内域名直连，境外走代理',
+  };
+
+  return (
+    <Card title="出站代理" extra={
+      <span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>
+        影响所有上游请求 · 改完立即生效
+      </span>
+    }>
+      {proxy.loading && !proxy.data ? <Loading /> : proxy.error ? <ErrorBox message={proxy.error} onRetry={proxy.reload} /> : (
+        <>
+          <div className="runtime-grid">
+            <div className="runtime-row">
+              <div className="runtime-label">
+                <b>模式</b>
+                <span className="faint fs-xs">{MODE_HINT[mode] ?? ''}</span>
+              </div>
+              <select className="q w-auto" value={mode} onChange={(e) => setMode(e.target.value)}>
+                {(proxy.data?.modes ?? ['direct', 'global', 'bypass_cn']).map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+            {mode !== 'direct' && (
+              <div className="runtime-row">
+                <div className="runtime-label">
+                  <b>代理地址</b>
+                  <span className="faint fs-xs">如 http://127.0.0.1:7890</span>
+                </div>
+                <input className="q mono" placeholder="http://127.0.0.1:7890"
+                  value={url} onChange={(e) => setUrl(e.target.value)} />
+              </div>
+            )}
+          </div>
+          <div className="row mt-3">
+            <button className="btn pri" disabled={busy} onClick={save}>保存并立即生效</button>
+          </div>
+          {msg && <Note tone={msg.startsWith('✔') ? 'ok' : 'err'}>{msg}</Note>}
+        </>
+      )}
+    </Card>
   );
 }
