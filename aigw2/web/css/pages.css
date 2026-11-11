@@ -383,6 +383,18 @@ tbody tr:hover td { background: var(--surface-3); }
 }
 .pool-row:last-child { border-bottom: 0; }
 
+/* 访问密钥：一把 key 一块，操作按钮右对齐 */
+.key-row { padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
+.key-row:last-of-type { border-bottom: 0; }
+.key-hd { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); font-size: var(--fs-sm); }
+.key-acts { display: flex; gap: 6px; margin-top: 5px; }
+.key-new { margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px dashed var(--border); }
+
+/* 账号表操作列：四个小按钮横排 */
+.acct-acts { display: flex; flex-wrap: wrap; gap: 4px; }
+.btn.danger { color: var(--err); }
+.btn.danger:hover:not(:disabled) { background: var(--err-soft); border-color: var(--err-line); }
+
 @media (max-width: 900px) {
   .wb-center-grid { grid-template-columns: 1fr; }
 }

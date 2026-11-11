@@ -490,6 +490,51 @@ export function Tasks() {
 /** 账号页签：全部平台的凭据表（原「模型与用量」页并入于此，2026-11-06）。 */
 function AccountsTab({ ac }: { ac: ReturnType<typeof useAsync<AccountsResponse>> }) {
   const fmt = (n: number) => Number(n || 0).toLocaleString('en-US');
+  const [acctBusy, setAcctBusy] = useState(false);
+  const [acctMsg, setAcctMsg] = useState('');
+
+  /** 账号级写操作（rename / set_limit / delete / balance）。
+   *  ★ 后端这四个 action 一直有，界面此前只接了 verify。 */
+  const post = async (body: Record<string, unknown>, done: string) => {
+    setAcctBusy(true);
+    try {
+      await api.post('/api/accounts', body);
+      setAcctMsg('✔ ' + done);
+      ac.reload();
+    } catch (e) {
+      setAcctMsg('失败：' + (e instanceof Error ? e.message : String(e)));
+    } finally { setAcctBusy(false); }
+  };
+
+  const doRename = (id: string, old: string) => {
+    const name = prompt(`给账号 ${id.slice(0, 10)} 起个新名字（当前：${old}）`, old);
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    void post({ action: 'rename', id, name: trimmed }, `已改名为「${trimmed}」`);
+  };
+
+  const doLimit = (id: string) => {
+    const raw = prompt(
+      `账号 ${id.slice(0, 10)} 每日请求上限（0 或留空 = 不限）`,
+      '',
+    );
+    if (raw === null) return;
+    const n = Number(raw.trim() || 0);
+    if (!Number.isFinite(n) || n < 0) { setAcctMsg('上限必须是非负整数'); return; }
+    void post({ action: 'set_limit', id, limit: Math.floor(n) },
+      n === 0 ? '已取消该账号限额' : `已把上限设为 ${Math.floor(n)} 次/天`);
+  };
+
+  const doBalance = (id: string) => {
+    void post({ action: 'balance', id }, '已刷新该账号积分');
+  };
+
+  const doDelete = (id: string, name: string) => {
+    if (!confirm(`删除账号「${name}」？这会让它从号池里消失，且不可撤销。`)) return;
+    void post({ action: 'delete', id }, `已删除账号「${name}」`);
+  };
+
   if (ac.error) return <ErrorBox message={ac.error} onRetry={ac.reload} />;
   if (!ac.data) return <Loading />;
   return (
@@ -510,7 +555,7 @@ function AccountsTab({ ac }: { ac: ReturnType<typeof useAsync<AccountsResponse>>
         <div className="table-scroll">
           <table>
             <thead>
-              <tr><th>账号名</th><th>平台</th><th>凭据</th><th>状态</th><th>健康</th><th>积分</th></tr>
+              <tr><th>账号名</th><th>平台</th><th>凭据</th><th>状态</th><th>健康</th><th>积分</th><th>操作</th></tr>
             </thead>
             <tbody>
               {ac.data.rows.map((a) => (
@@ -525,6 +570,21 @@ function AccountsTab({ ac }: { ac: ReturnType<typeof useAsync<AccountsResponse>>
                     {a.health?.label ? <span className={'pill ' + (a.health.status === 'ok' ? 'ok' : 'warn')}>{a.health.label}</span> : <span className="faint">未验活</span>}
                   </td>
                   <td className="mono">{a.credit != null ? fmt(a.credit) : <span className="faint">未查</span>}</td>
+                  <td>
+                    {/* ★ 2026-11-10：rename / set_limit / delete / balance
+                        四个 action 后端一直有，但界面只做了 verify ——
+                        账号改名、设限额、删号都得靠 curl。这里补齐。 */}
+                    <div className="acct-acts">
+                      <button className="btn sm gh" disabled={acctBusy}
+                        onClick={() => doRename(a.id, a.name || a.id)}>改名</button>
+                      <button className="btn sm gh" disabled={acctBusy}
+                        onClick={() => doLimit(a.id)}>限额</button>
+                      <button className="btn sm gh" disabled={acctBusy}
+                        onClick={() => doBalance(a.id)}>查积分</button>
+                      <button className="btn sm gh danger" disabled={acctBusy}
+                        onClick={() => doDelete(a.id, a.name || a.id)}>删除</button>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -534,6 +594,7 @@ function AccountsTab({ ac }: { ac: ReturnType<typeof useAsync<AccountsResponse>>
       {ac.data.rows.some((a) => a.needs_relogin) && (
         <Note tone="warn">有账号的凭据在本机解不开（DPAPI 绑定原 Windows 用户）。把 accounts.json 搬回原机器，或在当前机器重新登录一次。</Note>
       )}
+      {acctMsg && <Note tone={acctMsg.startsWith('✔') ? 'ok' : 'err'}>{acctMsg}</Note>}
     </div>
   );
 }

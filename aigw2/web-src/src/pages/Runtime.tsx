@@ -133,7 +133,121 @@ export function Runtime() {
       <ProxyCard />
       <CombosCard />
       <PoolCard />
+      <KeysCard />
     </>
+  );
+}
+
+/** 访问密钥（GET/POST /api/keys）。
+ *
+ * ★ 2026-11-10：`/api/keys` 在前端**一次都没被调用过** ——
+ *   这是对外发的那串 sk- 凭据，增删改轮换全靠 curl，等于没有管理面。
+ *   明文只在 action=add 时回显一次（后端设计如此），这里必须显眼提示复制。 */
+interface KeyRow {
+  id: string; name: string; note: string; enabled: boolean;
+  allow_models?: string[]; key_broken?: boolean;
+}
+
+function KeysCard() {
+  const list = useAsync<{ rows?: KeyRow[]; count?: number }>(
+    () => api.get('/api/keys'), [],
+  );
+  const [name, setName] = useState('');
+  const [note, setNote] = useState('');
+  const [allow, setAllow] = useState('');
+  const [msg, setMsg] = useState('');
+  const [fresh, setFresh] = useState('');   // 新建后回显一次的明文
+  const [busy, setBusy] = useState(false);
+
+  const post = async (body: Record<string, unknown>, done: string) => {
+    setBusy(true);
+    try {
+      const r = await api.post('/api/keys', body) as { key?: string; unknown_models?: string[] };
+      if (body.action === 'add' && r?.key) setFresh(r.key);
+      if (body.action === 'update' && (body as { rotate?: boolean }).rotate && r?.key) setFresh(r.key);
+      const unknown = r?.unknown_models ?? [];
+      setMsg('✔ ' + done + (unknown.length ? `（注意：${unknown.join('、')} 当前匹配不到任何模型）` : ''));
+      list.reload();
+    } catch (e) { setMsg('失败：' + (e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(false); }
+  };
+
+  const create = () => {
+    const n = name.trim();
+    if (!n) { setMsg('名字不能为空（写清这把 key 给谁用）'); return; }
+    const models = allow.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+    void post({ action: 'add', name: n, note: note.trim(), allow_models: models },
+      `已创建「${n}」`);
+    setName(''); setNote(''); setAllow('');
+  };
+
+  const rows = list.data?.rows ?? [];
+
+  return (
+    <Card title="访问密钥" extra={
+      <span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>
+        客户端调用 /v1 用的 sk- 凭据 · {rows.length} 把
+      </span>
+    }>
+      {list.loading && !list.data ? <Loading /> : list.error ? <ErrorBox message={list.error} onRetry={list.reload} /> : (
+        <>
+          {fresh && (
+            <Note tone="ok">
+              <b>新密钥（只显示这一次，请立刻复制）：</b>
+              <div className="row mt-2">
+                <input className="q mono" readOnly value={fresh} onFocus={(e) => e.currentTarget.select()} />
+                <button className="btn sm" onClick={() => { void navigator.clipboard?.writeText(fresh); }}>复制</button>
+                <button className="btn sm gh" onClick={() => setFresh('')}>我已保存</button>
+              </div>
+            </Note>
+          )}
+          {rows.length === 0 && <Empty>还没有访问密钥。填下面的表单创建一把，客户端才能调用 /v1。</Empty>}
+          {rows.map((k) => (
+            <div className="key-row" key={k.id}>
+              <div className="key-hd">
+                <b>{k.name}</b>
+                <Pill tone={k.enabled ? 'ok' : 'mut'}>{k.enabled ? '启用' : '停用'}</Pill>
+                {k.key_broken && <Pill tone="err">密文损坏</Pill>}
+                <span className="faint fs-xs mono">{k.id}</span>
+              </div>
+              {k.note && <div className="faint fs-xs">{k.note}</div>}
+              <div className="combo-models">
+                {(k.allow_models ?? []).length === 0
+                  ? <span className="faint fs-xs">不限模型</span>
+                  : (k.allow_models ?? []).map((m) => <span className="model-chip" key={m}>{m}</span>)}
+              </div>
+              <div className="key-acts">
+                <button className="btn sm gh" disabled={busy}
+                  onClick={() => post({ action: 'update', id: k.id, enabled: !k.enabled },
+                    `${k.enabled ? '已停用' : '已启用'}「${k.name}」`)}>
+                  {k.enabled ? '停用' : '启用'}
+                </button>
+                <button className="btn sm gh" disabled={busy}
+                  onClick={() => { if (confirm(`轮换「${k.name}」的密钥？旧密钥立刻失效，客户端要换成新的。`)) void post({ action: 'update', id: k.id, rotate: true }, `已轮换「${k.name}」`); }}>
+                  轮换密钥
+                </button>
+                <button className="btn sm gh danger" disabled={busy}
+                  onClick={() => { if (confirm(`删除访问密钥「${k.name}」？用它调用的客户端会立刻失败。`)) void post({ action: 'remove', id: k.id }, `已删除「${k.name}」`); }}>
+                  删除
+                </button>
+              </div>
+            </div>
+          ))}
+          <div className="key-new">
+            <div className="faint fs-xs mb-2">新建访问密钥</div>
+            <div className="row">
+              <input className="q" placeholder="名字（给谁用，如「部门脚本」）" value={name} onChange={(e) => setName(e.target.value)} />
+              <input className="q" placeholder="备注（可选）" value={note} onChange={(e) => setNote(e.target.value)} />
+            </div>
+            <div className="row mt-2">
+              <input className="q mono" placeholder="允许的模型，逗号分隔（留空 = 不限）" value={allow} onChange={(e) => setAllow(e.target.value)} />
+              <button className="btn pri" disabled={busy} onClick={create}>创建</button>
+            </div>
+          </div>
+          {msg && <Note tone={msg.startsWith('✔') ? 'ok' : 'err'}>{msg}</Note>}
+        </>
+      )}
+    </Card>
   );
 }
 
