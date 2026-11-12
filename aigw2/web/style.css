@@ -105,6 +105,46 @@
           "Microsoft YaHei", system-ui, sans-serif;
 }
 
+/* ── 令牌：与主题无关的标度 ─────────────────────────────────────────────
+   ★ 2026-11-12 修：字号/间距/圆角/控件高/动效/字体这几组**不是颜色**，
+     原先只写在 `:root[data-theme="light"]` 里 —— 切到暗色时这些变量全部
+     不存在，所有 `var(--sp-4)` / `var(--r-md)` 解析失败退化成 0，
+     暗色下卡片紧贴、无内边距、无圆角，整个版面塌成一堆横条（实测截图）。
+     这里提到 :root 兜底；light 块里的同值定义保留，特异性更高、行为不变。 */
+:root {
+  --fs-xs:   11px;
+  --fs-sm:   12px;
+  --fs-base: 13px;
+  --fs-md:   15px;
+  --fs-lg:   20px;
+  --fs-xl:   28px;
+
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  20px;
+  --sp-6:  24px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+
+  --r-sm:   8px;
+  --r-md:   10px;
+  --r-lg:   16px;
+  --r-full: 999px;
+
+  --h-sm: 26px;
+  --h-md: 32px;
+  --h-lg: 38px;
+
+  --ease: cubic-bezier(.4,0,.2,1);
+  --dur:  140ms;
+
+  --mono: ui-monospace, "SF Mono", Consolas, "Cascadia Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", system-ui, sans-serif;
+}
+
 /* ── 令牌：暗色 ────────────────────────────────────────────────────────
    2026-11-06：保持靛紫墨暗色（暗色主题用户可选），亮色默认已对齐参考
    项目的浅色专业控制台。 */

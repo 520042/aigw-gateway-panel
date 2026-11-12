@@ -134,6 +134,7 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
   const qrN = data?.rows.filter((p) => (p.login_methods ?? []).includes('qr')).length ?? 0;
   const badN = data?.rows.filter((p) => p.recent && p.recent.failed > 0).length ?? 0;
   const loggedN = data?.rows.filter((p) => p.anon || p.accounts_n > 0).length ?? 0;
+  const enabledN = data?.rows.filter((p) => p.enabled).length ?? 0;
   const current = rows.find((p) => p.id === sel) ?? rows[0] ?? null;
 
   if (!data) return <Loading />;
@@ -149,7 +150,7 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
   return (
     <>
       <div className="grid g4 mb-3">
-        <Kpi label="平台总数" value={data.total} hint={`${loggedN} 个已接入`} />
+        <Kpi label="平台总数" value={data.total} hint={`启用 ${enabledN} · 已接入 ${loggedN}`} />
         <Kpi label="账号凭据" value={data.rows.reduce((a, p) => a + p.accounts_n, 0)} hint="secret 仅后台使用" />
         <Kpi label="免手动接入" value={autoN} hint="一键 / 扫码 / 设备码 / 跳转登录" />
         <Kpi label="近 24h 有问题" value={badN} tone={badN ? 'err' : undefined} hint="台账里有失败记录" />
@@ -266,6 +267,12 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
   const [credMsg, setCredMsg] = useState<{ tone: 'ok' | 'err' | 'busy'; text: string } | null>(null);
   // 模型开关的即时反馈；实际状态以 onChanged() 重取后的 disabledModels 为准。
   const [modelMsg, setModelMsg] = useState('');
+  // ★ 模型多起来（api-* 平台动辄上百条）平铺成一堵墙，加搜索过滤。
+  const [modelQ, setModelQ] = useState('');
+  // 停用平台的二次确认（替代 window.confirm：原生弹窗会冻住整页，
+  // 且在浏览器里不可样式化，与整体视觉割裂）。
+  const [confirmOff, setConfirmOff] = useState(false);
+  const [platMsg, setPlatMsg] = useState('');
   const toggleModel = async (model: string) => {
     const bare = model.includes('@') ? model.slice(0, model.lastIndexOf('@')) : model;
     setModelMsg(`正在切换 ${bare}…`);
@@ -308,34 +315,50 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
   };
   return (
     <>
-      <Card title={<span>{p.name}<span className="faint mono"> {p.id}</span></span>}>
+      <Card title={<span>{p.name}</span>}>
         <div className="detail-meta">
           {!p.enabled && <Pill tone="mut">已停用</Pill>}
           <Pill tone={p.accounts_n > 0 ? 'ok' : 'mut'}>{a.way}</Pill>
-          <span className="mono">{p.id}</span>
+          <span className="mono" title="平台 id（路由与排查用）">{p.id}</span>
           <span>· {p.models_n} 个模型</span>
           <span>· {p.region ?? '—'}</span>
         </div>
         {/* 平台级启停：停用后 /v1 不再路由该平台全部模型（legacy 同款操作）。 */}
         <div className="row" style={{ marginTop: 'var(--sp-2)' }}>
           <button
-            className={'btn sm ' + (p.enabled ? 'gh' : 'pri')}
+            className={'btn sm ' + (p.enabled ? 'gh' : 'pri') + (confirmOff ? ' danger' : '')}
             onClick={async () => {
-              if (!confirm(`${p.enabled ? '停用' : '启用'}平台 ${p.name}？${p.enabled ? '停用后客户端将无法调用它的任何模型。' : ''}`)) return;
-              try {
-                await api.post('/api/platforms', { action: 'toggle_platform', id: p.id, enabled: !p.enabled });
-                onChanged();
-              } catch (e) {
-                alert('操作失败：' + (e instanceof Error ? e.message : String(e)));
+              if (!p.enabled) {
+                setPlatMsg('');
+                try {
+                  await api.post('/api/platforms', { action: 'toggle_platform', id: p.id, enabled: true });
+                  setPlatMsg('✔ 已启用，重新参与路由');
+                  onChanged();
+                } catch (e) { setPlatMsg('操作失败：' + (e instanceof Error ? e.message : String(e))); }
+                return;
               }
+              // 停用是破坏性的（客户端立刻调不通）：第一次点击只翻成确认态，
+              // 4 秒内再点才执行，避免误触。
+              if (!confirmOff) {
+                setConfirmOff(true);
+                window.setTimeout(() => setConfirmOff(false), 4000);
+                return;
+              }
+              setConfirmOff(false);
+              try {
+                await api.post('/api/platforms', { action: 'toggle_platform', id: p.id, enabled: false });
+                setPlatMsg('已停用：客户端调它的模型会得到「平台已停用」');
+                onChanged();
+              } catch (e) { setPlatMsg('操作失败：' + (e instanceof Error ? e.message : String(e))); }
             }}
           >
-            {p.enabled ? '⏸ 停用平台' : '▶ 启用平台'}
+            {p.enabled ? (confirmOff ? '再点确认停用' : '⏸ 停用平台') : '▶ 启用平台'}
           </button>
           <span className="faint fs-xs">
             {p.enabled ? '当前参与路由' : '已停用：客户端调它的模型会得到「平台已停用」'}
           </span>
         </div>
+        {platMsg && <Note tone={platMsg.startsWith('✔') || platMsg.startsWith('已停用') ? 'ok' : 'err'}>{platMsg}</Note>}
       </Card>
 
       <Card title="登录">
@@ -352,13 +375,26 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
         )}
         {/* ★ 设备码 / 跳转授权 / 扫码登录入口：按后端返回形状分支渲染 + 自调度轮询。 */}
         {['qr', 'device', 'oauth'].includes(a.kind) && <AuthPanel p={p} onChanged={onChanged} />}
-        <div className="row" style={{ marginTop: 'var(--sp-2)' }}>
-          <input className="q mono" placeholder="粘贴凭据（手动方式）…" id={'cred-' + p.id} />
-          <button className="btn pri" onClick={() => saveCred(false)}>保存凭据</button>
-          {a.kind === 'one_click' && (
-            <button className="btn" onClick={() => saveCred(true)}>从本机客户端导入</button>
-          )}
-        </div>
+        {/* ★ 免密平台（anon）原先也摆着「粘贴凭据 + 保存凭据」，
+            与上面那句「免费，无需登录」自相矛盾。改成可选项折叠起来：
+            少数免密站允许自带 Key 提额度，想填的人仍然找得到。 */}
+        {a.kind === 'none' ? (
+          <details className="src-notes mt-2">
+            <summary>可选：填自己的 API Key（提高额度 / 少撞共享限流）</summary>
+            <div className="row mt-2">
+              <input className="q mono" placeholder="粘贴 API Key（不填也能用）…" id={'cred-' + p.id} />
+              <button className="btn" onClick={() => saveCred(false)}>保存凭据</button>
+            </div>
+          </details>
+        ) : (
+          <div className="row" style={{ marginTop: 'var(--sp-2)' }}>
+            <input className="q mono" placeholder="粘贴凭据（手动方式）…" id={'cred-' + p.id} />
+            <button className="btn pri" onClick={() => saveCred(false)}>保存凭据</button>
+            {a.kind === 'one_click' && (
+              <button className="btn" onClick={() => saveCred(true)}>从本机客户端导入</button>
+            )}
+          </div>
+        )}
         {credMsg && <Note tone={credMsg.tone === 'ok' ? 'ok' : credMsg.tone === 'err' ? 'err' : undefined}>{credMsg.text}</Note>}
       </Card>
 
@@ -389,25 +425,44 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
       <Card title={<span>模型 · 已启用 {p.models_on}/{p.models_n}</span>}>
         {p.models.length === 0
           ? <div className="faint">这个平台没有声明模型清单（live 拉取）</div>
-          : <div className="model-chips">
-              {p.models.map((m) => {
-                const bare = m.includes('@') ? m.slice(0, m.lastIndexOf('@')) : m;
-                const off = disabledModels.has(bare);
-                return (
-                  <button
-                    key={m}
-                    className={'model-chip mono' + (off ? ' off' : '')}
-                    title={off ? `${bare} 已停用，点击启用` : `${bare} 启用中，点击停用`}
-                    onClick={() => toggleModel(m)}
-                  >
-                    {bare}
-                    {off && <span className="chip-x">已停</span>}
-                  </button>
-                );
-              })}
-            </div>}
+          : (() => {
+              const ql = modelQ.trim().toLowerCase();
+              const shown = ql ? p.models.filter((m) => m.toLowerCase().includes(ql)) : p.models;
+              const offN = p.models.filter((m) => disabledModels.has(m.includes('@') ? m.slice(0, m.lastIndexOf('@')) : m)).length;
+              return (
+                <>
+                  {p.models.length > 12 && (
+                    <div className="row mb-2">
+                      <input className="q" placeholder={`在 ${p.models.length} 个模型里搜…`}
+                        value={modelQ} onChange={(e) => setModelQ(e.target.value)} />
+                      <span className="faint fs-xs ml-auto" style={{ whiteSpace: 'nowrap' }}>
+                        {ql ? `匹配 ${shown.length}` : `共 ${p.models.length}`}{offN > 0 ? ` · 已停 ${offN}` : ''}
+                      </span>
+                    </div>
+                  )}
+                  <div className="model-chips">
+                    {shown.map((m) => {
+                      const bare = m.includes('@') ? m.slice(0, m.lastIndexOf('@')) : m;
+                      const off = disabledModels.has(bare);
+                      return (
+                        <button
+                          key={m}
+                          className={'model-chip mono' + (off ? ' off' : '')}
+                          title={off ? `${bare} 已停用，点击启用` : `${bare} 启用中，点击停用`}
+                          onClick={() => toggleModel(m)}
+                        >
+                          {bare}
+                          {off && <span className="chip-x">已停</span>}
+                        </button>
+                      );
+                    })}
+                    {shown.length === 0 && <span className="faint fs-xs">没有匹配的模型名</span>}
+                  </div>
+                </>
+              );
+            })()}
         {modelMsg && <Note>{modelMsg}</Note>}
-        {p.models.length > 0 && <div className="faint fs-xs mt-2">点击芯片切换该模型的启用/停用（按裸模型名记账，跨平台生效）。</div>}
+        {p.models.length > 0 && <div className="faint fs-xs mt-2">点击模型块切换启用/停用（按裸模型名记账，跨平台生效）。</div>}
       </Card>
     </>
   );

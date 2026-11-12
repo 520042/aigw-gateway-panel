@@ -3,15 +3,32 @@ import { Card, Kpi, Loading, ErrorBox, useAsync } from '../components';
 import { api, type Usage } from '../api';
 
 const fmt = (n: number) => Number(n || 0).toLocaleString('en-US');
+/** 自定义接入源的 id 是 custom-<16位hash>-<序号>，直接铺在榜上像乱码。
+ *  截成「自定义 · 前6位」既认得出是自己加的，又能对上接入源页里的条目。 */
+const prettyKey = (k: string) => k.startsWith('custom-') ? `自定义 · ${k.slice(7, 13)}` : k;
 const ms = (v: number | undefined) => v == null ? '—' : v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms';
 
 /** 零依赖 SVG 面积图（与旧版 trendSVG 同形状，但作为 React 组件可复用）。
  *  悬停 tooltip（借鉴 sub2api TokenUsageTrend 的 index-mode 交互）：
- *  鼠标横移按 x 定位到最近的样本点，显示该请求的 tokens 与时间。 */
+ *  鼠标横移按 x 定位到最近的样本点，显示该请求的 tokens 与时间。
+ *
+ *  ★ 2026-11-12 修两个实测问题：
+ *  ① 数据源字段是 `tout`（/api/requests 的 recent 项），原代码读
+ *     `total_tokens ?? tokensOut` —— 两个都不存在，values 全是 0，
+ *     折线贴在底边上，看起来就是「一个空白框加一条横线」。
+ *  ② 全 0 时不再画贴底直线，直接说明为什么没有数。 */
 function Trend({ values, stamps }: { values: number[]; stamps: number[] }) {
   const [hover, setHover] = useState<number | null>(null);
   if (!values.length) return <div className="faint small">暂无样本</div>;
   const w = 760, h = 160, max = Math.max(1, ...values);
+  const allZero = values.every((v) => !v);
+  if (allZero) {
+    return (
+      <div className="faint small" style={{ padding: '28px 0' }}>
+        这批请求没有回传 token 计数（流式响应或上游未计费）。换个模型或看「平台输出榜」的请求量。
+      </div>
+    );
+  }
   const pts = values.map((v, i) => `${(i / Math.max(1, values.length - 1)) * w},${h - (v / max) * (h - 12)}`);
   const d = `M0,${h} L${pts.join(' L')} L${w},${h} Z`;
   const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
@@ -23,6 +40,7 @@ function Trend({ values, stamps }: { values: number[]; stamps: number[] }) {
   const fmtT = (n: number) => n >= 1_000_000 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1e3).toFixed(1) + 'K' : String(n);
   const hx = hover == null ? 0 : (hover / Math.max(1, values.length - 1)) * w;
   const hy = hover == null ? 0 : h - (values[hover] / max) * (h - 12);
+  const stamp = (t?: number) => t ? new Date(t * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
   const label = hover == null ? '' : (() => {
     const ts = stamps[hover];
     const t = ts ? new Date(ts * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
@@ -30,6 +48,11 @@ function Trend({ values, stamps }: { values: number[]; stamps: number[] }) {
   })();
   return (
     <div style={{ position: 'relative' }}>
+      {/* 峰值与起止时间：原先图上没有任何刻度，只能靠悬停猜量级。 */}
+      <div className="trend-axis">
+        <span className="faint fs-xs">峰值 {fmtT(max)} tokens</span>
+        <span className="faint fs-xs">{stamp(stamps[0])} → {stamp(stamps[stamps.length - 1])}</span>
+      </div>
       <svg
         viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="trend-svg"
         role="img" aria-label="请求趋势"
@@ -41,6 +64,9 @@ function Trend({ values, stamps }: { values: number[]; stamps: number[] }) {
             <stop offset="100%" stopColor="var(--brand)" stopOpacity="0.02" />
           </linearGradient>
         </defs>
+        {[0.25, 0.5, 0.75].map((r) => (
+          <line key={r} x1={0} y1={h * r} x2={w} y2={h * r} stroke="var(--border)" strokeWidth="1" strokeDasharray="3 4" />
+        ))}
         <path d={d} fill="url(#trendFill)" stroke="var(--brand)" strokeWidth="1.5" />
         {hover != null && (
           <g>
@@ -58,7 +84,9 @@ function Trend({ values, stamps }: { values: number[]; stamps: number[] }) {
 
 export function UsagePage() {
   const us = useAsync<Usage>(() => api.get('/api/usage'), []);
-  const hist = useAsync<{ recent: Array<{ ts?: number; total_tokens?: number; tokensOut?: number }> }>(
+  // ★ /api/requests 的 recent 项字段是 tin / tout（不是 total_tokens / tokensOut，
+  //   也不是 camelCase 的 tokensIn/Out）——类型漏了真字段名，图才会全 0。
+  const hist = useAsync<{ recent: Array<{ ts?: number; tin?: number; tout?: number; total_tokens?: number; tokensOut?: number }> }>(
     () => api.get('/api/requests?limit=60'), [],
   );
   if (us.error) return <ErrorBox message={us.error} onRetry={us.reload} />;
@@ -71,7 +99,7 @@ export function UsagePage() {
   const last = rows.slice(0, 8);
   const maxOut = Math.max(1, ...last.map((r) => r.requests));
   const histRows = hist.data?.recent ?? [];
-  const trend = histRows.map((r) => r.total_tokens ?? r.tokensOut ?? 0).reverse();
+  const trend = histRows.map((r) => r.tout ?? r.total_tokens ?? r.tokensOut ?? 0).reverse();
   const stamps = histRows.map((r) => r.ts ?? 0).reverse();
 
   return (
@@ -98,10 +126,10 @@ export function UsagePage() {
         <Trend values={trend} stamps={stamps} />
       </Card>
 
-      <Card title="平台输出榜">
+      <Card title="平台输出榜" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>条长 = 请求数</span>}>
         {last.length === 0 ? <div className="faint small">暂无数据</div> : last.map((r) => (
           <div className="rk-row" key={r.key}>
-            <span className="rk-name mono">{r.key}</span>
+            <span className="rk-name mono" title={r.key}>{prettyKey(r.key)}</span>
             <div className="rk-bar"><i style={{ width: `${Math.round((r.requests / maxOut) * 100)}%` }} /></div>
             <span className="rk-num">{fmt(r.requests)}</span>
           </div>

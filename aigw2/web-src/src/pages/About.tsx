@@ -9,12 +9,22 @@ interface UpdateCheck {
   remote: { reachable: boolean; sha: string; date: string };
 }
 
+/** 后端给的是 UTC ISO（2026-11-11T06:21:21Z），直接摆出来差 8 小时。 */
+const fmtWhen = (raw?: string) => {
+  if (!raw) return '';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+
 const fmtBytes = (n: number) =>
   n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + ' MiB' : n >= 1 << 10 ? (n / (1 << 10)).toFixed(1) + ' KiB' : n + ' B';
 
 export function About() {
   const h = useAsync<Health>(() => api.get('/api/health'), []);
-  const up = useAsync<UpdateCheck>(() => api.get('/api/update-check'), []);
+  // 远端检查要打 GitHub：给 8s 上限，超时就直接说「超时」，
+  // 而不是让「数据目录 / 远端 commit」两行一直停在读取中。
+  const up = useAsync<UpdateCheck>(() => api.get('/api/update-check', 8000), []);
   const [busy, setBusy] = useState('');
 
   if (h.error) return <ErrorBox message={h.error} onRetry={h.reload} />;
@@ -61,9 +71,17 @@ export function About() {
 
   const remote = up.data?.remote;
   const local = up.data?.local;
-  const remoteTxt = remote?.reachable
-    ? `${remote.sha.slice(0, 8)}（${remote.date || ''}）`
-    : '远端不可达（离线）';
+  // ★ 2026-11-12：原先 up.data 还没回来时 remote 是 undefined，
+  //   三元直接落到「远端不可达（离线）」——页面刚打开就报离线，是假警报。
+  //   AbortSignal 的超时错误是英文技术串，这里翻成一句人话。
+  const upErr = up.error
+    ? (/abort|timeout|timed out/i.test(up.error) ? '检查超时（GitHub 不可达）' : up.error)
+    : '';
+  const remoteTxt = !up.data
+    ? (up.error ? `检查失败：${upErr}` : '检查中…')
+    : remote?.reachable
+      ? `${remote.sha.slice(0, 8)}（${fmtWhen(remote.date)}）`
+      : '远端不可达（离线）';
   const behind = remote?.reachable && remote.sha && local?.exe_built_ts
     ? undefined // 后端只给 sha 不给本地 sha；此处只展示，不做「落后几个提交」的假算术
     : undefined;
@@ -85,7 +103,8 @@ export function About() {
         <div className="kv">
           <div><span>本地版本</span><b>{d.version} · {d.milestone}</b></div>
           <div><span>远端最新 commit</span><b>{remoteTxt}</b></div>
-          <div><span>数据目录</span><code className="mono">{local?.data_dir ?? '—'}</code></div>
+          {/* ★ 数据目录走 health（本地、即时），不再挂在远端检查上 */}
+          <div><span>数据目录</span><code className="mono">{d.data_dir ?? local?.data_dir ?? '—'}</code></div>
         </div>
         <div className="row mt-3">
           <button className="btn" onClick={checkUpdate}>⟳ 检查更新</button>
@@ -108,17 +127,11 @@ export function About() {
         )}
       </Card>
 
-      <Card title="模型链">
-        <Note>
-          多模型按顺序组成候选链，前一个挂了自动换下一个。写法：<code>模型名@平台</code>，
-          或在清单内直接写裸模型名（网关按启用的平台自动路由）。
-        </Note>
-      </Card>
-
       <Card title="使用说明">
         <Note>
           ① 在「接入源」页选平台并登录 ② 客户端 <code>base_url</code> 填 <code>{location.origin}/v1</code>、<code>api_key</code> 填 <code>admin</code>
           ③ <code>model</code> 填 <code>模型id@平台</code> 或清单内模型。<br />
+          多模型链：<code>模型名@平台</code> 按顺序组成候选链，前一个挂了自动换下一个（在「运行配置 → 模型链」里管理）。<br />
           面板只监听本机回环；凭据落盘用 DPAPI 加密，日志里不会写入 token。
         </Note>
       </Card>

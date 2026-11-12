@@ -32,7 +32,11 @@ async function request<T = unknown>(path: string, init?: RequestInit): Promise<T
 }
 
 export const api = {
-  get: <T = unknown>(path: string) => request<T>(path),
+  /** timeoutMs：可选的整体超时。用于「不阻塞首屏」的接口——
+   *  例如 /api/update-check 要打 GitHub，国内网络下可能挂十几秒，
+   *  没有超时的话页面会一直停在「检查中…」。 */
+  get: <T = unknown>(path: string, timeoutMs?: number) =>
+    request<T>(path, timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : undefined),
   post: <T = unknown>(path: string, body: unknown) =>
     request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
 };
@@ -50,6 +54,8 @@ export interface Health {
   db: { backend: string; events: number; bytes?: number };
   logs?: { files: number; bytes: number };
   archives?: { files: number; bytes: number };
+  /** 数据目录（本地信息，随 health 一起下发，不用等远端检查）。 */
+  data_dir?: string | null;
   /** 最近一次落盘失败（各 Store 只 warn 不抛错，这里是唯一能看见它的地方）。 */
   persist_error?: { file: string; s_ago: number; error: string } | null;
 }

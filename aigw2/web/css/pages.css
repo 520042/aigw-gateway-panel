@@ -84,7 +84,10 @@ tbody tr:hover td { background: var(--surface-3); }
 }
 .rk-bar > i {
   display: block; height: 100%; border-radius: 3px;
-  background: linear-gradient(90deg, var(--brand), var(--ok));
+  /* ★ 2026-11-12：原来是 brand→ok 渐变，短条只露出蓝、长条露到绿，
+     同一张榜里每行颜色都不一样 —— 看图的人会以为颜色编码了成功率。
+     成功率已经由右侧 pill 表达，条只表示量，统一单色。 */
+  background: var(--brand);
   /* 只给 width 挂过渡（铁律①：不写 all） */
   transition: width 300ms var(--ease);
 }
@@ -130,13 +133,14 @@ tbody tr:hover td { background: var(--surface-3); }
    ═══════════════════════════════════════════════════════════════════════ */
 .log-row {
   display: grid;
-  /* 时间戳固定宽、级别固定宽、模块自适应、正文吃掉剩余 */
-  /* 时间戳 178px（够放下带微秒的 ISO 时间）、级别 46px、模块**按内容宽**、余下给正文。
+  /* 时间戳 96px（本地 MM-DD HH:MM:SS，跨天要放下日期）、级别 46px、模块**按内容宽**、余下给正文。
+     ★ 2026-11-12：原来是 178px，为了塞下带微秒的 ISO 串（2026-11-10T03:26:38.938113Z）。
+       那串既占宽又难读（还是 UTC），转本地后只要 8 个字符，多出来的位宽全给正文。
      ★ 模块列必须用 `fit-content(170px)` 而不是 `minmax(0,170px)`：
        后者在有多余空间时会把这一列拉到上限 170px，于是 `tasks`（5 个字符）
        后面留了 100 多像素空白 —— 亮色下实测特别明显，正文像是从页面中间才开始。
        `fit-content(N)` 是「内容需要多宽就多宽，最多 N」，正是这里要的语义。 */
-  grid-template-columns: 178px 46px fit-content(170px) 1fr;
+  grid-template-columns: 96px 46px fit-content(170px) 1fr;
   gap: var(--sp-2);
   align-items: baseline;
   padding: 2px var(--sp-1);

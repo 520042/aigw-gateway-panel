@@ -95,8 +95,11 @@ export function App() {
   // ★ 默认亮色（2026-11-06）：参考项目的设计语言是浅色专业控制台；
   //   'auto' 跟随系统在深色模式的 Windows 上会落进暗色，观感不如参考。
   //   index.html 的 FOUC 脚本已同步此默认。
+  // ★ 2026-11-12 修：allowed 里原先漏了 'auto' —— 循环到「跟随系统」后
+  //   localStorage 存的是 auto，下次打开被判非法值回落 light，按钮显示的
+  //   档位和实际渲染不一致（用户点三次回到原点，像是按钮坏了）。
   const [theme, setTheme] = useState<'light' | 'dark' | 'auto'>(() =>
-    loadPref('aigw-theme', ['light', 'dark'], 'light') as 'light' | 'dark' | 'auto',
+    loadPref('aigw-theme', ['light', 'dark', 'auto'], 'light') as 'light' | 'dark' | 'auto',
   );
 
   // ★ 供子页写操作后刷新平台清单（保存凭据 / 导入 / 启停平台都会改变它）。
@@ -161,7 +164,14 @@ export function App() {
         </nav>
         <div className="side-foot">
           BUILD {health?.version ?? '—'} · {health?.milestone ?? '—'}
-          <br />{health ? `${health.build.uptime_s ? Math.round(health.build.uptime_s / 60) : 0} 分钟在线` : '连接中…'}
+          <br />
+          {health
+            ? health.build.uptime_s < 60
+              ? '刚刚启动'
+              : health.build.uptime_s < 3600
+                ? `${Math.round(health.build.uptime_s / 60)} 分钟在线`
+                : `${(health.build.uptime_s / 3600).toFixed(1)} 小时在线`
+            : '连接中…'}
         </div>
       </aside>
 

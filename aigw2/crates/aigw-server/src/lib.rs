@@ -3774,6 +3774,10 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
         // 限流现场：被挡过几次、上次多久前、是全局还是每 IP 触顶。
         // 429 只体现在响应里，不放这里的话「面板突然全失败」根本查不到原因。
         "limits": st.limits.snapshot(),
+        // 数据目录：本地信息，放这里而不是 /api/update-check ——
+        // 更新检查要打 GitHub，国内网络下会挂十几秒，面板「数据目录」那行
+        // 就跟着一直显示「读取中…」（实测截图）。
+        "data_dir": st.data_dir.as_ref().as_ref().map(|d| d.display().to_string()),
     });
     // ★ 积分资产总览（概览页一行）：口径与选号逻辑**同一个**
     //   `pool::credit_summary`（TTL 过期不算、<1 不算、48h 窗口）。

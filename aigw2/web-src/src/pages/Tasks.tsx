@@ -384,6 +384,11 @@ export function Tasks() {
         </span>
       </div>
 
+      {/* ★ 操作结果固定贴在页签下方：原先放在整个 Card 的末尾，
+          签到记录表铺满 18 行时，用户点完「立即签到」的反馈直接落到屏幕外，
+          看起来像没反应。 */}
+      {msg && <div className="note mt-2 wb-msg">{msg}</div>}
+
       {tab === 'center' && (
         <>
           <div className="wb-stats">
@@ -410,7 +415,7 @@ export function Tasks() {
             <div className="wb-stat" role="button" tabIndex={0} onClick={() => setTab('records')}
               onKeyDown={(e) => { if (e.key === 'Enter') setTab('records'); }}>
               <div className="wb-stat-label">签到记录</div>
-              <div className="wb-stat-value">查看</div>
+              <div className="wb-stat-value wb-link">查看明细 →</div>
               <div className="wb-stat-foot faint fs-xs">逐账号执行台账 · 可筛选时间与结果</div>
             </div>
           </div>
@@ -422,20 +427,24 @@ export function Tasks() {
                 <div className="wb-task-info"><b>每日签到</b><span className="faint fs-xs">覆盖全部勾选平台（WB / CodeBuddy / Lobster / 小浣熊）</span></div>
                 <div className="acts">
                   <button className="btn sm pri" disabled={busy} onClick={() => runAction({ action: 'claim' }, '一键签到')}>立即签到</button>
-                  <button className={'btn sm ' + (currentCfg.daily_checkin ? 'pri' : 'gh')} disabled={busy}
-                    onClick={() => toggle('checkin', !currentCfg.daily_checkin)}>
-                    自动：{currentCfg.daily_checkin ? '开 ✔' : '关'}
-                  </button>
+                  {/* ★ 原先是个写着「自动：关」的次要按钮 —— 看起来像状态标签，
+                      没人会去点它，而它其实是开关。改成真开关控件。 */}
+                  <label className={'tog' + (currentCfg.daily_checkin ? ' on' : '')} title="开启后按「定时签到」页签里的时刻自动执行">
+                    <input type="checkbox" checked={currentCfg.daily_checkin} disabled={busy}
+                      onChange={(e) => toggle('checkin', e.target.checked)} />
+                    <i /><span>每日自动</span>
+                  </label>
                 </div>
               </div>
               <div className="wb-task-row">
                 <div className="wb-task-info"><b>WB 日常任务</b><span className="faint fs-xs">仅 WB 系账号 · 逐项接受 + 事件链点亮 + 逐项领奖</span></div>
                 <div className="acts">
                   <button className="btn sm pri" disabled={busy} onClick={() => runAction({ action: 'growth', platform: 'wb-gateway' }, 'WB 任务')}>立即执行</button>
-                  <button className={'btn sm ' + (currentCfg.daily_growth ? 'pri' : 'gh')} disabled={busy}
-                    onClick={() => toggle('growth', !currentCfg.daily_growth)}>
-                    自动：{currentCfg.daily_growth ? '开 ✔' : '关'}
-                  </button>
+                  <label className={'tog' + (currentCfg.daily_growth ? ' on' : '')} title="开启后按「定时签到」页签里的时刻自动执行">
+                    <input type="checkbox" checked={currentCfg.daily_growth} disabled={busy}
+                      onChange={(e) => toggle('growth', e.target.checked)} />
+                    <i /><span>每日自动</span>
+                  </label>
                 </div>
               </div>
               <div className="wb-task-row">
@@ -481,7 +490,6 @@ export function Tasks() {
 
       {tab === 'accounts' && <AccountsTab ac={ac} />}
 
-      {msg && <div className="note mt-2">{msg}</div>}
       {growthResult && <GrowthResult resp={growthResult} onClose={() => setGrowthResult(null)} />}
     </Card>
   );
@@ -560,10 +568,14 @@ function AccountsTab({ ac }: { ac: ReturnType<typeof useAsync<AccountsResponse>>
             <tbody>
               {ac.data.rows.map((a) => (
                 <tr key={a.id}>
-                  <td><b>{a.name || a.id}</b><br /><span className="faint mono">{a.id}</span></td>
-                  <td>{a.platform_name || a.platform}<br /><span className="faint mono fs-xs">{a.platform}</span></td>
+                  {/* 账号 id 只在排查时用得上；原先占一整行的第二行，
+                      看起来像一串乱码。收进 title，位宽还给真正要读的列。 */}
+                  <td title={a.id}><b>{a.name || a.id}</b></td>
+                  <td title={a.platform}>{a.platform_name || a.platform}</td>
                   <td className="faint">
-                    {a.anon ? '无需凭据' : a.needs_relogin ? '本机解不开' : `${a.secret_len} 字符（掩码）`}
+                    {a.anon ? '无需凭据'
+                      : a.needs_relogin ? '本机解不开'
+                        : `${a.kind === 'cookie' ? 'Cookie' : a.kind === 'token' ? 'Token' : a.kind || '凭据'} · ${a.secret_len} 字符`}
                   </td>
                   <td><Pill tone={a.enabled ? 'ok' : 'mut'}>{a.enabled ? '启用' : '停用'}</Pill></td>
                   <td>
@@ -627,8 +639,8 @@ function ScheduleTab({
       {/* 勾了平台但两个开关都关着时，勾选不会生效——不提示的话用户以为设置好了。 */}
       {!dailyCheckin && !dailyGrowth && picked.length > 0 && (
         <Note tone="warn">
-          已勾选 {picked.length} 个平台，但「定时签到」和「定时 WB 任务」都处于关闭状态，
-          到点不会执行。点上面的开关打开后才会按此时刻自动跑。
+          已勾选 {picked.length} 个平台，但「每日签到」和「WB 日常任务」两个开关都关着，
+          到点不会执行。把上面「作用任务」里的开关打开才会按此时刻自动跑。
         </Note>
       )}
 
@@ -640,14 +652,16 @@ function ScheduleTab({
         </div>
         <div className="wb-sched-line">
           <span className="wb-set-k">作用任务</span>
-          <button className={'btn sm ' + (dailyCheckin ? 'pri' : 'gh')} disabled={busy}
-            onClick={() => onToggle('checkin', !dailyCheckin)}>
-            每日签到：{dailyCheckin ? '开 ✔' : '关'}
-          </button>
-          <button className={'btn sm ' + (dailyGrowth ? 'pri' : 'gh')} disabled={busy}
-            onClick={() => onToggle('growth', !dailyGrowth)}>
-            WB 日常任务：{dailyGrowth ? '开 ✔' : '关'}
-          </button>
+          <label className={'tog' + (dailyCheckin ? ' on' : '')}>
+            <input type="checkbox" checked={dailyCheckin} disabled={busy}
+              onChange={(e) => onToggle('checkin', e.target.checked)} />
+            <i /><span>每日签到</span>
+          </label>
+          <label className={'tog' + (dailyGrowth ? ' on' : '')}>
+            <input type="checkbox" checked={dailyGrowth} disabled={busy}
+              onChange={(e) => onToggle('growth', e.target.checked)} />
+            <i /><span>WB 日常任务</span>
+          </label>
           <span className="faint fs-xs">签到作用于下面勾选的平台；WB 任务只作用 WB 系账号</span>
         </div>
         <div className="wb-sched-line">
@@ -733,7 +747,9 @@ function RecordRow({ r }: { r: TaskRecord }) {
 }
 
 function RecordsTab() {
-  const [range, setRange] = useState('all');
+  // ★ 默认 7 天：签到是每日动作，默认「全部时间」会把 289 条历史全铺出来，
+  //   首屏 15 页里绝大多数是上周的重复行。
+  const [range, setRange] = useState('7');
   const [outcome, setOutcome] = useState('all');
   const [kind, setKind] = useState('all');
   const [q, setQ] = useState('');

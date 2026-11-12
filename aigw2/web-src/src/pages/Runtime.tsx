@@ -12,12 +12,24 @@ interface RuntimeCfg {
 
 const HINTS: Record<string, string> = {
   max_inflight: '单账号在单个模型上的最大并发',
-  upstream_timeout_s: '上游读写超时（秒）',
+  upstream_timeout_s: '上游读写超时',
   max_account_tries: '一次请求最多换几个账号重试',
   per_ip_rpm: '每 IP 每分钟请求上限，0 = 不限',
   global_rpm: '全局每分钟请求上限，0 = 不限',
   key_rpm: '每把访问密钥每分钟上限，0 = 不限',
   select_ceiling: '选号策略：0 = 默认（快到期优先 → 余额升序）',
+};
+
+/** 字段人话名 + 单位。★ 原先主标题直接铺 `max_inflight` 这种 Rust 字段名，
+ *  中文说明缩成第二行小字 —— 对用户来说等于没有标签。字段名挪进 tooltip。 */
+const FIELD: Record<string, { cn: string; unit?: string }> = {
+  max_inflight: { cn: '单账号并发上限', unit: '个' },
+  upstream_timeout_s: { cn: '上游读超时', unit: '秒' },
+  max_account_tries: { cn: '换号重试次数', unit: '次' },
+  per_ip_rpm: { cn: '每 IP 每分钟上限', unit: '次/分' },
+  global_rpm: { cn: '全局每分钟上限', unit: '次/分' },
+  key_rpm: { cn: '每密钥每分钟上限', unit: '次/分' },
+  select_ceiling: { cn: '选号上限', unit: '' },
 };
 
 const PRESETS: Array<[string, string]> = [
@@ -107,20 +119,29 @@ export function Runtime() {
     <>
       <Card title="运行配置" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>改完立即生效</span>}>
         <div className="runtime-grid">
-          {(data.cfg.fields ?? []).map((f) => (
-            <div className="runtime-row" key={f.name}>
-              <div className="runtime-label">
-                <b>{f.name}</b>
-                <span className="faint fs-xs">{HINTS[f.name] ?? `范围 ${f.min}-${f.max}，默认 ${f.default}`}</span>
+          {(data.cfg.fields ?? []).map((f) => {
+            const meta = FIELD[f.name];
+            return (
+              <div className="runtime-row" key={f.name}>
+                <div className="runtime-label" title={`${f.name} · 默认 ${f.default}`}>
+                  <b>{meta?.cn ?? f.name}</b>
+                  <span className="faint fs-xs">
+                    {HINTS[f.name] ?? ''}
+                    {` · 范围 ${f.min}–${f.max}，默认 ${f.default}`}
+                  </span>
+                </div>
+                <span className="rt-input">
+                  <input
+                    className="q mono rt-num" type="number"
+                    min={f.min} max={f.max}
+                    value={draft[f.name] ?? f.default}
+                    onChange={(e) => setDraft((d) => ({ ...d, [f.name]: Number(e.target.value) }))}
+                  />
+                  {meta?.unit && <span className="rt-unit faint fs-xs">{meta.unit}</span>}
+                </span>
               </div>
-              <input
-                className="q mono rt-num" type="number"
-                min={f.min} max={f.max}
-                value={draft[f.name] ?? f.default}
-                onChange={(e) => setDraft((d) => ({ ...d, [f.name]: Number(e.target.value) }))}
-              />
-            </div>
-          ))}
+            );
+          })}
         </div>
         <div className="row mt-3">
           <button className="btn pri" onClick={save}>保存并立即生效</button>
@@ -235,13 +256,22 @@ function KeysCard() {
           ))}
           <div className="key-new">
             <div className="faint fs-xs mb-2">新建访问密钥</div>
-            <div className="row">
-              <input className="q" placeholder="名字（给谁用，如「部门脚本」）" value={name} onChange={(e) => setName(e.target.value)} />
-              <input className="q" placeholder="备注（可选）" value={note} onChange={(e) => setNote(e.target.value)} />
-            </div>
-            <div className="row mt-2">
-              <input className="q mono" placeholder="允许的模型，逗号分隔（留空 = 不限）" value={allow} onChange={(e) => setAllow(e.target.value)} />
-              <button className="btn pri" disabled={busy} onClick={create}>创建</button>
+            {/* ★ 原先三个输入全靠 placeholder 当标签，输入后标签消失，
+                填到第三个框时已经分不清哪个是名字哪个是模型白名单。 */}
+            <div className="key-form">
+              <label className="key-field">
+                <span>名字</span>
+                <input className="q" placeholder="给谁用，如「部门脚本」" value={name} onChange={(e) => setName(e.target.value)} />
+              </label>
+              <label className="key-field">
+                <span>备注（可选）</span>
+                <input className="q" placeholder="用途说明" value={note} onChange={(e) => setNote(e.target.value)} />
+              </label>
+              <label className="key-field">
+                <span>允许的模型（留空 = 不限）</span>
+                <input className="q mono" placeholder="kilo-auto/free, gpt-4o" value={allow} onChange={(e) => setAllow(e.target.value)} />
+              </label>
+              <button className="btn pri" disabled={busy} onClick={create}>创建密钥</button>
             </div>
           </div>
           {msg && <Note tone={msg.startsWith('✔') ? 'ok' : 'err'}>{msg}</Note>}
@@ -289,7 +319,7 @@ function CombosCard() {
     }>
       {list.loading && !list.data ? <Loading /> : list.error ? <ErrorBox message={list.error} onRetry={list.reload} /> : (
         <>
-          {rows.length === 0 && <Empty>还没有模型链。用下面的表单新建一条，或直接调 POST /api/combos。</Empty>}
+          {rows.length === 0 && <Empty>还没有模型链。新建需要 POST /api/combos（界面暂未提供表单），创建后可在这里启停与删除。</Empty>}
           {rows.map((c) => (
             <div className="combo-row" key={c.id}>
               <div className="combo-hd">
@@ -447,7 +477,7 @@ function ProxyCard() {
               </div>
               <select className="q w-auto" value={mode} onChange={(e) => setMode(e.target.value)}>
                 {(proxy.data?.modes ?? ['direct', 'global', 'bypass_cn']).map((m) => (
-                  <option key={m} value={m}>{m}</option>
+                  <option key={m} value={m}>{MODE_HINT[m] ?? m}</option>
                 ))}
               </select>
             </div>

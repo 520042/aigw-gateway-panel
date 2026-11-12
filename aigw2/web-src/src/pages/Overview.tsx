@@ -2,6 +2,7 @@ import { Kpi, Card, Note, Loading, ErrorBox, useAsync } from '../components';
 import { api, type Usage, type AccountsResponse, type Health, type PlatformResponse } from '../api';
 
 const fmt = (n: number) => Number(n || 0).toLocaleString('en-US');
+const prettyKey = (k: string) => k.startsWith('custom-') ? `自定义 · ${k.slice(7, 13)}` : k;
 const ms = (v: number | undefined) =>
   v == null ? '—' : v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms';
 
@@ -50,6 +51,19 @@ function Pulse({ rows, hours }: { rows: PulseRow[]; hours: number }) {
   );
 }
 
+/** 后台任务内部名 → 人话。/api/health 的 tasks 键就是 Rust 侧的函数名，
+ *  直接铺 `credits_refresh` / `warm_models` 对用户零信息量；键名留 title 供排查。 */
+const TASK_CN: Record<string, string> = {
+  credits_refresh: '积分快照刷新',
+  custom_refresh: '自定义 API 扫描',
+  daily_checkin: '每日签到',
+  daily_growth: 'WB 日常任务',
+  free_refresh: '公益站刷新',
+  warm_models: '模型清单预热',
+  history_trim: '台账裁剪',
+  backup: '自动备份',
+};
+
 export function Overview({ health, platforms }: { health: Health | null; platforms: PlatformResponse | null }) {
   // 平台清单由框架层拉取一次传入（167KB，不该每次切页重取）；
   // 这里只拉轻量的账号与用量。
@@ -77,7 +91,7 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
   return (
     <>
       <div className="grid g4 mb-3">
-        <Kpi label="平台" value={`${enabled}/${platforms.total}`} hint="启用 / 声明式 spec + 自定义" />
+        <Kpi label="平台" value={`${enabled}/${platforms.total}`} hint={`启用 / 全部 spec · 可用 ${health?.platforms ?? '—'}`} />
         <Kpi label="账号" value={ac.data.total} hint="已导入 · secret 仅后台使用" />
         <Kpi label="累计调用" value={fmt(us.data.requests)} hint={`成功 ${fmt(us.data.success)} · 失败 ${fmt(us.data.failed)}`} />
         <Kpi label="成功率" value={`${rate}%`} tone={rate >= 90 ? 'ok' : rate >= 60 ? 'warn' : 'err'} hint={`tokens ${fmt(us.data.tokensIn)} in / ${fmt(us.data.tokensOut)} out`} />
@@ -89,15 +103,26 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
           <div className="mini"><b>存储</b><span className="pill ok">SQLite WAL</span></div>
           <div className="mini">
             <b>端点</b>
-            <code>/v1/chat/completions</code> · <code>/v1/messages</code> · <code>/v1/responses</code>
-            <br /><span className="faint">模型路由：清单匹配 或 <code>模型id@平台</code></span>
+            {/* ★ 原来三个端点用 `A</code> · <code>B` 串成一行，窄列里换行时
+                中间那个「·」会孤零零挂在行尾。改成一个一行；「模型路由」
+                那句太长，挪到卡片底部整宽显示（见下）。 */}
+            <div className="mono fs-xs">/v1/chat/completions</div>
+            <div className="mono fs-xs">/v1/messages</div>
+            <div className="mono fs-xs">/v1/responses</div>
           </div>
+        </div>
+        <div className="faint fs-xs mt-2">
+          模型路由：清单匹配，或 <code>模型id@平台</code>（也可以直接在模型链里写裸模型名）
         </div>
       </Card>
 
       <Card title="健康脉冲 · 近 48 小时" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>每格一小时 · 绿好红坏 · 悬停看数字</span>}>
         {pulse.error ? <div className="faint small">加载失败：{pulse.error}</div>
-          : !pulse.data || pulse.data.rows.length === 0 ? <div className="faint small">最近 48 小时没有调用记录</div>
+          : !pulse.data || pulse.data.rows.length === 0
+            ? <div className="empty-inline">
+                最近 48 小时没有调用记录。
+                {us.data.requests > 0 && <span className="faint"> 累计 {fmt(us.data.requests)} 次调用都发生在更早。</span>}
+              </div>
             : <Pulse rows={pulse.data.rows} hours={48} />}
       </Card>
 
@@ -111,13 +136,13 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
           </div>
           <div className="faint small mt-2">总耗时样本 {fmt(lat.samples)} 条 · 首字节样本 {fmt(ttfb.samples)} 条</div>
         </Card>
-        <Card title="平台用量排行">
+        <Card title="平台用量排行" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>条长 = 请求数 · 右边 = 成功率</span>}>
           {platRows.length === 0 ? <div className="faint small">还没有调用记录</div> : platRows.map((r) => {
             const denom = Math.max(1, r.requests - (r.cancelled ?? 0));
             const pct = Math.round((r.success / denom) * 100);
             return (
               <div className="rk-row" key={r.key}>
-                <span className="rk-name mono" title={r.key}>{r.key}</span>
+                <span className="rk-name mono" title={r.key}>{prettyKey(r.key)}</span>
                 <div className="rk-bar"><i style={{ width: `${Math.round((r.requests / maxReq) * 100)}%` }} /></div>
                 <span className="rk-num">{fmt(r.requests)}</span>
                 <span className={'pill ' + (pct >= 90 ? 'ok' : pct >= 60 ? 'warn' : 'err')}>{pct}%</span>
@@ -130,22 +155,30 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
       <Card title="后台任务" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>每天自动执行 · 签到与 WB 任务见「任务中心」</span>}>
         {tasks.length === 0 ? <div className="faint small">暂无任务记录</div> : (
           <div className="task-ledger">
-            {tasks.map(([k, t]) => (
-              <div className="task-ledger-row" key={k}>
-                <span className="mono">{k}</span>
-                <span className={t.err_runs > 0 && (t.last_ok_s_ago == null || (t.last_err_s_ago ?? 0) < t.last_ok_s_ago) ? 'c-err' : 'c-ok'}>
-                  成功 {t.ok_runs} · 失败 {t.err_runs}
-                </span>
-                <span className="faint small">{ago(t.last_ok_s_ago)}</span>
-                {t.last_ok && <span className="faint small task-msg" title={t.last_ok}>{t.last_ok}</span>}
-              </div>
-            ))}
+            {tasks.map(([k, t]) => {
+              const stale = t.last_ok_s_ago == null && t.last_err_s_ago == null;
+              return (
+                <div className="task-ledger-row" key={k} title={k}>
+                  <span className="task-name">{TASK_CN[k] ?? k}</span>
+                  <span className={t.err_runs > 0 && (t.last_ok_s_ago == null || (t.last_err_s_ago ?? 0) < t.last_ok_s_ago) ? 'c-err' : 'c-ok'}>
+                    成功 {t.ok_runs} · 失败 {t.err_runs}
+                  </span>
+                  <span className="faint small">{stale ? '还没跑过' : ago(t.last_ok_s_ago)}</span>
+                  {t.last_ok
+                    ? <span className="faint small task-msg" title={t.last_ok}>{t.last_ok}</span>
+                    : <span className="faint small">—</span>}
+                </div>
+              );
+            })}
           </div>
         )}
       </Card>
 
       {us.data.failed > 0 && (
-        <Note tone="warn">近 24 小时有 {fmt(us.data.failed)} 次失败。到「日志」页看失败根因，或到「接入源」页筛「有问题」。</Note>
+        <Note tone="warn">
+          近 24 小时有 {fmt(us.data.failed)} 次失败（成功率 {rate}%）。先到「接入源」页筛
+          「有问题」确认是哪些平台在失败；失败会按平台归因在「用量明细」里。
+        </Note>
       )}
     </>
   );
