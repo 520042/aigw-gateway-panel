@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Card, Note, Loading, ErrorBox, Empty, Pill, useAsync } from '../components';
 import {
   api,
+  type Account,
   type AccountsResponse,
   type CheckinConfigResponse,
   type TaskRecordsResponse,
@@ -196,7 +197,9 @@ const TABS: Array<[Tab, string]> = [
   ['accounts', '账号'],
 ];
 
-/** 活动按钮的后端动作名必须与 wb_checkin::GROWTH_ACTIONS 一致。 */
+/** 活动按钮的后端动作名必须与 wb_checkin::GROWTH_ACTIONS 一致。
+ *  图标统一用几何字符（▤ ◈ ✦ ✈ ↩ ◻ ▣）：原来「开盲盒」单独用了 🎁 彩色 emoji，
+ *  一排按钮里只有它是彩色的，看着像没对齐的贴纸。 */
 const ACTIVITIES: Array<[string, string, string]> = [
   ['growth_profile', '▤ 成长概览', '等级 / 完成任务 / 能量 / 活跃地图'],
   ['streak_redeem', '◈ 连登奖励兑换', '逐档兑换本月可领的连登奖励'],
@@ -204,7 +207,7 @@ const ACTIVITIES: Array<[string, string, string]> = [
   ['travel_depart', '✈ 猫猫旅行', '出发旅行，随后可领取奖励'],
   ['travel_claim', '↩ 领取旅行奖励', '领回已完成旅行的奖励'],
   ['buddy_quota', '◻ 盲盒配额', '查能量余额与可开盒次数'],
-  ['buddy_open', '🎁 开盲盒', '按可开次数最多连开 5 次'],
+  ['buddy_open', '▣ 开盲盒', '按可开次数最多连开 5 次'],
 ];
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -232,7 +235,17 @@ export function Tasks() {
   const cfg = useAsync<CheckinConfigResponse>(
     () => api.post('/api/checkin', { action: 'config' }), [],
   );
-  const [tab, setTab] = useState<Tab>('center');
+  // ★ 页签持久化：顶栏「刷新」是整页 reload，原来每次都弹回「签到中心」，
+  //   正在看签到记录的人一刷新就丢了位置。
+  const [tab, setTab] = useState<Tab>(() => {
+    try {
+      const v = localStorage.getItem('aigw-tasks-tab') || '';
+      return (['center', 'schedule', 'records', 'accounts'] as string[]).includes(v) ? (v as Tab) : 'center';
+    } catch { return 'center'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('aigw-tasks-tab', tab); } catch { /* 存不了只影响下次打开 */ }
+  }, [tab]);
   const [time, setTime] = useState('09:00');
   const [picked, setPicked] = useState<string[]>([]);
   const [msg, setMsg] = useState('');
@@ -486,7 +499,7 @@ export function Tasks() {
         />
       )}
 
-      {tab === 'records' && <RecordsTab />}
+      {tab === 'records' && <RecordsTab accounts={ac.data.rows} />}
 
       {tab === 'accounts' && <AccountsTab ac={ac} />}
 
@@ -500,6 +513,7 @@ function AccountsTab({ ac }: { ac: ReturnType<typeof useAsync<AccountsResponse>>
   const fmt = (n: number) => Number(n || 0).toLocaleString('en-US');
   const [acctBusy, setAcctBusy] = useState(false);
   const [acctMsg, setAcctMsg] = useState('');
+  const [acctQ, setAcctQ] = useState('');
 
   /** 账号级写操作（rename / set_limit / delete / balance）。
    *  ★ 后端这四个 action 一直有，界面此前只接了 verify。 */
@@ -545,12 +559,22 @@ function AccountsTab({ ac }: { ac: ReturnType<typeof useAsync<AccountsResponse>>
 
   if (ac.error) return <ErrorBox message={ac.error} onRetry={ac.reload} />;
   if (!ac.data) return <Loading />;
+  const aq = acctQ.trim().toLowerCase();
+  const shown = aq
+    ? ac.data.rows.filter((a) => `${a.name} ${a.platform} ${a.platform_name}`.toLowerCase().includes(aq))
+    : ac.data.rows;
   return (
     <div className="wb-tab-body">
       <div className="wb-set-head">
         <b>账号凭据</b>
-        <span className="faint fs-xs">{ac.data.rows.length} 个账号 · secret 仅后台使用</span>
-        <button className="btn sm gh" style={{ marginLeft: 'auto' }} disabled={ac.loading}
+        <span className="faint fs-xs" style={{ marginRight: 0 }}>
+          {aq ? `匹配 ${shown.length} / ${ac.data.rows.length}` : `${ac.data.rows.length} 个账号`} · secret 仅后台使用
+        </span>
+        {ac.data.rows.length > 5 && (
+          <input className="q" style={{ width: 190, marginLeft: 'auto' }} placeholder="搜账号名 / 平台…"
+            value={acctQ} onChange={(e) => setAcctQ(e.target.value)} />
+        )}
+        <button className="btn sm gh" disabled={ac.loading}
           onClick={async () => {
             try { await api.post('/api/accounts', { action: 'verify' }); ac.reload(); } catch { /* 静默 */ }
           }}>
@@ -566,7 +590,8 @@ function AccountsTab({ ac }: { ac: ReturnType<typeof useAsync<AccountsResponse>>
               <tr><th>账号名</th><th>平台</th><th>凭据</th><th>状态</th><th>健康</th><th>积分</th><th>操作</th></tr>
             </thead>
             <tbody>
-              {ac.data.rows.map((a) => (
+              {shown.length === 0 && <tr><td colSpan={7}><Empty>没有匹配的账号</Empty></td></tr>}
+              {shown.map((a) => (
                 <tr key={a.id}>
                   {/* 账号 id 只在排查时用得上；原先占一整行的第二行，
                       看起来像一串乱码。收进 title，位宽还给真正要读的列。 */}
@@ -713,15 +738,23 @@ const TASK_LABEL: Record<string, string> = {
 };
 const taskLabel = (t: string) => TASK_LABEL[t] ?? t;
 
-function RecordRow({ r }: { r: TaskRecord }) {
+function RecordRow({ r, accounts }: { r: TaskRecord; accounts: Account[] }) {
   const steps = r.steps ?? [];
+  // 台账里的 account 是账号 id（有时是截断的前缀），平台是平台 id。
+  // 直接铺出来就是一串 16 位十六进制，谁都认不出是哪个号。
+  const acc = accounts.find((a) => a.id === r.account || a.id.startsWith(r.account) || r.account.startsWith(a.id));
   return (
     <>
       <tr className="wb-record-row">
         <td className="mono fs-xs">{timeText(r.ts)}</td>
         <td title={r.task}>{taskLabel(r.task)}</td>
         <td>{SOURCE_LABEL[r.source] ?? r.source}</td>
-        <td><b>{r.account || '—'}</b><br /><span className="faint mono fs-xs">{r.platform || '—'}</span></td>
+        {/* 单行显示：两行结构让每行 44px，18 条就吃掉整屏；
+            平台名做副信息跟在后面，行高回到 30px，一屏能多看 8 条。 */}
+        <td title={`${r.account || ''} · ${r.platform || ''}`}>
+          <b>{acc?.name || r.account || '—'}</b>
+          <span className="faint fs-xs"> {acc?.platform_name || r.platform || ''}</span>
+        </td>
         <td><span className={'pill ' + (r.outcome === 'success' ? 'ok' : r.outcome === 'already' ? 'brand' : 'err')}>
           {OUTCOME_LABEL[r.outcome] ?? r.outcome}
         </span></td>
@@ -746,7 +779,7 @@ function RecordRow({ r }: { r: TaskRecord }) {
   );
 }
 
-function RecordsTab() {
+function RecordsTab({ accounts }: { accounts: Account[] }) {
   // ★ 默认 7 天：签到是每日动作，默认「全部时间」会把 289 条历史全铺出来，
   //   首屏 15 页里绝大多数是上周的重复行。
   const [range, setRange] = useState('7');
@@ -755,6 +788,7 @@ function RecordsTab() {
   const [q, setQ] = useState('');
   const [page, setPage] = useState(0);
   const [draft, setDraft] = useState('');
+  const [jump, setJump] = useState('');
   const pageSize = 20;
 
   useEffect(() => {
@@ -778,6 +812,12 @@ function RecordsTab() {
   const rows = rec.data?.rows ?? [];
   const total = rec.data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / pageSize));
+  const goJump = () => {
+    const n = Number(jump);
+    if (!Number.isFinite(n) || n < 1) { setJump(''); return; }
+    setPage(Math.min(pages, Math.floor(n)) - 1);
+    setJump('');
+  };
 
   return (
     <div className="wb-tab-body">
@@ -819,7 +859,7 @@ function RecordsTab() {
             <tbody>
               {rows.length === 0 && <tr><td colSpan={6}><Empty>没有符合条件的执行记录</Empty></td></tr>}
               {rows.map((r: TaskRecord, i: number) => (
-                <RecordRow key={`${r.ts}-${r.account}-${i}`} r={r} />
+                <RecordRow key={`${r.ts}-${r.account}-${i}`} r={r} accounts={accounts} />
               ))}
             </tbody>
           </table>
@@ -829,6 +869,14 @@ function RecordsTab() {
       <div className="wb-rec-foot">
         <span className="faint fs-xs">第 {page + 1} / {pages} 页 · 每页 {pageSize} 条</span>
         <button className="btn sm gh" disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>上一页</button>
+        {/* 15 页时只能一页页点，加个直达 */}
+        <span className="row" style={{ gap: 4, margin: 0 }}>
+          <input className="q mono" type="number" min={1} max={pages} value={jump}
+            style={{ width: 64 }} placeholder="页"
+            onChange={(e) => setJump(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') goJump(); }} />
+          <button className="btn sm gh" onClick={goJump}>跳转</button>
+        </span>
         <button className="btn sm gh" disabled={page + 1 >= pages} onClick={() => setPage((p) => p + 1)}>下一页</button>
       </div>
     </div>

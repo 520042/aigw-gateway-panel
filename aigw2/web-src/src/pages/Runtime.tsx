@@ -117,7 +117,7 @@ export function Runtime() {
 
   return (
     <>
-      <Card title="运行配置" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>改完立即生效</span>}>
+      <Card title="并发与限流" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>改完立即生效</span>}>
         <div className="runtime-grid">
           {(data.cfg.fields ?? []).map((f) => {
             const meta = FIELD[f.name];
@@ -151,10 +151,11 @@ export function Runtime() {
       </Card>
 
       <PipelineCard />
-      <ProxyCard />
       <CombosCard />
       <PoolCard />
       <KeysCard />
+      {/* 出站代理改得最少、但影响所有上游，放最后 */}
+      <ProxyCard />
     </>
   );
 }

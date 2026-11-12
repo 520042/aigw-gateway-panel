@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Card, Kpi, Pill, Note, Loading } from '../components';
+import { Card, Kpi, Pill, Note, Loading, ErrorBox } from '../components';
 import { api, type Platform, type PlatformResponse } from '../api';
 
 /** 接入能力表：与旧版 ACCESS 同口径，但作为纯数据放在框架层，界面从它派生。 */
@@ -75,15 +75,21 @@ function srcGroupOf(p: Platform): SrcGroup {
   return 'client';
 }
 
-export function Sources({ platforms, refresh }: { platforms: PlatformResponse | null; refresh: () => void }) {
+export function Sources({ platforms, error, refresh }: {
+  platforms: PlatformResponse | null; error?: string; refresh: () => void;
+}) {
   // 平台清单由框架层拉取一次传入；保存凭据/导入后调 refresh() 让框架层重取。
   const [filter, setFilter] = useState<Filter>('all');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState<string | null>(null);
   // 快速开始引导：首次访问展开，之后默认收起（老用户每次划过它是负担）。
+  // ★ 窄屏（<1080，侧栏已竖排、主区只剩 800px）首访也不展开：
+  //   它在这个宽度要占 2×2 约 340px 高，把真正的列表+详情推到一屏之外。
   const [showHelp, setShowHelp] = useState(() => {
-    try { return localStorage.getItem('aigw-src-help-seen') === null; }
-    catch { return true; }
+    try {
+      if (localStorage.getItem('aigw-src-help-seen') !== null) return false;
+      return window.innerWidth >= 1080;
+    } catch { return true; }
   });
   const toggleHelp = () => {
     setShowHelp((v) => {
@@ -109,6 +115,16 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
   const groupIsOpen = (g: string): boolean => {
     if (userToggled[g] !== undefined) return userToggled[g];
     return GROUP_META[g as SrcGroup]?.open ?? true;
+  };
+
+  // ★ 窄屏（≤1080）列表与详情是上下堆叠：点一个平台，详情在列表下方一屏之外，
+  //   用户看不到任何反馈。这里点完自动把详情滚进视野。
+  const detailRef = useRef<HTMLDivElement>(null);
+  const pick = (id: string) => {
+    setSel(id);
+    if (window.innerWidth <= 1080) {
+      window.setTimeout(() => detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+    }
   };
 
   const data = platforms;
@@ -137,7 +153,7 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
   const enabledN = data?.rows.filter((p) => p.enabled).length ?? 0;
   const current = rows.find((p) => p.id === sel) ?? rows[0] ?? null;
 
-  if (!data) return <Loading />;
+  if (!data) return error ? <ErrorBox message={error} onRetry={refresh} /> : <Loading />;
 
   const groups: Array<[AccessKind, string, string]> = [
     ['one_click', '一键导入', '本机客户端已登录，点一下自动读凭据'],
@@ -156,7 +172,10 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
         <Kpi label="近 24h 有问题" value={badN} tone={badN ? 'err' : undefined} hint="台账里有失败记录" />
       </div>
 
-      {showHelp && (
+      {/* ★ 搜索/筛选生效时收起「快速开始」：它列的是全部可自动接入的平台，
+          和下面的筛选结果对不上（搜 zzzzz 时下面 0 条、上面还列着 26 个），
+          看着像筛选没生效。 */}
+      {showHelp && !q.trim() && filter === 'all' && (
         <Card title="快速开始 · 选一个能自动接入的" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>共 {autoN} 个，不用自己找凭据</span>}>
           <div className="onboard-grid">
             {groups.filter(([k]) => autoByKind(k).length).map(([k, title, desc]) => (
@@ -167,7 +186,7 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
                 </div>
                 <div className="onboard-list">
                   {autoByKind(k).map((p) => (
-                    <button className="onboard-item" key={p.id} title={accessOf(p).way} onClick={() => setSel(p.id)}>
+                    <button className="onboard-item" key={p.id} title={accessOf(p).way} onClick={() => pick(p.id)}>
                       {p.name}
                       {p.accounts_n > 0 && <span className="faint fs-xs">已接入 {p.accounts_n}</span>}
                     </button>
@@ -233,7 +252,7 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
                         key={p.id}
                         className={'src-row static' + (current?.id === p.id ? ' on' : '')}
                         title={`${p.name} · ${p.id} · ${a.way}`}
-                        onClick={() => setSel(p.id)}
+                        onClick={() => pick(p.id)}
                       >
                         <span className={'dot ' + (p.anon ? 'on' : p.accounts_n > 0 ? 'ok' : 'off')} />
                         <span className="nm">{p.name}</span>
@@ -248,8 +267,19 @@ export function Sources({ platforms, refresh }: { platforms: PlatformResponse | 
           </div>
         </div>
 
-        <div className="src-detail-col">
-          {current ? <PlatformDetail key={current.id} p={current} disabledModels={disabledModels} onChanged={refresh} /> : <div className="empty">没有匹配的平台</div>}
+        <div className="src-detail-col" ref={detailRef}>
+          {current
+            ? <PlatformDetail key={current.id} p={current} disabledModels={disabledModels} onChanged={refresh} />
+            : (
+              <div className="empty">
+                <div>没有匹配的平台</div>
+                {(q || filter !== 'all') && (
+                  <button className="btn sm gh mt-2" onClick={() => { setQ(''); setFilter('all'); }}>
+                    清空搜索与筛选
+                  </button>
+                )}
+              </div>
+            )}
         </div>
       </div>
     </>
@@ -400,6 +430,8 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
 
       {(p.accounts?.length ?? 0) > 0 && (
         <Card title={`账号 · ${p.accounts!.length}`}>
+          {/* 窄屏（1024）下四列会顶到卡片边，包一层横向滚动 */}
+          <div className="table-scroll">
           <table>
             <thead>
               <tr><th>账号</th><th>状态</th><th>健康</th><th>积分</th></tr>
@@ -419,6 +451,7 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
               ))}
             </tbody>
           </table>
+          </div>
         </Card>
       )}
 

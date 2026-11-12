@@ -57,22 +57,26 @@
 .detail-meta { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-sm); color: var(--fg-muted); }
 .model-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 /* 可点击的模型芯片：启用=正常芯片，停用=划线灰芯片。 */
+/* ★ 2026-11-12 第二版：原来「启用」是品牌蓝实底、20 多个块铺满整张卡，
+   一眼看过去像「全部被选中」，而真正需要注意的「已停用」反而是低调灰色。
+   反过来：正常态用中性色（安静），停用态用错误色（醒目）。 */
 .model-chip {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 2px 9px; border-radius: var(--r-full);
-  border: 1px solid var(--brand-line);
-  background: var(--brand-soft); color: var(--brand);
+  border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--fg-muted);
   font-family: var(--mono); font-size: var(--fs-xs);
   cursor: pointer;
   transition: background-color var(--dur) var(--ease),
               border-color var(--dur) var(--ease),
               color var(--dur) var(--ease);
 }
-.model-chip:hover { border-color: var(--brand); }
+.model-chip:hover { border-color: var(--brand); color: var(--brand); }
 .model-chip.off {
-  background: var(--surface-2); color: var(--fg-subtle);
-  border-color: var(--border); text-decoration: line-through;
+  background: var(--err-soft); color: var(--err);
+  border-color: var(--err-line); text-decoration: line-through;
 }
+.model-chip.off:hover { border-color: var(--err); color: var(--err); }
 .model-chip .chip-x {
   font-size: 10px; font-weight: 600;
   color: var(--err); text-decoration: none;
@@ -258,3 +262,73 @@
 
 /* 列表滚动槽常驻：内容多少变化时右侧不跳，滚动条位置也稳定 */
 .src-list-vp { scrollbar-gutter: stable; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   2026-11-12 第二轮：窄屏与可读性
+   ───────────────────────────────────────────────────────────────────────
+   1024×768（常见笔记本）实测：
+   ① 四张 KPI 排成 3+1，第四张孤零零占 1/3 宽
+   ② 日志卡标题被挤成两行（「运行日志 命中」/「300 行」）
+   ③ 开关关闭态几乎是白底，看不出是可点的滑轨
+   ④ 侧栏分组标签 10px、模型块 19px 高，太小
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ① 中等屏两列对称，别留一张孤儿卡 */
+@media (max-width: 1120px) {
+  .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .g4 { grid-template-columns: 1fr; }
+}
+
+/* ② 卡片标题永不折行；右侧 extra 在窄屏换到第二行 */
+@media (max-width: 1200px) {
+  .card-t { flex-wrap: wrap; row-gap: var(--sp-2); }
+  .card-t > :first-child { white-space: nowrap; }
+}
+
+/* ③ 开关关闭态给足对比：浅灰底 + 深色轨道容易看成「禁用」 */
+.tog i { background: var(--border-strong); border-color: var(--border-strong); }
+.tog.on i { background: var(--brand); border-color: var(--brand); }
+
+/* ④ 小字回正一档 */
+.nav-group-label { font-size: 11px; letter-spacing: .06em; }
+.ac-tag { font-size: 10.5px; }
+.model-chip { min-height: 24px; padding: 2px 8px; }
+.log-row { font-size: 11.5px; }
+
+/* ⑤ 运行配置表单收窄：1024 下 label 与输入框隔了 500px，扫视要横跳 */
+.runtime-grid { max-width: 660px; }
+
+/* ⑥ 窄屏下接入源不再吸顶，列表也让出高度给详情 */
+@media (max-width: 1080px) {
+  .src-list-col { position: static; max-height: none; }
+  .src-list-vp { max-height: 46vh; }
+}
+
+/* ── 键盘焦点：浏览器默认是 1px 近黑色 outline，暗色主题下几乎看不见 ────── */
+:where(button, a, input, select, textarea, summary, [role="button"]):focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* 操作反馈条别藏在顶栏后面：sticky 的 top 要让出 56px 的顶栏 */
+.wb-msg { top: 64px; }
+
+/* 窄屏把顶栏副标题收起来，标题和右侧控件才有呼吸空间 */
+@media (max-width: 1080px) {
+  .topbar-ttl .sub { display: none; }
+}
+
+/* 加载态：文字前一个小转圈（纯 CSS，不引资源） */
+.loading-spin { display: inline-flex; align-items: center; gap: 8px; }
+.loading-spin::before {
+  content: ""; width: 12px; height: 12px; flex: none;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .loading-spin::before { animation-duration: 2s; } }

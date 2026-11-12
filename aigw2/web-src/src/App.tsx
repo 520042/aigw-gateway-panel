@@ -92,6 +92,9 @@ export function App() {
   //   每次切视图整页卸载重建的话，两个页面来回切一次就拉两遍。
   //   放这里取一次传下去；子页仍可 reload（来自家机制）。
   const [platforms, setPlatforms] = useState<PlatformResponse | null>(null);
+  // ★ 拉清单失败原先被 .catch(() => {}) 吞掉：子页拿到 null 就一直转「加载中…」，
+  //   永远等不到东西，也不说为什么。这里留一句给页面显示。
+  const [platformsErr, setPlatformsErr] = useState('');
   // ★ 默认亮色（2026-11-06）：参考项目的设计语言是浅色专业控制台；
   //   'auto' 跟随系统在深色模式的 Windows 上会落进暗色，观感不如参考。
   //   index.html 的 FOUC 脚本已同步此默认。
@@ -106,13 +109,18 @@ export function App() {
   //   清单提升到框架层后，子页自己没有数据源，刷新必须走这个句柄。
   const refreshPlatforms = () => {
     api.get<PlatformResponse>('/api/platforms')
-      .then((d) => setPlatforms(d))
-      .catch(() => {});
+      .then((d) => { setPlatforms(d); setPlatformsErr(''); })
+      .catch((e: unknown) => setPlatformsErr(e instanceof Error ? e.message : String(e)));
   };
 
   useEffect(() => {
     refreshPlatforms();
   }, []);
+
+  useEffect(() => {
+    // 标签页标题跟着视图走：开三四个标签时能一眼分辨（原来永远叫「控制台」）
+    document.title = `${TITLES[view].title} · aigw v2`;
+  }, [view]);
 
   useEffect(() => {
     const onHash = () => setView(viewFromHash());
@@ -196,7 +204,7 @@ export function App() {
 
         <div className="view-wrap">
           {view === 'overview' && <Overview health={health} platforms={platforms} />}
-          {view === 'sources' && <Sources platforms={platforms} refresh={refreshPlatforms} />}
+          {view === 'sources' && <Sources platforms={platforms} error={platformsErr} refresh={refreshPlatforms} />}
           {view === 'tasks' && <Tasks />}
           {view === 'usage' && <UsagePage />}
           {view === 'logs' && <Logs />}

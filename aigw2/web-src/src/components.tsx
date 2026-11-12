@@ -40,7 +40,8 @@ export function Empty({ children }: { children: ReactNode }) {
 }
 
 export function Loading({ label = '加载中…' }: { label?: string }) {
-  return <div className="faint loading">{label}</div>;
+  // 只有文字时，慢接口看起来像卡死了；加个转圈让「在动」这件事可见。
+  return <div className="faint loading loading-spin">{label}</div>;
 }
 
 export function ErrorBox({ message, onRetry }: { message: string; onRetry?: () => void }) {
