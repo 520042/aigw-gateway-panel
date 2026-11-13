@@ -152,7 +152,7 @@ export function About() {
 
       <Card title="使用说明">
         <Note>
-          ① 在「接入源」页选平台并登录 ② 客户端 <code>base_url</code> 填 <code>{location.origin}/v1</code>、<code>api_key</code> 填 <code>admin</code>
+          ① 在「接入源」页选平台并登录 ② 客户端 <code>base_url</code> 填 <code>{location.origin}/v1</code>、<code>api_key</code> 填「运行配置 → 访问密钥」里创建的密钥
           ③ <code>model</code> 填 <code>模型id@平台</code> 或清单内模型。<br />
           多模型链：<code>模型名@平台</code> 按顺序组成候选链，前一个挂了自动换下一个（在「运行配置 → 模型链」里管理）。<br />
           面板只监听本机回环；凭据落盘用 DPAPI 加密，日志里不会写入 token。

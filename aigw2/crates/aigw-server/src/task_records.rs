@@ -83,7 +83,8 @@ impl TaskRecord {
 
 /// 上游报错可能回显 Authorization / Cookie 或长 token：台账只留人能读懂的结论，
 /// 命中敏感标记时整段隐去，长串也按「已隐去」处理，绝不把原文写进面板数据。
-fn safe_detail(raw: &str) -> String {
+/// ★ pub(crate)：车道探针（/api/probe-lanes）的失败原因同样过这里脱敏。
+pub(crate) fn safe_detail(raw: &str) -> String {
     let flat = raw.replace(['\r', '\n'], " ").trim().to_string();
     let low = flat.to_ascii_lowercase();
     if ["bearer ", "authorization", "cookie", "set-cookie", "api_key", "apikey", "sk-", "x-token"]

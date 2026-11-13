@@ -196,7 +196,9 @@ export function Sources({ platforms, error, refresh }: {
             ))}
           </div>
           <Note>
-            接入三步：① 上面点一个平台，在右侧完成登录 ② 客户端 <code>base_url</code> 填 <code>{location.origin}/v1</code>、<code>api_key</code> 填 <code>admin</code> ③ <code>model</code> 填 <code>模型id@平台</code> 或清单内模型。
+            {/* ★ api_key 不再写死 admin：密钥在「运行配置 → 访问密钥」里
+                创建/轮换，写死一个值会跟着密钥体系漂移（实测 admin 已无效）。 */}
+            接入三步：① 上面点一个平台，在右侧完成登录 ② 客户端 <code>base_url</code> 填 <code>{location.origin}/v1</code>、<code>api_key</code> 填「运行配置 → 访问密钥」里的密钥 ③ <code>model</code> 填 <code>模型id@平台</code> 或清单内模型。
           </Note>
         </Card>
       )}

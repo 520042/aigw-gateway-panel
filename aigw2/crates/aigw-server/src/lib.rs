@@ -393,6 +393,8 @@ pub fn build_app(st: AppState) -> Router {
         // 完整备份（含凭据）：前端「⬇ 备份数据」用它，否则导出的备份恢复不回来
         .route("/api/backup/export", post(backup_export_full))
         .route("/api/update-check", get(update_check))
+        // 免密车道实时探针：管理面（/api 鉴权），显式点击才打上游。
+        .route("/api/probe-lanes", post(probe_lanes))
         .route("/v1/models", get(models))
         // 额度摘要（只读，与 /v1/models 同一套 key 鉴权）：
         // 让第三方客户端能先问「还有多少额度」再决定跑不跑批。
@@ -450,6 +452,108 @@ pub fn build_app(st: AppState) -> Router {
         // 门禁层：Host/Origin 白名单 + /api/* 令牌（见 `guard`）
         .layer(middleware::from_fn_with_state(st.clone(), guard))
         .with_state(st)
+}
+
+/// 免密车道实时探针（POST /api/probe-lanes）。
+///
+/// ★ 2026-11-14 借鉴 OmniRoute 免费池的诚实口径 + CliRelay「健康结论要能
+///   解释每一项检查」：脉冲矩阵是**小时级历史**，回答不了「这条车道现在
+///   能不能用」——zen 池的 IP 额度说没就没（429 带换出口提示），用户要的
+///   是当场打一发看结果。
+///
+/// 行为：对每条 `auth = "anon"` 且启用的车道，取 spec 首个模型，经
+/// `chat_core` 发 max_tokens=16 的真实请求，如实回报 ok / 延迟 / 失败原因。
+/// · 顺序执行：并发会同时放大上游 429，也让延迟读数失真。
+/// · 每次探测消耗少量上游额度——**不做自动轮询**，面板必须显式点击。
+/// · 失败原因统一过 task_records::safe_detail 脱敏（上游错误体可能回显凭据）。
+async fn probe_lanes(State(st): State<AppState>) -> Json<Value> {
+    let lanes: Vec<ProviderSpec> = st
+        .all_specs()
+        .into_iter()
+        .filter(|s| s.enabled && s.auth == AuthKind::Anon)
+        .collect();
+    let mut results: Vec<Value> = Vec::with_capacity(lanes.len());
+    for spec in &lanes {
+        let Some(model) = spec.models.first().cloned() else {
+            results.push(json!({
+                "platform": spec.id, "name": spec.name, "ok": false,
+                "message": "spec 没有可用模型",
+            }));
+            continue;
+        };
+        let body = json!({
+            "model": format!("{model}@{}", spec.id),
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 16,
+            "stream": false,
+        });
+        let t0 = std::time::Instant::now();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            chat_core(&st, body),
+        )
+        .await;
+        let ms = t0.elapsed().as_millis() as u64;
+        let row = match out {
+            Err(_) => json!({
+                "platform": spec.id, "name": spec.name, "model": model,
+                "ok": false, "ms": ms, "message": "45s 超时",
+            }),
+            Ok(Ok(ChatCoreOut::Json(v))) => {
+                if let Some(err) = v.get("error") {
+                    let msg = err.get("message").and_then(|x| x.as_str())
+                        .or_else(|| err.get("hint").and_then(|x| x.as_str()))
+                        .unwrap_or("上游返回错误信封");
+                    json!({
+                        "platform": spec.id, "name": spec.name, "model": model,
+                        "ok": false, "ms": ms,
+                        "code": err.get("code").cloned().unwrap_or(Value::Null),
+                        "message": task_records::safe_detail(msg),
+                    })
+                } else {
+                    let content = v
+                        .pointer("/choices/0/message/content")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    json!({
+                        "platform": spec.id, "name": spec.name, "model": model,
+                        "ok": true, "ms": ms,
+                        "reply": content.chars().take(24).collect::<String>(),
+                    })
+                }
+            }
+            Ok(Ok(ChatCoreOut::Stream(_))) => json!({
+                "platform": spec.id, "name": spec.name, "model": model,
+                "ok": false, "ms": ms, "message": "意外返回流式（探针恒为非流式）",
+            }),
+            Ok(Err(ChatCoreErr::Local { status, message, code, .. })) => json!({
+                "platform": spec.id, "name": spec.name, "model": model,
+                "ok": false, "ms": ms, "code": code,
+                "message": task_records::safe_detail(&format!("HTTP {status}: {message}")),
+            }),
+            Ok(Err(ChatCoreErr::Upstream { status, body, hint, .. })) => {
+                let mut msg = format!("HTTP {status}: {}", body.chars().take(120).collect::<String>());
+                if let Some(h) = hint {
+                    if !h.trim().is_empty() {
+                        msg.push_str(&format!("（{h}）"));
+                    }
+                }
+                json!({
+                    "platform": spec.id, "name": spec.name, "model": model,
+                    "ok": false, "ms": ms,
+                    "message": task_records::safe_detail(&msg),
+                })
+            }
+        };
+        results.push(row);
+    }
+    Json(json!({
+        "ok": true,
+        "probed_at": aigw_store::now_unix(),
+        "results": results,
+    }))
 }
 
 /// 平台清单（声明式 spec 快照；含自定义 API 动态并入；base_url 含占位符时标注）。
@@ -7004,6 +7108,47 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         let body = body_string(res).await;
         assert!(body.contains("未实现的端点"), "body={body}");
+    }
+
+    #[tokio::test]
+    async fn probe_lanes_covers_only_anon_specs_and_reports_each() {
+        // 免密车道探针：只探 auth=anon 的启用车道；每条车道一行，
+        // 死上游如实报 ok:false + 原因（测试环境 127.0.0.1:1 必然失败），
+        // 无模型的 spec 报「没有可用模型」；非 anon 平台不得出现在结果里。
+        let mut dead = spec_for("http://127.0.0.1:1");
+        dead.models = vec!["test-model".into()];
+        let mut empty = dead.clone();
+        empty.id = "empty-lane".into();
+        empty.models = vec![];
+        let mut keyed = spec_for("http://127.0.0.1:1");
+        keyed.id = "keyed".into();
+        keyed.auth = aigw_registry::AuthKind::ApiKey;
+        let app = build_app(state(vec![dead, empty, keyed]));
+        let res = app
+            .oneshot(
+                Request::post("/api/probe-lanes")
+                    .header("host", "127.0.0.1:8800")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: Value = serde_json::from_str(&body_string(res).await).unwrap();
+        assert_eq!(v["ok"], json!(true), "{v}");
+        let rows = v["results"].as_array().expect("results 数组");
+        let plats: Vec<&str> = rows.iter().map(|r| r["platform"].as_str().unwrap_or("")).collect();
+        assert!(plats.contains(&"mock"), "anon 车道必须在列：{plats:?}");
+        assert!(plats.contains(&"empty-lane"), "{plats:?}");
+        assert!(!plats.contains(&"keyed"), "非 anon 平台不该被探：{plats:?}");
+        for r in rows {
+            assert!(r["ok"].is_boolean(), "{r}");
+            assert!(r["message"].is_string() || r["reply"].is_string(), "{r}");
+        }
+        let dead_row = rows.iter().find(|r| r["platform"] == "mock").unwrap();
+        assert_eq!(dead_row["ok"], json!(false), "死上游必须如实报失败：{dead_row}");
+        assert!(dead_row["ms"].as_u64().is_some(), "{dead_row}");
     }
 
     #[tokio::test]

@@ -1,0 +1,32 @@
+# LLM7.io 免密车道 —— M5 新增（2026-11-14）
+# 一手来源：GitHub 免费端点普查 + 本机直测（2026-11-14 01:50-02:06，全部一手 curl）：
+#   · 无 Authorization 头 → HTTP 200（与 anon-ovh 同款「无头」车道；Bearer 任意值也可）
+#   · POST /v1/chat/completions 实测出真实回复（DeepSeek-V4-Flash-0731 / codestral-latest）
+#   · GET /v1/models 公开，71 个模型带 tier 与 availability_last_hour_percent
+# 计费性质：官方免费档（tier="turbo"），tier="pro" 的 claude/gemini/gpt 全部付费墙 ——
+#   因此 models_policy 用 static 手工圈定免费档，**绝不能用 live**：
+#   live 会把 68 个付费模型并进路由，用户打到就是 402/403。
+# 免费档实测（2026-11-14）：
+#   · DeepSeek-V4-Flash-0731   → 200，98.6% 一小时可用率
+#   · codestral-latest         → 200，本机直测出「OK」
+#   · GLM-5.3-Flash            → 普查代理两次超时（官方可用率 71.96%），先不入清单；
+#                                上游若稳定可手工加回
+id = "anon-llm7"
+name = "LLM7.io（免 Key 匿名）"
+enabled = true
+region = "intl"
+
+auth = "anon"
+base_url = "https://api.llm7.io/v1"
+chat_path = "/chat/completions"
+format = "openai"
+
+# 静态清单 = 上游免费档（tier turbo）实测可用子集。
+models = [
+    "DeepSeek-V4-Flash-0731",
+    "codestral-latest",
+]
+models_policy = "static"
+stream_dialect = "sse_delta"
+
+notes = "免 Key 免注册（无头车道：不带 Authorization 即可，多带反而多余）。2026-11-14 实测两个免费模型可用；付费模型（tier pro）已用 static 策略隔离在路由之外。上游 /v1/models 带 availability_last_hour_percent 可查健康。无公开 RPM 限额文档，低频使用未见 429。"

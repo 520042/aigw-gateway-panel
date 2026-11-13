@@ -1,4 +1,5 @@
-import { Kpi, Card, Note, Loading, ErrorBox, useAsync } from '../components';
+import { useState } from 'react';
+import { Kpi, Card, Note, Loading, ErrorBox, Pill, useAsync } from '../components';
 import { api, type Usage, type AccountsResponse, type Health, type PlatformResponse } from '../api';
 
 const fmt = (n: number) => Number(n || 0).toLocaleString('en-US');
@@ -103,8 +104,7 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
       </div>
 
       <Card title="运行状态">
-        <div className="mini-grid">
-          <div className="mini"><b>{health?.service ?? 'aigw'} v{health?.version ?? '—'}</b><span className="pill ok">{health?.milestone ?? '—'}</span></div>
+        <div className="mini-grid">          <div className="mini"><b>{health?.service ?? 'aigw'} v{health?.version ?? '—'}</b><span className="pill ok">{health?.milestone ?? '—'}</span></div>
           <div className="mini"><b>存储</b><span className="pill ok">SQLite WAL</span></div>
           <div className="mini">
             <b>端点</b>
@@ -130,6 +130,8 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
               </div>
             : <Pulse rows={pulse.data.rows} hours={48} />}
       </Card>
+
+      <LaneProbeCard />
 
       <div className="grid g2 mt-3">
         <Card title="延迟分位">
@@ -186,5 +188,71 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
         </Note>
       )}
     </>
+  );
+}
+
+/** 免密车道实时探针（借鉴 OmniRoute 免费池诚实口径 + CliRelay 健康解释）。
+ *
+ * ★ 脉冲矩阵是小时级历史，回答不了「这条车道**现在**能不能用」——
+ *   zen 池的 IP 额度说没就没（429 带换出口提示）。这个卡当场打一发
+ *   真实请求（每条 max_tokens=16），把 ok / 延迟 / 失败原因摆在眼前。
+ *   不自动轮询：探测消耗上游额度，必须显式点击。 */
+interface ProbeRow {
+  platform: string; name: string; model?: string;
+  ok: boolean; ms?: number; code?: string | null;
+  message?: string; reply?: string;
+}
+interface ProbeResp { ok: boolean; probed_at: number; results: ProbeRow[] }
+
+function LaneProbeCard() {
+  const [resp, setResp] = useState<ProbeResp | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const probe = async () => {
+    setBusy(true);
+    setErr('');
+    try {
+      setResp(await api.post('/api/probe-lanes', {}) as ProbeResp);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally { setBusy(false); }
+  };
+
+  const okN = resp?.results.filter((r) => r.ok).length ?? 0;
+
+  return (
+    <Card
+      title="免密车道 · 实时探针"
+      extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>
+        {resp ? `上次探测 ${new Date(resp.probed_at * 1000).toLocaleTimeString('zh-CN')} · 可用 ${okN}/${resp.results.length}` : '未探测 · 脉冲矩阵看历史，这里看现在'}
+      </span>}
+    >
+      <div className="row">
+        <button className="btn pri" disabled={busy} onClick={probe}>
+          {busy ? '探测中（逐条打真实请求）…' : '⟳ 立即探测'}
+        </button>
+        <span className="faint fs-xs">
+          每条车道发一次 max_tokens=16 的真实请求 · 消耗少量上游额度 · 不自动轮询
+        </span>
+      </div>
+      {err && <Note tone="err">探测失败：{err}</Note>}
+      {resp && (
+        <div className="lane-probe-rows mt-2">
+          {resp.results.map((r) => (
+            <div className="lane-probe-row" key={r.platform}>
+              <Pill tone={r.ok ? 'ok' : 'err'}>{r.ok ? '✓ 可用' : '✗ 不可用'}</Pill>
+              <b>{r.name}</b>
+              {r.model && <span className="faint mono fs-xs">{r.model}</span>}
+              <span className="lane-probe-msg">
+                {r.ok
+                  ? <>延迟 <b>{ms(r.ms)}</b>{r.reply && <> · 回包 <span className="mono">「{r.reply}」</span></>}</>
+                  : <span className="c-err">{r.message || '失败'}</span>}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }

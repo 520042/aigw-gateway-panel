@@ -387,6 +387,15 @@ tbody tr:hover td { background: var(--surface-3); }
 }
 .pool-row:last-child { border-bottom: 0; }
 
+/* 免密车道实时探针（总览页）：一行一条车道，右侧结论 */
+.lane-probe-rows { display: flex; flex-direction: column; gap: 2px; }
+.lane-probe-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2);
+  padding: 5px 0; border-bottom: 1px solid var(--border); font-size: var(--fs-sm);
+}
+.lane-probe-row:last-child { border-bottom: 0; }
+.lane-probe-msg { margin-left: auto; text-align: right; min-width: 0; font-size: var(--fs-xs); }
+
 /* 访问密钥：一把 key 一块，操作按钮右对齐 */
 .key-row { padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
 .key-row:last-of-type { border-bottom: 0; }
