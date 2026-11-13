@@ -92,7 +92,12 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
     <>
       <div className="grid g4 mb-3">
         <Kpi label="平台" value={`${enabled}/${platforms.total}`} hint={`启用 / 全部 spec · 可用 ${health?.platforms ?? '—'}`} />
-        <Kpi label="账号" value={ac.data.total} hint="已导入 · secret 仅后台使用" />
+        {/* ★ 与接入源页「账号凭据」同口径（非免密）：总览此前算的是
+            /api/accounts 全部行（含免密车道的合成账号），接入源页算的是
+            逐平台 accounts_n 求和 —— 同一个概念两个数，看着像有一页算错。 */}
+        <Kpi label="账号"
+          value={ac.data.rows.filter((r) => !r.anon).length}
+          hint={`已导入 · 免密车道另计 ${ac.data.rows.filter((r) => r.anon).length} 个`} />
         <Kpi label="累计调用" value={fmt(us.data.requests)} hint={`成功 ${fmt(us.data.success)} · 失败 ${fmt(us.data.failed)}`} />
         <Kpi label="成功率" value={`${rate}%`} tone={rate >= 90 ? 'ok' : rate >= 60 ? 'warn' : 'err'} hint={`tokens ${fmt(us.data.tokensIn)} in / ${fmt(us.data.tokensOut)} out`} />
       </div>
