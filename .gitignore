@@ -180,3 +180,5 @@ aigw2/crates/*/src/._*
 /_proxy_card*.png
 /_combos_pool.png
 /_keys_panel.png
+/autoresearch-dashboard.html
+/aigw2/autoresearch-dashboard.html
