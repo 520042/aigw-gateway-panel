@@ -3484,6 +3484,40 @@ async fn auth_action(State(st): State<AppState>, body: Bytes) -> Response {
     };
     let action = action_of(&v);
     match action {
+        // ★ 凭据预识别（2026-11-14，接入向导屏 3 的「边粘边识别」）：
+        //   只分类、不落盘、不碰上游——用户粘之前就知道「这是什么、网关能不能吃」。
+        //   分类规则刻意保守：宁可 unknown 也不冒认（冒认会让用户粘错位置）。
+        "preview" => {
+            let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").trim();
+            if text.is_empty() {
+                return Json(json!({"ok": false, "kind": "empty", "detail": "还没有粘贴内容"})).into_response();
+            }
+            let parsed: Option<serde_json::Value> = if text.starts_with('{') {
+                serde_json::from_str(text).ok()
+            } else {
+                None
+            };
+            let (kind, detail): (&str, String) = if let Some(obj) = parsed.as_ref().and_then(|j| j.as_object()) {
+                ("json", format!("JSON 对象 · {} 个顶层键", obj.len()))
+            } else if text.starts_with("eyJ") && text.matches('.').count() == 2 {
+                ("token", "Token · JWT（三段式）".to_string())
+            } else {
+                let pairs = text
+                    .split([';', '\n', '；'])
+                    .map(|s| s.trim())
+                    .filter(|s| s.contains('=') && !s.starts_with("//"))
+                    .count();
+                if pairs >= 2 {
+                    ("cookie", format!("Cookie · {pairs} 个键值对"))
+                } else if text.len() >= 24 && !text.contains(' ') {
+                    ("token", "Token（长串无空格）".to_string())
+                } else {
+                    ("unknown", "无法识别：期望 Cookie（a=b;c=d）、Token 长串或 JSON".to_string())
+                }
+            };
+            let ok = kind != "unknown" && kind != "empty";
+            return Json(json!({"ok": ok, "kind": kind, "detail": detail})).into_response();
+        }
         "start" => {
             let platform = v.get("platform").and_then(|x| x.as_str()).unwrap_or("");
             if platform.is_empty() {
@@ -7149,6 +7183,52 @@ mod tests {
         let dead_row = rows.iter().find(|r| r["platform"] == "mock").unwrap();
         assert_eq!(dead_row["ok"], json!(false), "死上游必须如实报失败：{dead_row}");
         assert!(dead_row["ms"].as_u64().is_some(), "{dead_row}");
+    }
+
+    #[tokio::test]
+    async fn auth_preview_classifies_without_persisting() {
+        // 接入向导的「边粘边识别」：纯分类、不落盘。四类输入各钉一条，
+        // 并钉住 unknown 必须 ok:false —— 冒认会让用户把凭据粘错地方。
+        let app = build_app(state(vec![]));
+        let post = |body: &str| {
+            Request::post("/api/auth")
+                .header("host", "127.0.0.1:8800")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let cookie = app
+            .clone()
+            .oneshot(post(r#"{"action":"preview","text":"SESSDATA=aaa; bili_jct=bbb; DedeUserID=123"}"#))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&body_string(cookie).await).unwrap();
+        assert_eq!(v["kind"], json!("cookie"), "{v}");
+        assert!(v["detail"].as_str().unwrap().contains("3 个键值对"), "{v}");
+        assert_eq!(v["ok"], json!(true), "{v}");
+
+        let jwt = app
+            .clone()
+            .oneshot(post(r#"{"action":"preview","text":"eyJhbGciOi.eyJzdWIi.9f8e7d6c"}"#))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&body_string(jwt).await).unwrap();
+        assert_eq!(v["kind"], json!("token"), "{v}");
+
+        let js = app
+            .clone()
+            .oneshot(post(r#"{"action":"preview","text":"{\"refresh_token\":\"x\",\"uid\":1}"}"#))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&body_string(js).await).unwrap();
+        assert_eq!(v["kind"], json!("json"), "{v}");
+
+        let unknown = app
+            .oneshot(post(r#"{"action":"preview","text":"hello world with spaces"}"#))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&body_string(unknown).await).unwrap();
+        assert_eq!(v["ok"], json!(false), "识别不了必须如实说：{v}");
     }
 
     #[tokio::test]

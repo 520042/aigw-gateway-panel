@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Card, Kpi, Pill, Note, Loading, ErrorBox } from '../components';
-import { api, type Platform, type PlatformResponse } from '../api';
+import { Card, Pill, Note, Loading, ErrorBox, Empty, useAsync } from '../components';
+import { api, type Account, type Platform, type PlatformResponse } from '../api';
 
 /** 接入能力表：与旧版 ACCESS 同口径，但作为纯数据放在框架层，界面从它派生。 */
 const ACCESS: Record<string, { kind: 'one_click' | 'qr' | 'device' | 'oauth'; way: string }> = {
@@ -33,6 +33,7 @@ const ACCESS: Record<string, { kind: 'one_click' | 'qr' | 'device' | 'oauth'; wa
 };
 const LABEL: Record<string, string> = {
   one_click: '一键导入', qr: '扫码', device: '设备码', oauth: '跳转登录',
+  manual: '粘贴凭据', none: '免密',
 };
 type AccessKind = 'one_click' | 'qr' | 'device' | 'oauth' | 'manual' | 'none';
 const accessOf = (p: Platform): { kind: AccessKind; way: string } => {
@@ -41,9 +42,7 @@ const accessOf = (p: Platform): { kind: AccessKind; way: string } => {
   if (p.upstream_kind === 'openai' || !p.upstream_kind) return { kind: 'manual', way: '填官方 API Key' };
   return { kind: 'manual', way: '从客户端 / 网页取登录态后粘贴' };
 };
-const isAuto = (p: Platform) => ['one_click', 'qr', 'device', 'oauth'].includes(accessOf(p).kind);
-
-type Filter = 'all' | 'auto' | 'qr' | 'bad';
+// ★ isAuto / Filter 已随三屏重构退役：「免手动」语义被选择器的 KIND_CHIPS 取代。
 
 /** 分组规则（与 legacy srcGroupOf 同口径，用户拍板 + spec 自报优先）：
  *  ① spec 自报 group 优先（providers/*.toml 的 group 字段，后端随行下发）；
@@ -75,215 +74,431 @@ function srcGroupOf(p: Platform): SrcGroup {
   return 'client';
 }
 
+/** 接入源 · 三屏结构（2026-11-14 重构，方案见仓库根「接入源重构方案-2026-11-13.md」）：
+ *  home(我的接入) → picker(选择器) → wizard(向导) / manage(管理详情)。
+ *  旧版把 205 个平台当主角——94% 的面积在展示「你还没接的」；新方案以
+ *  「我的源」为主角（出问题的永远排最上），205 退到选择器，接入动作
+ *  收敛成 3 步向导（选平台 → 接入 → 完成），粘贴凭据路径边粘边识别。 */
+type Screen = 'home' | 'picker' | 'wizard' | 'manage';
+
+/** 接入方式 chips（选择器第一行：用户关心「要花多少力气」，不是业务分类）。 */
+const KIND_CHIPS: Array<[AccessKind | 'all', string]> = [
+  ['all', '全部'], ['none', '免登录'], ['one_click', '一键导入'], ['qr', '扫码'],
+  ['device', '设备码'], ['oauth', '跳转授权'], ['manual', '粘贴凭据'],
+];
+
+/** 我的接入的行状态：红=要处理（过期/失败）· 黄=未验活 · 绿=可用 · 灰=已停用。
+ *  rank 同时用于排序（小的排上面）。 */
+function srcStatus(p: Platform, accs: Account[]): { tone: 'ok' | 'warn' | 'err' | 'mut'; label: string; rank: number } {
+  if (!p.enabled) return { tone: 'mut', label: '已停用', rank: 3 };
+  if (accs.some((a) => a.needs_relogin)) return { tone: 'err', label: '凭据过期', rank: 0 };
+  if ((p.recent?.failed ?? 0) > 0) return { tone: 'err', label: `${p.recent!.failed} 次失败`, rank: 0 };
+  if (p.anon) return { tone: 'ok', label: '免登录', rank: 2 };
+  if (accs.length === 0) return { tone: 'warn', label: '未验活', rank: 1 };
+  if (!accs.some((a) => a.health?.status === 'ok')) return { tone: 'warn', label: '未验活', rank: 1 };
+  return { tone: 'ok', label: '可用', rank: 2 };
+}
+
 export function Sources({ platforms, error, refresh }: {
   platforms: PlatformResponse | null; error?: string; refresh: () => void;
 }) {
-  // 平台清单由框架层拉取一次传入；保存凭据/导入后调 refresh() 让框架层重取。
-  const [filter, setFilter] = useState<Filter>('all');
-  const [q, setQ] = useState('');
+  const [screen, setScreen] = useState<Screen>('home');
   const [sel, setSel] = useState<string | null>(null);
-  // 快速开始引导：首次访问展开，之后默认收起（老用户每次划过它是负担）。
-  // ★ 窄屏（<1080，侧栏已竖排、主区只剩 800px）首访也不展开：
-  //   它在这个宽度要占 2×2 约 340px 高，把真正的列表+详情推到一屏之外。
-  const [showHelp, setShowHelp] = useState(() => {
-    try {
-      if (localStorage.getItem('aigw-src-help-seen') !== null) return false;
-      return window.innerWidth >= 1080;
-    } catch { return true; }
-  });
-  const toggleHelp = () => {
-    setShowHelp((v) => {
-      try { localStorage.setItem('aigw-src-help-seen', '1'); } catch { /* 忽略 */ }
-      return !v;
-    });
-  };
-  // 分组折叠：`collapsed` 只记录**用户手动改过**的组（含 localStorage 持久化），
-  // 没动过的组跟 GROUP_META.open 走（custom/client/free 默认展开，official/sub 收起）。
-  // 搜索/筛选时强制全展开——用户在找东西，折叠是障碍。
-  const [userToggled, setUserToggled] = useState<Record<string, boolean>>(() => {
-    try { return JSON.parse(localStorage.getItem('aigw-src-fold') ?? '{}') as Record<string, boolean>; }
-    catch { return {}; }
-  });
-  const toggleGroup = (g: string) => {
-    setUserToggled((old) => {
-      const isOpenNow = groupIsOpen(g);
-      const next = { ...old, [g]: !isOpenNow };
-      try { localStorage.setItem('aigw-src-fold', JSON.stringify(next)); } catch { /* 忽略 */ }
-      return next;
-    });
-  };
-  const groupIsOpen = (g: string): boolean => {
-    if (userToggled[g] !== undefined) return userToggled[g];
-    return GROUP_META[g as SrcGroup]?.open ?? true;
-  };
-
-  // ★ 窄屏（≤1080）列表与详情是上下堆叠：点一个平台，详情在列表下方一屏之外，
-  //   用户看不到任何反馈。这里点完自动把详情滚进视野。
-  const detailRef = useRef<HTMLDivElement>(null);
-  const pick = (id: string) => {
-    setSel(id);
-    if (window.innerWidth <= 1080) {
-      window.setTimeout(() => detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
-    }
-  };
+  // 账号健康喂「我的接入」的状态点（needs_relogin / 验活结论）。
+  const ac = useAsync<{ rows: Account[] }>(() => api.get('/api/accounts'), []);
 
   const data = platforms;
-  // 模型停用集合（裸模型名，后端 flags 记账口径）——详情栏模型芯片据此着色。
   const disabledModels = useMemo(
     () => new Set(data?.disabled_models ?? []),
     [data],
   );
 
-  const rows = useMemo(() => {
+  // 已接入 = 有账号 或 免密车道；按 srcStatus.rank 排（需处理最上）。
+  const connected = useMemo(() => {
     if (!data) return [];
+    const accs = ac.data?.rows ?? [];
+    const byId = new Map<string, Account[]>();
+    for (const a of accs) {
+      const list = byId.get(a.platform) ?? [];
+      list.push(a);
+      byId.set(a.platform, list);
+    }
+    return data.rows
+      .filter((p) => p.anon || p.accounts_n > 0)
+      .sort((a, b) =>
+        srcStatus(a, byId.get(a.id) ?? []).rank - srcStatus(b, byId.get(b.id) ?? []).rank
+        || a.name.localeCompare(b.name));
+  }, [data, ac.data]);
+
+  const current = useMemo(
+    () => data?.rows.find((p) => p.id === sel) ?? null,
+    [data, sel],
+  );
+  // ★ hooks 只能在顶层：connectedIds 在这里算好，picker 分支只消费。
+  const connectedIds = useMemo(() => new Set(connected.map((p) => p.id)), [connected]);
+
+  if (!data) return error ? <ErrorBox message={error} onRetry={refresh} /> : <Loading />;
+
+  if (screen === 'picker') {
+    return (
+      <PickerScreen
+        data={data}
+        connectedIds={connectedIds}
+        onBack={() => setScreen('home')}
+        onAdd={(id) => { setSel(id); setScreen('wizard'); }}
+        onManage={(id) => { setSel(id); setScreen('manage'); }}
+      />
+    );
+  }
+  if (screen === 'wizard' && current) {
+    return (
+      <WizardScreen
+        key={current.id}
+        p={current}
+        onBack={() => setScreen('picker')}
+        onFinished={() => { refresh(); ac.reload(); setScreen('home'); }}
+        onChanged={refresh}
+      />
+    );
+  }
+  if (screen === 'manage' && current) {
+    return (
+      <ManageScreen
+        p={current}
+        disabledModels={disabledModels}
+        onChanged={() => { refresh(); ac.reload(); }}
+        onBack={() => setScreen('home')}
+      />
+    );
+  }
+
+  return (
+    <HomeScreen
+      data={data}
+      connected={connected}
+      accounts={ac.data?.rows ?? []}
+      accountsLoading={ac.loading && !ac.data}
+      onManage={(id) => { setSel(id); setScreen('manage'); }}
+      onAdd={() => setScreen('picker')}
+    />
+  );
+}
+
+/** 屏 1 · 我的接入：出问题的永远在最上，一行看清「几个账号·怎么接·几个模型」。 */
+function HomeScreen({ data, connected, accounts, accountsLoading, onManage, onAdd }: {
+  data: PlatformResponse;
+  connected: Platform[];
+  accounts: Account[];
+  accountsLoading: boolean;
+  onManage: (id: string) => void;
+  onAdd: () => void;
+}) {
+  const byId = useMemo(() => {
+    const m = new Map<string, Account[]>();
+    for (const a of accounts) {
+      const list = m.get(a.platform) ?? [];
+      list.push(a);
+      m.set(a.platform, list);
+    }
+    return m;
+  }, [accounts]);
+
+  return (
+    <>
+      <div className="row mb-3" style={{ alignItems: 'center' }}>
+        <div>
+          <b>我的接入</b>
+          <span className="faint fs-xs ml-2">{connected.length} 个源 · {data.total} 个可选</span>
+        </div>
+        <button className="btn pri ml-auto" onClick={onAdd}>＋ 接入新源</button>
+      </div>
+      <Card>
+        {accountsLoading && connected.length === 0 ? <Loading />
+          : connected.length === 0 ? (
+            <Empty>还没有接入任何源。点右上角「＋ 接入新源」，按引导 3 步接入第一个。</Empty>
+          ) : (
+            <div className="src-home-rows">
+              {connected.map((p) => {
+                const st = srcStatus(p, byId.get(p.id) ?? []);
+                const a = accessOf(p);
+                return (
+                  <div className={'src-home-row' + (st.tone === 'err' ? ' bad' : '')} key={p.id}>
+                    <span className={'sdot ' + st.tone} />
+                    <div className="src-home-main">
+                      <b>{p.name}</b>
+                      <span className="faint fs-xs">{p.id} · {a.way} · {p.accounts_n} 个账号 · {p.models_n} 个模型</span>
+                    </div>
+                    <span className={'pill ' + st.tone}>{st.label}</span>
+                    <button className="btn sm gh" onClick={() => onManage(p.id)}>管理</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        <div className="faint fs-xs mt-2">按「需处理 → 可用」排序 · 灰色的行已停用，不参与路由</div>
+      </Card>
+    </>
+  );
+}
+
+/** 屏 2 · 选择器：按「接入方式」chips（要花多少力气）+ 业务分组 chips（肌肉记忆）双行，205 个全在这。 */
+function PickerScreen({ data, connectedIds, onBack, onAdd, onManage }: {
+  data: PlatformResponse;
+  connectedIds: Set<string>;
+  onBack: () => void;
+  onAdd: (id: string) => void;
+  onManage: (id: string) => void;
+}) {
+  const [kind, setKind] = useState<AccessKind | 'all'>('all');
+  const [group, setGroup] = useState<SrcGroup | 'all'>('all');
+  const [q, setQ] = useState('');
+  // 分组折叠沿用旧口径（localStorage 持久化；搜索时强制全展开）。
+  const [userToggled, setUserToggled] = useState<Record<string, boolean>>(() => {
+    try { return JSON.parse(localStorage.getItem('aigw-src-fold') ?? '{}') as Record<string, boolean>; }
+    catch { return {}; }
+  });
+  const groupIsOpen = (g: string): boolean => {
+    if (userToggled[g] !== undefined) return userToggled[g];
+    return GROUP_META[g as SrcGroup]?.open ?? true;
+  };
+  const toggleGroup = (g: string) => {
+    setUserToggled((old) => {
+      const next = { ...old, [g]: !groupIsOpen(g) };
+      try { localStorage.setItem('aigw-src-fold', JSON.stringify(next)); } catch { /* 忽略 */ }
+      return next;
+    });
+  };
+
+  const rows = useMemo(() => {
     return data.rows.filter((p) => {
-      if (filter === 'auto' && !isAuto(p)) return false;
-      if (filter === 'qr' && !(p.login_methods ?? []).includes('qr')) return false;
-      if (filter === 'bad' && !(p.recent && p.recent.failed > 0)) return false;
+      if (kind !== 'all' && accessOf(p).kind !== kind) return false;
+      if (group !== 'all' && srcGroupOf(p) !== group) return false;
       if (!q) return true;
       const s = q.toLowerCase();
       return p.name.toLowerCase().includes(s) || p.id.toLowerCase().includes(s) || p.notes.toLowerCase().includes(s);
     });
-  }, [data, filter, q]);
+  }, [data, kind, group, q]);
 
-  const autoN = data?.rows.filter(isAuto).length ?? 0;
-  const qrN = data?.rows.filter((p) => (p.login_methods ?? []).includes('qr')).length ?? 0;
-  const badN = data?.rows.filter((p) => p.recent && p.recent.failed > 0).length ?? 0;
-  const loggedN = data?.rows.filter((p) => p.anon || p.accounts_n > 0).length ?? 0;
-  const enabledN = data?.rows.filter((p) => p.enabled).length ?? 0;
-  const current = rows.find((p) => p.id === sel) ?? rows[0] ?? null;
-
-  if (!data) return error ? <ErrorBox message={error} onRetry={refresh} /> : <Loading />;
-
-  const groups: Array<[AccessKind, string, string]> = [
-    ['one_click', '一键导入', '本机客户端已登录，点一下自动读凭据'],
-    ['qr', '扫码登录', '手机扫一下，不用开浏览器 F12'],
-    ['device', '设备码 / 跳转授权', '运行一条命令或跳到官网授权'],
-    ['oauth', '跳转登录', '浏览器完成 OAuth，自动回调换 token'],
-  ];
-  const autoByKind = (k: AccessKind) => data.rows.filter((p) => accessOf(p).kind === k);
+  const kindCount = (k: AccessKind | 'all') =>
+    k === 'all' ? data.total : data.rows.filter((p) => accessOf(p).kind === k).length;
 
   return (
     <>
-      <div className="grid g4 mb-3">
-        <Kpi label="平台总数" value={data.total} hint={`启用 ${enabledN} · 已接入 ${loggedN}`} />
-        <Kpi label="账号凭据" value={data.rows.reduce((a, p) => a + p.accounts_n, 0)} hint="secret 仅后台使用" />
-        <Kpi label="免手动接入" value={autoN} hint="一键 / 扫码 / 设备码 / 跳转登录" />
-        <Kpi label="近 24h 有问题" value={badN} tone={badN ? 'err' : undefined} hint="台账里有失败记录" />
+      <div className="row mb-3" style={{ alignItems: 'center' }}>
+        <div>
+          <b>接入新源</b>
+          <span className="faint fs-xs ml-2">{data.total} 个可选 · 按接入方式分（你要花多少力气）</span>
+        </div>
+        <button className="btn gh ml-auto" onClick={onBack}>← 返回我的接入</button>
       </div>
-
-      {/* ★ 搜索/筛选生效时收起「快速开始」：它列的是全部可自动接入的平台，
-          和下面的筛选结果对不上（搜 zzzzz 时下面 0 条、上面还列着 26 个），
-          看着像筛选没生效。 */}
-      {showHelp && !q.trim() && filter === 'all' && (
-        <Card title="快速开始 · 选一个能自动接入的" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>共 {autoN} 个，不用自己找凭据</span>}>
-          <div className="onboard-grid">
-            {groups.filter(([k]) => autoByKind(k).length).map(([k, title, desc]) => (
-              <div className="onboard-col" key={k}>
-                <div className="onboard-h">
-                  <span className={'ac-tag ac-' + k}>{LABEL[k]}</span>
-                  <b>{title}</b><span className="faint fs-xs">{desc}</span>
-                </div>
-                <div className="onboard-list">
-                  {autoByKind(k).map((p) => (
-                    <button className="onboard-item" key={p.id} title={accessOf(p).way} onClick={() => pick(p.id)}>
-                      {p.name}
-                      {p.accounts_n > 0 && <span className="faint fs-xs">已接入 {p.accounts_n}</span>}
-                    </button>
-                  ))}
-                </div>
+      <div className="src-list-filters mb-2">
+        {KIND_CHIPS.map(([k, label]) => (
+          <button key={k} className={'chip' + (kind === k ? ' on' : '')} onClick={() => setKind(k)}>
+            {label} {kindCount(k)}
+          </button>
+        ))}
+      </div>
+      <div className="src-list-filters mb-2">
+        <button className={'chip' + (group === 'all' ? ' on' : '')} onClick={() => setGroup('all')}>业务分组 · 全部</button>
+        {SRC_GROUPS.map((g) => (
+          <button key={g} className={'chip' + (group === g ? ' on' : '')} onClick={() => setGroup(g)}>
+            {GROUP_META[g].t} {data.rows.filter((p) => srcGroupOf(p) === g).length}
+          </button>
+        ))}
+      </div>
+      <div className="src-list-search mb-2">
+        <input className="q" placeholder="搜索名称 / id / 说明…" value={q} onChange={(e) => setQ(e.target.value)} />
+      </div>
+      <Card>
+        <div className="src-list-vp" style={{ maxHeight: '62vh' }}>
+          {rows.length === 0 && <div className="faint p-3">没有匹配的平台</div>}
+          {SRC_GROUPS.map((g) => {
+            const gRows = rows.filter((p) => srcGroupOf(p) === g);
+            if (gRows.length === 0) return null;
+            const searching = q.trim() !== '' || kind !== 'all' || group !== 'all';
+            const show = searching || groupIsOpen(g);
+            return (
+              <div key={g} className={'src-group' + (show ? ' open' : '')}>
+                <button className="src-group-h" onClick={() => toggleGroup(g)} title={GROUP_META[g].desc}>
+                  <span className="chev">{show ? '▾' : '▸'}</span>
+                  {GROUP_META[g].t}
+                  <span className="faint fs-xs">{gRows.length}</span>
+                </button>
+                {show && gRows.map((p) => {
+                  const a = accessOf(p);
+                  const tag = ['manual', 'none'].includes(a.kind) ? null : a.kind;
+                  const isConnected = connectedIds.has(p.id);
+                  return (
+                    <div className="src-row static" key={p.id} title={`${p.name} · ${p.id} · ${a.way}`}>
+                      <span className={'dot ' + (p.anon ? 'on' : isConnected ? 'ok' : 'off')} />
+                      <span className="nm">{p.name}</span>
+                      {tag && <span className={'ac-tag ac-' + tag} title={a.way}>{LABEL[tag]}</span>}
+                      <span className="faint fs-xs">{p.models_n} 模型</span>
+                      {isConnected
+                        ? <button className="btn sm gh" onClick={() => onManage(p.id)}>管理</button>
+                        : <button className="btn sm pri" onClick={() => onAdd(p.id)}>接入</button>}
+                    </div>
+                  );
+                })}
               </div>
-            ))}
-          </div>
-          <Note>
-            {/* ★ api_key 不再写死 admin：密钥在「运行配置 → 访问密钥」里
-                创建/轮换，写死一个值会跟着密钥体系漂移（实测 admin 已无效）。 */}
-            接入三步：① 上面点一个平台，在右侧完成登录 ② 客户端 <code>base_url</code> 填 <code>{location.origin}/v1</code>、<code>api_key</code> 填「运行配置 → 访问密钥」里的密钥 ③ <code>model</code> 填 <code>模型id@平台</code> 或清单内模型。
-          </Note>
-        </Card>
-      )}
+            );
+          })}
+        </div>
+      </Card>
+    </>
+  );
+}
 
-      <div className="srcbar2">
-        <button className="btn sm gh" onClick={toggleHelp}>怎么用 {showHelp ? '▴' : '▾'}</button>
-        <span className="faint small ml-auto">签到 / WB 任务与账号验活在「任务中心」</span>
+/** 屏 3 · 向导：选平台（已选）→ 接入（按方式自动分支）→ 完成（模型 + 可复制 curl）。 */
+function WizardScreen({ p, onBack, onFinished, onChanged }: {
+  p: Platform;
+  onBack: () => void;
+  onFinished: () => void;
+  onChanged: () => void;
+}) {
+  const kind = accessOf(p).kind;
+  const [step, setStep] = useState<'access' | 'done'>(kind === 'none' ? 'done' : 'access');
+  const [text, setText] = useState('');
+  const [preview, setPreview] = useState('');
+  const [msg, setMsg] = useState<{ tone?: 'ok' | 'err'; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // ★ 粘贴凭据边粘边识别（方案屏 3 的「识别到：Cookie · 4 个键值对」）：
+  //   /api/auth preview 只分类不落盘；350ms 防抖，清空即清提示。
+  useEffect(() => {
+    const t = text.trim();
+    if (!t) { setPreview(''); return; }
+    const h = window.setTimeout(async () => {
+      try {
+        const r = await api.post('/api/auth', { action: 'preview', text: t }) as { detail?: string };
+        setPreview(r.detail ?? '');
+      } catch { setPreview(''); }
+    }, 350);
+    return () => window.clearTimeout(h);
+  }, [text]);
+
+  const save = async (fromClient: boolean) => {
+    if (!fromClient && !text.trim()) { setMsg({ tone: 'err', text: '请先粘贴凭据' }); return; }
+    setBusy(true);
+    setMsg({ text: fromClient ? '正在从本机客户端读取凭据并验活…' : '正在保存并验活…' });
+    try {
+      const r = await api.post('/api/auth', fromClient
+        ? { action: 'save', platform: p.id, from_client: true }
+        : { action: 'save', platform: p.id, secret: text.trim() }) as {
+        ok?: boolean; message?: string; verified?: boolean;
+      };
+      onChanged();
+      if (r?.ok) {
+        setMsg({ tone: 'ok', text: (r.message || '已保存') + (r.verified ? '（验活通过）' : '') });
+        setStep('done');
+      } else {
+        setMsg({ tone: 'err', text: r?.message || '保存失败' });
+      }
+    } catch (e) {
+      setMsg({ tone: 'err', text: '失败：' + (e instanceof Error ? e.message : String(e)) });
+    } finally { setBusy(false); }
+  };
+
+  const firstModel = p.models[0] ?? '';
+  const curl = `curl ${location.origin}/v1/chat/completions \\\n  -H "Authorization: Bearer <你的访问密钥>" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${firstModel}@${p.id}","messages":[{"role":"user","content":"hi"}]}'`;
+
+  return (
+    <>
+      <div className="row mb-3" style={{ alignItems: 'center' }}>
+        <div>
+          <b>接入 {p.name}</b>
+          <span className="faint fs-xs ml-2">{accessOf(p).way}</span>
+        </div>
+        <button className="btn gh ml-auto" onClick={onBack}>← 返回选择器</button>
       </div>
-
+      <div className="wiz-steps mb-3">
+        <span className="wiz-step done">✓ 选平台</span>
+        <span className="wiz-line" />
+        <span className={'wiz-step' + (step === 'access' ? ' now' : ' done')}>{step === 'access' ? '②' : '✓'} 接入</span>
+        <span className="wiz-line" />
+        <span className={'wiz-step' + (step === 'done' ? ' now' : '')}>③ 完成</span>
+      </div>
       <div className="src-split">
-        <div className="src-list-col">
-          <div className="src-list-hd">
-            <div className="t">全部平台</div>
-            <div className="s">共 {data.total} 个 · 显示 {rows.length} 个</div>
-          </div>
-          <div className="src-list-filters">
-            {([['all', '全部', ''], ['auto', '免手动', autoN], ['qr', '可扫码', qrN], ['bad', '有问题', badN]] as Array<[Filter, string, number | string]>).map(([k, label, n]) => (
-              <button key={k} className={'chip' + (filter === k ? ' on' : '')} onClick={() => setFilter(k)}>
-                {label}{n !== '' ? ' ' + n : ''}
-              </button>
-            ))}
-          </div>
-          <div className="src-list-search">
-            <input className="q" placeholder="搜索名称 / id / 说明…" value={q} onChange={(e) => setQ(e.target.value)} />
-          </div>
-          <div className="src-list-vp">
-            {rows.length === 0 && <div className="faint p-3">没有匹配的平台</div>}
-            {/* 按分组渲染：分组头可点折叠；默认收起 official/sub（与 legacy 同）。
-                搜索/筛选时强制全展开（用户在找东西，折叠是障碍）。 */}
-            {SRC_GROUPS.map((g) => {
-              const gRows = rows.filter((p) => srcGroupOf(p) === g);
-              if (gRows.length === 0) return null;
-              const meta = GROUP_META[g];
-              const searching = q.trim() !== '' || filter !== 'all';
-              const show = searching || groupIsOpen(g);
-              return (
-                <div key={g} className={'src-group' + (show ? ' open' : '')}>
-                  <button
-                    className="src-group-h"
-                    onClick={() => toggleGroup(g)}
-                    title={meta.desc}
-                  >
-                    <span className="chev">{show ? '▾' : '▸'}</span>
-                    {meta.t}
-                    <span className="faint fs-xs">{gRows.length}</span>
-                    {gRows.some((p) => p.accounts_n > 0) && <span className="dot g-ok" />}
-                  </button>
-                  {show && gRows.map((p) => {
-                    const a = accessOf(p);
-                    const tag = ['manual', 'none'].includes(a.kind) ? null : a.kind;
-                    return (
-                      <button
-                        key={p.id}
-                        className={'src-row static' + (current?.id === p.id ? ' on' : '')}
-                        title={`${p.name} · ${p.id} · ${a.way}`}
-                        onClick={() => pick(p.id)}
-                      >
-                        <span className={'dot ' + (p.anon ? 'on' : p.accounts_n > 0 ? 'ok' : 'off')} />
-                        <span className="nm">{p.name}</span>
-                        {tag && <span className={'ac-tag ac-' + tag} title={a.way}>{LABEL[tag]}</span>}
-                        {p.accounts_n > 0 && <span className="bd">{p.accounts_n}</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="src-detail-col" ref={detailRef}>
-          {current
-            ? <PlatformDetail key={current.id} p={current} disabledModels={disabledModels} onChanged={refresh} />
-            : (
-              <div className="empty">
-                <div>没有匹配的平台</div>
-                {(q || filter !== 'all') && (
-                  <button className="btn sm gh mt-2" onClick={() => { setQ(''); setFilter('all'); }}>
-                    清空搜索与筛选
-                  </button>
-                )}
+        <div>
+          {step === 'access' && (
+            <Card title={`接入 · ${LABEL[kind] ?? '引导'}`}>
+              {kind === 'none' && (
+                <Note tone="ok">免密车道无需任何凭据，模型已可直接调用。右下「完成」看接入结果。</Note>
+              )}
+              {kind === 'one_click' && (
+                <>
+                  <Note>本机客户端已登录过 {p.name}。点下面按钮，网关自动从客户端数据文件读取凭据并验活。</Note>
+                  <button className="btn pri mt-2" disabled={busy} onClick={() => save(true)}>从本机客户端导入</button>
+                </>
+              )}
+              {kind === 'manual' && (
+                <>
+                  <Note>到平台网页复制登录态（Cookie / Token），粘贴到下面。保存即自动验活，失败给原因。</Note>
+                  <textarea
+                    className="q mt-2 mono"
+                    style={{ width: '100%', minHeight: 110 }}
+                    placeholder={'粘贴凭据…\n支持：Cookie（a=b;c=d）· Token/JWT · JSON'}
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                  />
+                  {preview && <div className="faint fs-xs mt-2">识别到：{preview}</div>}
+                  <button className="btn pri mt-2" disabled={busy || !text.trim()} onClick={() => save(false)}>保存并验活</button>
+                </>
+              )}
+              {['qr', 'device', 'oauth'].includes(kind) && (
+                <AuthPanel p={p} onChanged={onChanged} onDone={() => { onChanged(); setStep('done'); }} />
+              )}
+              {msg && <Note tone={msg.tone}>{msg.text}</Note>}
+            </Card>
+          )}
+          {step === 'done' && (
+            <Card title="✓ 已接入">
+              <Note tone="ok">
+                {p.name} 已入库，模型已参与路由。下面命令可直接验证（把密钥换成你的）：
+              </Note>
+              <pre className="note mono mt-2" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{curl}</pre>
+              <div className="row mt-2">
+                <button className="btn sm" onClick={() => { void navigator.clipboard?.writeText(curl); }}>复制命令</button>
+                <button className="btn pri" onClick={onFinished}>完成，回到我的接入</button>
               </div>
-            )}
+            </Card>
+          )}
+        </div>
+        <div>
+          <Card title="这个源能提供">
+            <div className="kv">
+              <div><span>模型</span><b>{p.models_n} 个</b></div>
+              <div><span>接入方式</span><b>{LABEL[kind] ?? '—'}</b></div>
+              <div><span>区域</span><b>{p.region ?? '—'}</b></div>
+              <div><span>状态</span><b>{p.enabled ? '已启用' : '已停用'}</b></div>
+            </div>
+          </Card>
+          <Card title="客户端配置" className="mt-3">
+            <div className="kv">
+              <div><span>base_url</span><code className="mono">{location.origin}/v1</code></div>
+              <div><span>api_key</span><code className="mono">「运行配置 → 访问密钥」创建</code></div>
+              <div><span>model</span><code className="mono">{firstModel ? `${firstModel}@${p.id}` : '见模型清单'}</code></div>
+            </div>
+          </Card>
         </div>
       </div>
+    </>
+  );
+}
+
+/** 管理屏：复用既有 PlatformDetail（登录/账号/模型/启停全套），只加返回。 */
+function ManageScreen({ p, disabledModels, onChanged, onBack }: {
+  p: Platform;
+  disabledModels: Set<string>;
+  onChanged: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <>
+      <div className="row mb-3">
+        <button className="btn gh" onClick={onBack}>← 返回我的接入</button>
+      </div>
+      <PlatformDetail key={p.id} p={p} disabledModels={disabledModels} onChanged={onChanged} />
     </>
   );
 }
@@ -530,7 +745,7 @@ const QR_HINTS: Record<string, string> = {
   'web-glm': '用微信扫一扫，在手机上确认登录',
 };
 
-function AuthPanel({ p, onChanged }: { p: Platform; onChanged: () => void }) {
+function AuthPanel({ p, onChanged, onDone }: { p: Platform; onChanged: () => void; onDone?: () => void }) {
   type Phase =
     | { kind: 'idle' }
     | { kind: 'busy' }
@@ -591,6 +806,8 @@ function AuthPanel({ p, onChanged }: { p: Platform; onChanged: () => void }) {
       setPhase({ kind: 'done', text: '✓ ' + (r.session.message || '登录成功，已入库') });
       setPollMsg('');
       onChanged();
+      // ★ 向导模式：登录成功即自动进下一步（方案屏 3：成功自动前进，不用手点）
+      onDone?.();
       return;
     }
     const msg = r.session?.message || r.message || '还没完成，稍后再查';

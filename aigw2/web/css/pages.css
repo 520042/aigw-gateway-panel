@@ -396,6 +396,30 @@ tbody tr:hover td { background: var(--surface-3); }
 .lane-probe-row:last-child { border-bottom: 0; }
 .lane-probe-msg { margin-left: auto; text-align: right; min-width: 0; font-size: var(--fs-xs); }
 
+/* ── 接入源三屏（2026-11-14 重构）── */
+/* 屏1 我的接入：一行一源，状态点 + 名称 + 副标题 + 结论 + 管理 */
+.src-home-rows { display: flex; flex-direction: column; }
+.src-home-row {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-1);
+  border-bottom: 1px solid var(--border);
+}
+.src-home-row:last-child { border-bottom: 0; }
+.src-home-row.bad { background: var(--err-soft); border-radius: var(--r-sm); }
+.src-home-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.sdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.sdot.ok { background: var(--ok); }
+.sdot.warn { background: var(--warn); }
+.sdot.err { background: var(--err); }
+.sdot.mut { background: var(--border-strong); }
+
+/* 屏3 向导：步骤指示器（✓ 选平台 — ② 接入 — ③ 完成） */
+.wiz-steps { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); }
+.wiz-step { color: var(--fg-subtle); }
+.wiz-step.now { color: var(--brand); font-weight: 650; }
+.wiz-step.done { color: var(--ok); }
+.wiz-line { flex: 0 0 34px; height: 1px; background: var(--border-strong); }
+
 /* 访问密钥：一把 key 一块，操作按钮右对齐 */
 .key-row { padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
 .key-row:last-of-type { border-bottom: 0; }
