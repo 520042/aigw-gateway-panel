@@ -92,7 +92,7 @@ export function UsagePage() {
   // ★ 请求明细下钻（借鉴 axonhub requests drawer）：点平台输出榜的行，
   //   展开该平台最近的请求表。后端 /api/requests 支持可选 platform 参数。
   const [drill, setDrill] = useState<string | null>(null);
-  const drillQ = useAsync<{ recent: Array<{ ts: number; model: string; kind: string; ok: boolean; ms: number; tin: number; tout: number; cancelled: boolean }>; matched: number }>(
+  const drillQ = useAsync<{ recent: Array<{ ts: number; model: string; kind: string; ok: boolean; ms: number; tin: number; tout: number; cancelled: boolean; account?: string }>; matched: number }>(
     () => api.get('/api/requests?limit=30&platform=' + encodeURIComponent(drill ?? '')),
     [drill],
   );
@@ -105,6 +105,9 @@ export function UsagePage() {
   const rows = d.byPlatform?.rows ?? [];
   const last = rows.slice(0, 8);
   const maxOut = Math.max(1, ...last.map((r) => r.requests));
+  // ★ 模型榜（CliRelay 失败分析）：数据已在 /api/usage.byModel，store 已排除任务行。
+  const models = (d.byModel?.rows ?? []).slice(0, 8);
+  const maxModel = Math.max(1, ...models.map((r) => r.requests));
   const histRows = hist.data?.recent ?? [];
   const trend = histRows.map((r) => r.tout ?? r.total_tokens ?? r.tokensOut ?? 0).reverse();
   const stamps = histRows.map((r) => r.ts ?? 0).reverse();
@@ -159,7 +162,7 @@ export function UsagePage() {
                 : (
                   <div className="table-scroll">
                     <table>
-                      <thead><tr><th>时间</th><th>模型 / 动作</th><th>状态</th><th>耗时</th><th className="mono">tokens in/out</th></tr></thead>
+                      <thead><tr><th>时间</th><th>模型 / 动作</th><th>状态</th><th>耗时</th><th className="mono">tokens in/out</th><th>账号</th></tr></thead>
                       <tbody>
                         {drillQ.data!.recent.map((r, i) => (
                           <tr key={i}>
@@ -170,6 +173,7 @@ export function UsagePage() {
                               : r.ok ? <span className="pill ok">成功</span> : <span className="pill err">失败</span>}</td>
                             <td className="mono fs-xs">{ms(r.ms)}</td>
                             <td className="mono fs-xs">{fmt(r.tin)} / {fmt(r.tout)}</td>
+                            <td className="mono fs-xs" title={r.account}>{r.account ? r.account.slice(0, 12) : '—'}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -178,6 +182,20 @@ export function UsagePage() {
                 )}
         </Card>
       )}
+
+      {/* ★ 模型榜（CliRelay 失败分析维度）：byModel 数据同在 /api/usage，
+            且 store 侧已排除后台任务行（checkin/growth 不算模型）。
+            失败数 >0 时红色徽标——「哪个模型在失败」一眼可见。 */}
+      <Card title="模型输出榜" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>条长 = 请求数 · 红徽标 = 失败数</span>}>
+        {models.length === 0 ? <div className="faint small">暂无数据</div> : models.map((r) => (
+          <div className="rk-row" key={r.key}>
+            <span className="rk-name mono" title={r.key}>{r.key}</span>
+            <div className="rk-bar"><i style={{ width: `${Math.round((r.requests / maxModel) * 100)}%` }} /></div>
+            <span className="rk-num">{fmt(r.requests)}</span>
+            {r.failed > 0 && <span className="pill err">{fmt(r.failed)} 失败</span>}
+          </div>
+        ))}
+      </Card>
 
       <Card title="token 用量">
         <div className="mini-grid">

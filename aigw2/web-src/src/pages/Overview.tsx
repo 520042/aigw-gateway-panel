@@ -77,6 +77,33 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
   }
   if (!platforms || !ac.data || !us.data) return <Loading />;
 
+  // ★ KPI 环比（CliRelay monitor-widgets 模式）：对 pulse 的小时桶按**北京自然日**
+  //   求和，得「今日 vs 昨日」的调用量与成功率。bucketLabel 的换算口径在此复用
+  //   （bucket*3600 - 8h = unix 秒），不引新端点。
+  const daySum = (() => {
+    const rows = pulse.data?.rows ?? [];
+    const dayOf = (b: number) => new Date((b * 3600 - 8 * 3600) * 1000).toDateString();
+    const today = new Date().toDateString();
+    const yest = new Date(Date.now() - 86_400_000).toDateString();
+    let t = 0, y = 0, tOk = 0, yOk = 0;
+    for (const r of rows) {
+      for (const c of r.cells) {
+        const dk = dayOf(c.bucket);
+        if (dk === today) { t += c.ok + c.fail; tOk += c.ok; }
+        else if (dk === yest) { y += c.ok + c.fail; yOk += c.ok; }
+      }
+    }
+    const pct = (a: number, b: number) => b > 0 ? Math.round(((a - b) / b) * 100) : null;
+    const rateOf = (ok: number, all: number) => all ? Math.round((ok / all) * 100) : null;
+    return {
+      t, y, tRate: rateOf(tOk, t), yRate: rateOf(yOk, y),
+      dReq: pct(t, y), dRate: t && y ? pct(rateOf(tOk, t) ?? 0, rateOf(yOk, y) ?? 0) : null,
+    };
+  })();
+  const deltaTxt = (pct: number | null) =>
+    pct == null ? '' : pct >= 0 ? ` ▲${pct}%` : ` ▼${Math.abs(pct)}%`;
+  const deltaCls = (pct: number | null) => (pct == null ? '' : pct >= 0 ? 'c-ok' : 'c-err');
+
   const enabled = platforms.rows.filter((p) => p.enabled).length;
   const realReq = Math.max(0, us.data.requests - us.data.cancelled);
   const rate = realReq ? Math.round((us.data.success / realReq) * 100) : 100;
@@ -99,8 +126,16 @@ export function Overview({ health, platforms }: { health: Health | null; platfor
         <Kpi label="账号"
           value={ac.data.rows.filter((r) => !r.anon).length}
           hint={`已导入 · 免密车道另计 ${ac.data.rows.filter((r) => r.anon).length} 个`} />
-        <Kpi label="累计调用" value={fmt(us.data.requests)} hint={`成功 ${fmt(us.data.success)} · 失败 ${fmt(us.data.failed)}`} />
-        <Kpi label="成功率" value={`${rate}%`} tone={rate >= 90 ? 'ok' : rate >= 60 ? 'warn' : 'err'} hint={`tokens ${fmt(us.data.tokensIn)} in / ${fmt(us.data.tokensOut)} out`} />
+        <Kpi label="累计调用" value={fmt(us.data.requests)}
+          hint={<>
+            成功 {fmt(us.data.success)} · 失败 {fmt(us.data.failed)}
+            {daySum.t != null && <span className={deltaCls(daySum.dReq)}> · 今日 {daySum.t} vs 昨日 {daySum.y}{deltaTxt(daySum.dReq)}</span>}
+          </>} />
+        <Kpi label="成功率" value={`${rate}%`} tone={rate >= 90 ? 'ok' : rate >= 60 ? 'warn' : 'err'}
+          hint={<>
+            tokens {fmt(us.data.tokensIn)} in / {fmt(us.data.tokensOut)} out
+            {daySum.tRate != null && <span className={deltaCls(daySum.dRate)}> · 今日 {daySum.tRate}% vs 昨日 {daySum.yRate == null ? '—' : daySum.yRate + '%'}{deltaTxt(daySum.dRate)}</span>}
+          </>} />
       </div>
 
       <Card title="运行状态">

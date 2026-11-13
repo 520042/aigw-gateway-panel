@@ -395,6 +395,8 @@ pub fn build_app(st: AppState) -> Router {
         .route("/api/update-check", get(update_check))
         // 免密车道实时探针：管理面（/api 鉴权），显式点击才打上游。
         .route("/api/probe-lanes", post(probe_lanes))
+        // 单模型连通测试：管理面任意平台任意模型当场打一发。
+        .route("/api/probe-model", post(probe_model))
         .route("/v1/models", get(models))
         // 额度摘要（只读，与 /v1/models 同一套 key 鉴权）：
         // 让第三方客户端能先问「还有多少额度」再决定跑不跑批。
@@ -494,66 +496,126 @@ async fn probe_lanes(State(st): State<AppState>) -> Json<Value> {
         )
         .await;
         let ms = t0.elapsed().as_millis() as u64;
-        let row = match out {
-            Err(_) => json!({
-                "platform": spec.id, "name": spec.name, "model": model,
-                "ok": false, "ms": ms, "message": "45s 超时",
-            }),
-            Ok(Ok(ChatCoreOut::Json(v))) => {
-                if let Some(err) = v.get("error") {
-                    let msg = err.get("message").and_then(|x| x.as_str())
-                        .or_else(|| err.get("hint").and_then(|x| x.as_str()))
-                        .unwrap_or("上游返回错误信封");
-                    json!({
-                        "platform": spec.id, "name": spec.name, "model": model,
-                        "ok": false, "ms": ms,
-                        "code": err.get("code").cloned().unwrap_or(Value::Null),
-                        "message": task_records::safe_detail(msg),
-                    })
-                } else {
-                    let content = v
-                        .pointer("/choices/0/message/content")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    json!({
-                        "platform": spec.id, "name": spec.name, "model": model,
-                        "ok": true, "ms": ms,
-                        "reply": content.chars().take(24).collect::<String>(),
-                    })
-                }
-            }
-            Ok(Ok(ChatCoreOut::Stream(_))) => json!({
-                "platform": spec.id, "name": spec.name, "model": model,
-                "ok": false, "ms": ms, "message": "意外返回流式（探针恒为非流式）",
-            }),
-            Ok(Err(ChatCoreErr::Local { status, message, code, .. })) => json!({
-                "platform": spec.id, "name": spec.name, "model": model,
-                "ok": false, "ms": ms, "code": code,
-                "message": task_records::safe_detail(&format!("HTTP {status}: {message}")),
-            }),
-            Ok(Err(ChatCoreErr::Upstream { status, body, hint, .. })) => {
-                let mut msg = format!("HTTP {status}: {}", body.chars().take(120).collect::<String>());
-                if let Some(h) = hint {
-                    if !h.trim().is_empty() {
-                        msg.push_str(&format!("（{h}）"));
-                    }
-                }
-                json!({
-                    "platform": spec.id, "name": spec.name, "model": model,
-                    "ok": false, "ms": ms,
-                    "message": task_records::safe_detail(&msg),
-                })
-            }
-        };
-        results.push(row);
+        results.push(probe_classify(&spec.id, &spec.name, &model, ms, out));
     }
     Json(json!({
         "ok": true,
         "probed_at": aigw_store::now_unix(),
         "results": results,
     }))
+}
+
+/// 探针结果的统一分类：车道探针（probe_lanes）与单模型测试（probe_model）
+/// 共用，保证两种入口的失败原因形状完全一致（面板一处渲染逻辑）。
+fn probe_classify(
+    platform: &str,
+    name: &str,
+    model: &str,
+    ms: u64,
+    out: Result<Result<ChatCoreOut, ChatCoreErr>, tokio::time::error::Elapsed>,
+) -> Value {
+    match out {
+        Err(_) => json!({
+            "platform": platform, "name": name, "model": model,
+            "ok": false, "ms": ms, "message": "45s 超时",
+        }),
+        Ok(Ok(ChatCoreOut::Json(v))) => {
+            if let Some(err) = v.get("error") {
+                let msg = err.get("message").and_then(|x| x.as_str())
+                    .or_else(|| err.get("hint").and_then(|x| x.as_str()))
+                    .unwrap_or("上游返回错误信封");
+                json!({
+                    "platform": platform, "name": name, "model": model,
+                    "ok": false, "ms": ms,
+                    "code": err.get("code").cloned().unwrap_or(Value::Null),
+                    "message": task_records::safe_detail(msg),
+                })
+            } else {
+                let content = v
+                    .pointer("/choices/0/message/content")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                json!({
+                    "platform": platform, "name": name, "model": model,
+                    "ok": true, "ms": ms,
+                    "reply": content.chars().take(24).collect::<String>(),
+                })
+            }
+        }
+        Ok(Ok(ChatCoreOut::Stream(_))) => json!({
+            "platform": platform, "name": name, "model": model,
+            "ok": false, "ms": ms, "message": "意外返回流式（探针恒为非流式）",
+        }),
+        Ok(Err(ChatCoreErr::Local { status, message, code, .. })) => json!({
+            "platform": platform, "name": name, "model": model,
+            "ok": false, "ms": ms, "code": code,
+            "message": task_records::safe_detail(&format!("HTTP {status}: {message}")),
+        }),
+        Ok(Err(ChatCoreErr::Upstream { status, body, hint, .. })) => {
+            let mut msg = format!("HTTP {status}: {}", body.chars().take(120).collect::<String>());
+            if let Some(h) = hint {
+                if !h.trim().is_empty() {
+                    msg.push_str(&format!("（{h}）"));
+                }
+            }
+            json!({
+                "platform": platform, "name": name, "model": model,
+                "ok": false, "ms": ms,
+                "message": task_records::safe_detail(&msg),
+            })
+        }
+    }
+}
+
+/// 单模型连通测试（POST /api/probe-model {"model": "模型id@平台"}）。
+///
+/// ★ 2026-11-14（gpt-load / Agent2API 的模型测试对话框模式）：车道探针只探
+///   免密车道的首模型；这个端点让管理面**任意平台任意模型**都能当场打一发。
+///   model 直接透传 chat_core（裸名走清单路由、@平台 显式指定），平台/名称
+///   字段从 @ 后缀拆出来展示；分类与车道探针共用 probe_classify。
+async fn probe_model(State(st): State<AppState>, body: Bytes) -> Response {
+    let v = match parse_action_body(&body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let model = v
+        .get("model")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if model.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "message": "model 不能为空（模型id@平台）"})),
+        )
+            .into_response();
+    }
+    let platform = model.rsplit('@').next().unwrap_or("").to_string();
+    let name = st
+        .all_specs()
+        .into_iter()
+        .find(|s| s.id == platform)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| platform.clone());
+    let t0 = std::time::Instant::now();
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        chat_core(
+            &st,
+            json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 16,
+                "stream": false,
+            }),
+        ),
+    )
+    .await;
+    let ms = t0.elapsed().as_millis() as u64;
+    Json(probe_classify(&platform, &name, &model, ms, out)).into_response()
 }
 
 /// 平台清单（声明式 spec 快照；含自定义 API 动态并入；base_url 含占位符时标注）。
@@ -4247,6 +4309,9 @@ async fn requests(
                 // 明细里带上类型，用户才不会把「checkin」当成一个调不通的模型。
                 "kind": aigw_store::kind_of(&e),
                 "upstream": e.upstream,
+                // ★ 调度透明（codex2api 调度看板思路的观测层）：这条请求由哪个
+                //   账号服务——多账号平台的失败归因从「平台级」细化到「账号级」。
+                "account": e.account,
             })
         })
         .collect::<Vec<_>>();

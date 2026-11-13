@@ -516,6 +516,10 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
   const [modelMsg, setModelMsg] = useState('');
   // ★ 模型多起来（api-* 平台动辄上百条）平铺成一堵墙，加搜索过滤。
   const [modelQ, setModelQ] = useState('');
+  // ★ 模型连通测试（gpt-load/Agent2API 模式）：input 默认首模型，就地显示结果。
+  const [testModel, setTestModel] = useState('');
+  const [testBusy, setTestBusy] = useState(false);
+  const [testRes, setTestRes] = useState<{ ok: boolean; text: string } | null>(null);
   // 停用平台的二次确认（替代 window.confirm：原生弹窗会冻住整页，
   // 且在浏览器里不可样式化，与整体视觉割裂）。
   const [confirmOff, setConfirmOff] = useState(false);
@@ -530,6 +534,24 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
     } catch (e) {
       setModelMsg('切换失败：' + (e instanceof Error ? e.message : String(e)));
     }
+  };
+
+  // ★ 模型连通测试：/api/probe-model 单发真实请求（max_tokens=16），结果就地显示。
+  const runModelTest = async () => {
+    const m = (testModel || p.models[0] || '').trim();
+    if (!m) { setTestRes({ ok: false, text: '没有可测试的模型' }); return; }
+    setTestBusy(true);
+    setTestRes(null);
+    try {
+      const r = await api.post('/api/probe-model', { model: `${m}@${p.id}` }) as {
+        ok?: boolean; ms?: number; reply?: string; message?: string;
+      };
+      setTestRes(r?.ok
+        ? { ok: true, text: `✓ ${r.ms}ms${r.reply ? ` · 「${r.reply}」` : ''}` }
+        : { ok: false, text: `✗ ${r?.message ?? '失败'}` });
+    } catch (e) {
+      setTestRes({ ok: false, text: '✗ ' + (e instanceof Error ? e.message : String(e)) });
+    } finally { setTestBusy(false); }
   };
   const saveCred = (fromClient: boolean) => {
     const el = document.getElementById('cred-' + p.id) as HTMLInputElement | null;
@@ -712,7 +734,29 @@ function PlatformDetail({ p, disabledModels, onChanged }: {
               );
             })()}
         {modelMsg && <Note>{modelMsg}</Note>}
-        {p.models.length > 0 && <div className="faint fs-xs mt-2">点击模型块切换启用/停用（按裸模型名记账，跨平台生效）。</div>}
+        {/* ★ 模型连通测试（gpt-load/Agent2API 的测试对话框模式）：
+            管理面任意模型当场打一发真实请求（max_tokens=16），结果就地显示。
+            与车道探针共用后端分类（/api/probe-model），失败原因同形状。 */}
+        {p.models.length > 0 && (
+          <div className="row mt-2" style={{ alignItems: 'center' }}>
+            <input
+              className="q mono"
+              style={{ maxWidth: 320 }}
+              list={'models-' + p.id}
+              placeholder="要测试的模型…"
+              value={testModel || p.models[0]}
+              onChange={(e) => setTestModel(e.target.value)}
+            />
+            <datalist id={'models-' + p.id}>
+              {p.models.map((m) => <option key={m} value={m} />)}
+            </datalist>
+            <button className="btn sm" disabled={testBusy} onClick={runModelTest}>
+              {testBusy ? '测试中…' : '⚡ 连通测试'}
+            </button>
+            {testRes && <span className={'fs-xs ' + (testRes.ok ? 'c-ok' : 'c-err')}>{testRes.text}</span>}
+          </div>
+        )}
+        {p.models.length > 0 && <div className="faint fs-xs mt-2">点击模型块切换启用/停用（按裸模型名记账，跨平台生效）。连通测试会向上游发一次真实请求。</div>}
       </Card>
     </>
   );

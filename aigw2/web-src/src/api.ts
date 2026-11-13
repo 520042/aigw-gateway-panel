@@ -147,6 +147,7 @@ export interface Usage {
   latency: { avg: number; p50: number; p95: number; samples: number };
   ttfb: { p50: number; p95: number; samples: number };
   byPlatform: { rows: Array<{ key: string; requests: number; success: number; failed: number; cancelled: number }> };
+  byModel: { rows: Array<{ key: string; requests: number; success: number; failed: number; cancelled: number }> };
 }
 
 export interface PoolState {
