@@ -74,6 +74,9 @@ tbody tr:hover td { background: var(--surface-3); }
   border-bottom: 1px solid var(--border);
 }
 .rk-row:last-child { border-bottom: 0; }
+/* ★ 请求明细下钻：选中的平台行高亮（axonhub requests drawer 同思路） */
+.rk-row.on { background: var(--brand-soft); border-radius: var(--r-sm); margin: 0 -6px; padding: 5px 6px; }
+.rk-row:hover { background: var(--surface-2); border-radius: var(--r-sm); margin: 0 -6px; padding: 5px 6px; }
 .rk-name {
   font-size: var(--fs-sm); color: var(--fg);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

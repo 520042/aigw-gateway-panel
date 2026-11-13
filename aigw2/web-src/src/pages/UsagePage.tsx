@@ -89,6 +89,13 @@ export function UsagePage() {
   const hist = useAsync<{ recent: Array<{ ts?: number; tin?: number; tout?: number; total_tokens?: number; tokensOut?: number }> }>(
     () => api.get('/api/requests?limit=60'), [],
   );
+  // ★ 请求明细下钻（借鉴 axonhub requests drawer）：点平台输出榜的行，
+  //   展开该平台最近的请求表。后端 /api/requests 支持可选 platform 参数。
+  const [drill, setDrill] = useState<string | null>(null);
+  const drillQ = useAsync<{ recent: Array<{ ts: number; model: string; kind: string; ok: boolean; ms: number; tin: number; tout: number; cancelled: boolean }>; matched: number }>(
+    () => api.get('/api/requests?limit=30&platform=' + encodeURIComponent(drill ?? '')),
+    [drill],
+  );
   if (us.error) return <ErrorBox message={us.error} onRetry={us.reload} />;
   if (us.loading || !us.data) return <Loading />;
 
@@ -126,15 +133,51 @@ export function UsagePage() {
         <Trend values={trend} stamps={stamps} />
       </Card>
 
-      <Card title="平台输出榜" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>条长 = 请求数</span>}>
+      <Card title="平台输出榜" extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>条长 = 请求数 · 点行看该平台的请求明细</span>}>
         {last.length === 0 ? <div className="faint small">暂无数据</div> : last.map((r) => (
-          <div className="rk-row" key={r.key}>
+          <div
+            className={'rk-row' + (drill === r.key ? ' on' : '')}
+            key={r.key}
+            style={{ cursor: 'pointer' }}
+            title="点击查看该平台的请求明细"
+            onClick={() => setDrill((v) => (v === r.key ? null : r.key))}
+          >
             <span className="rk-name mono" title={r.key}>{prettyKey(r.key)}</span>
             <div className="rk-bar"><i style={{ width: `${Math.round((r.requests / maxOut) * 100)}%` }} /></div>
             <span className="rk-num">{fmt(r.requests)}</span>
           </div>
         ))}
       </Card>
+
+      {drill && (
+        <Card title={`请求明细 · ${prettyKey(drill)}`} extra={<span className="faint small" style={{ fontWeight: 400, marginLeft: 'auto' }}>
+          {drillQ.data ? `共 ${fmt(drillQ.data.matched)} 条 · 最近 ${drillQ.data.recent.length} 条` : ''}
+        </span>}>
+          {drillQ.error ? <ErrorBox message={drillQ.error} onRetry={drillQ.reload} />
+            : drillQ.loading && !drillQ.data ? <Loading />
+              : (drillQ.data?.recent ?? []).length === 0 ? <div className="faint small">该平台在台账窗口内没有请求记录</div>
+                : (
+                  <div className="table-scroll">
+                    <table>
+                      <thead><tr><th>时间</th><th>模型 / 动作</th><th>状态</th><th>耗时</th><th className="mono">tokens in/out</th></tr></thead>
+                      <tbody>
+                        {drillQ.data!.recent.map((r, i) => (
+                          <tr key={i}>
+                            <td className="mono fs-xs">{new Date(r.ts * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td>
+                            <td>{r.model}{r.kind !== 'chat' && <span className="pill mut ml-2">{r.kind}</span>}</td>
+                            <td>{r.cancelled
+                              ? <span className="pill mut">客户端取消</span>
+                              : r.ok ? <span className="pill ok">成功</span> : <span className="pill err">失败</span>}</td>
+                            <td className="mono fs-xs">{ms(r.ms)}</td>
+                            <td className="mono fs-xs">{fmt(r.tin)} / {fmt(r.tout)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+        </Card>
+      )}
 
       <Card title="token 用量">
         <div className="mini-grid">

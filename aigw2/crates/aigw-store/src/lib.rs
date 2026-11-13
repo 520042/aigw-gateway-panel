@@ -690,6 +690,78 @@ impl Store {
         }
     }
 
+    /// ★ 2026-11-14：窗口内**某平台**的一页事件（用量页「请求明细下钻」用，
+    ///   借鉴 axonhub 的 requests drawer：点平台排行行 → 看该平台最近请求）。
+    ///   独立成函数而非给旧函数加参数：调用方少改，SQL 语义也更直白。
+    pub fn usage_window_page_platform(
+        &self,
+        from: f64,
+        to: f64,
+        platform: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<UsageEvent> {
+        let limit = limit.max(1) as i64;
+        let offset = offset.min(CAP_EVENTS as usize) as i64;
+        match &self.backend {
+            Backend::Db(conn) => {
+                let mut out = Vec::new();
+                {
+                    let c = conn.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Ok(mut stmt) = c.prepare(
+                        "SELECT ts,platform,model,tin,tout,ms,ttfb,ok,upstream,account,cancelled,kind FROM usage_events
+                         WHERE ts >= ?1 AND ts <= ?2 AND platform = ?3
+                         ORDER BY ts DESC, rowid DESC LIMIT ?4 OFFSET ?5",
+                    ) {
+                        if let Ok(rows) =
+                            stmt.query_map((from, to, platform, limit, offset), map_usage_row)
+                        {
+                            for row in rows.flatten() {
+                                out.push(row);
+                            }
+                        }
+                    };
+                }
+                out
+            }
+            Backend::Json { mem, .. } => {
+                let all = mem.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let mut v: Vec<UsageEvent> = all
+                    .into_iter()
+                    .filter(|e| e.ts >= from && e.ts <= to && e.platform == platform)
+                    .collect();
+                v.sort_by(|a, b| {
+                    b.ts.partial_cmp(&a.ts)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                v.into_iter().skip(offset as usize).take(limit as usize).collect()
+            }
+        }
+    }
+
+    /// 同上的计数版（下钻表的「共 N 条」）。
+    pub fn usage_window_count_platform(&self, from: f64, to: f64, platform: &str) -> u64 {
+        match &self.backend {
+            Backend::Db(conn) => {
+                let c = conn.lock().unwrap_or_else(|e| e.into_inner());
+                if let Ok(mut stmt) = c.prepare(
+                    "SELECT COUNT(*) FROM usage_events WHERE ts >= ?1 AND ts <= ?2 AND platform = ?3",
+                ) {
+                    if let Ok(n) = stmt.query_row((from, to, platform), |r| r.get::<_, i64>(0)) {
+                        return n.max(0) as u64;
+                    }
+                }
+                0
+            }
+            Backend::Json { mem, .. } => mem
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|e| e.ts >= from && e.ts <= to && e.platform == platform)
+                .count() as u64,
+        }
+    }
+
     /// 窗口内按某个维度聚合（platform / model / account 共用一套实现，避免三份
     /// 手写 SQL 慢慢漂移——列名拼错在 SQL 里是报错，但 `SUM(tin)` 换成 `SUM(tout)`
     /// 之类只会静默算错）。

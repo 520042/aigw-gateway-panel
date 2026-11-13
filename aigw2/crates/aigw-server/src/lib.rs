@@ -4215,8 +4215,24 @@ async fn requests(
         .min(aigw_store::CAP_EVENTS as usize);
     // 先把总数查出来：列表只是「这一页」，统计是整个窗口。
     // 两者必须同时返回，否则「列表 60 条 / 统计 500 条」会让人以为台账丢了数据。
-    let matched = st.store.usage_window_count(from, to);
-    let page = st.store.usage_window_page(from, to, limit, offset);
+    // ★ 2026-11-14：可选 `platform` 参数——用量页「平台输出榜」点行下钻该平台的
+    //   请求明细（axonhub requests drawer 同思路）。空 = 不过滤（旧行为）；
+    //   值里带 @（如 `模型id@平台`）时取 @ 后的 platform 名，容错手动拼接的 URL。
+    let platform = params
+        .get("platform")
+        .map(|s| s.trim().rsplit('@').next().unwrap_or("").to_string())
+        .unwrap_or_default();
+    let (matched, page) = if platform.is_empty() {
+        (
+            st.store.usage_window_count(from, to),
+            st.store.usage_window_page(from, to, limit, offset),
+        )
+    } else {
+        (
+            st.store.usage_window_count_platform(from, to, &platform),
+            st.store.usage_window_page_platform(from, to, &platform, limit, offset),
+        )
+    };
     let shown = page.len();
     let recent = page
         .into_iter()
