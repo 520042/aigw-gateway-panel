@@ -3768,6 +3768,11 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
             "version": env!("CARGO_PKG_VERSION"),
             "target": BUILD_TARGET,
             "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+            // ★ 构建期嵌入的 git 提交（build.rs 采集）：前端拿它和远端 sha
+            //   比对，给出「已是最新 / 不一致」的真实判定，替代以前的假算术空位。
+            //   无 git 环境构建时为空串，前端回退到只展示不判定。
+            "commit": option_env!("AIGW_GIT_SHA").unwrap_or(""),
+            "dirty": option_env!("AIGW_GIT_DIRTY").map(|v| v == "true").unwrap_or(false),
             "started_at": now_ms().saturating_sub(st.started_at.elapsed().as_millis()),
             "uptime_s": st.started_at.elapsed().as_secs(),
         },
@@ -7619,6 +7624,11 @@ stream_dialect = "sse_delta"
             json!(if cfg!(debug_assertions) { "debug" } else { "release" }),
             "{body}"
         );
+        // ★ 构建期 git sha 必须在场（关于页的「版本比对」判定靠它）：
+        //   测试也是经 build.rs 编译的，sha 应为 8 位短哈希；dirty 是布尔。
+        //   无 git 环境下 sha 为空串——断言只要求「字段存在且是字符串」。
+        assert!(b["commit"].is_string(), "build.commit 缺失：{body}");
+        assert!(b["dirty"].is_boolean(), "build.dirty 缺失：{body}");
         // ★ 光断言「started_at 是个不太久的过去时刻」是没用的：直接写 now_ms() 也满足
         //   （差 0ms），uptime 恒 0 也满足「< 60」。必须让两个字段互相印证：
         //   由 now - started_at 推出的秒数应当 ≤ uptime_s（+1 秒取整容差）。

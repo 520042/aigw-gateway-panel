@@ -46,7 +46,7 @@ export interface Health {
   service: string;
   version: string;
   milestone: string;
-  build: { profile: string; uptime_s: number; target: string };
+  build: { profile: string; uptime_s: number; target: string; commit?: string; dirty?: boolean };
   platforms: number;
   token_required: boolean;
   tasks: Record<string, TaskStat>;

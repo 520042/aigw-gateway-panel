@@ -82,10 +82,25 @@ export function About() {
     : remote?.reachable
       ? `${remote.sha.slice(0, 8)}（${fmtWhen(remote.date)}）`
       : '远端不可达（离线）';
-  const behind = remote?.reachable && remote.sha && local?.exe_built_ts
-    ? undefined // 后端只给 sha 不给本地 sha；此处只展示，不做「落后几个提交」的假算术
-    : undefined;
-  void behind;
+  // ★ 真实版本判定（2026-11-14）：后端现在构建期嵌入 git sha（build.rs），
+  //   这里拿它和远端 sha 比对。以前只有远端没有本地，前任只能写
+  //   「只展示、不判定」的空位——现在两个都有了，判定是真算术：
+  //   sha 相同 = 已是最新；不同 = 落后或含未推送改动（不做前进/落后假区分）。
+  //   本地没有 sha（旧二进制 / 无 git 构建）时不判定，宁可少说不说错话。
+  const localSha = (d.build?.commit ?? '').trim();
+  const localDirty = !!d.build?.dirty;
+  const verdict = (() => {
+    if (!localSha || !up.data || !remote?.reachable || !remote.sha) return '';
+    if (remote.sha.startsWith(localSha) || localSha.startsWith(remote.sha.slice(0, localSha.length))) {
+      return localDirty
+        ? { ok: false, text: '提交一致，但本地工作区有未提交改动' }
+        : { ok: true, text: '已是最新' };
+    }
+    return {
+      ok: false,
+      text: `与远端不一致（本地 ${localSha} / 远端 ${remote.sha.slice(0, 8)}）——可能落后或含未推送改动`,
+    };
+  })();
 
   const lg = d.logs, ar = d.archives, db = d.db;
 
@@ -105,6 +120,14 @@ export function About() {
           <div><span>远端最新 commit</span><b>{remoteTxt}</b></div>
           {/* ★ 数据目录走 health（本地、即时），不再挂在远端检查上 */}
           <div><span>数据目录</span><code className="mono">{d.data_dir ?? local?.data_dir ?? '—'}</code></div>
+          {verdict && (
+            <div>
+              <span>版本比对</span>
+              <b className={verdict.ok ? 'c-ok' : 'c-warn'}>
+                {verdict.ok ? '✓ ' : '⚠ '}{verdict.text}
+              </b>
+            </div>
+          )}
         </div>
         <div className="row mt-3">
           <button className="btn" onClick={checkUpdate}>⟳ 检查更新</button>
