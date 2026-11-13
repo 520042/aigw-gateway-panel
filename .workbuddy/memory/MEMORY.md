@@ -80,6 +80,11 @@ cargo build --target x86_64-pc-windows-msvc -p aigw
 | `/api/route` 契约 | 前端拿不到映射 | 必须是对象映射，不能 `Vec<String>` |
 | 单测写死随机量上限 | 偶发失败 | 只断言下限 |
 | `list_accounts()` 空字段 | 前端 XSS 审计时的坑 | 输出一律转义 |
+| **设计令牌写在 light 选择器里** | 切暗色后 `var(--sp-*)`/`var(--r-*)` 全部失效，卡片紧贴无内边距，整版塌成横条（2026-11-12 实测） | 非颜色令牌（间距/字号/圆角/控件高/字体/动效）必须放 `:root`，主题块只放颜色 |
+| `/api/logs` 参数名漂移 | 前端发 `lv`/`g`，后端读 `level`/`grep` → 级别与关键词筛选「能选能打但全量返回」 | 参数名以后端 `logs_view` 为准 |
+| `/api/requests` 的 recent 字段 | 是 `tin`/`tout`，不是 `total_tokens`/`tokensOut` → 趋势图取值恒 0，画出一条贴底直线 | 读 `tout` |
+| 主题 `loadPref` 白名单 | 循环到「跟随系统」后 localStorage 存 `auto`，白名单没有 → 刷新回落 light，档位与实际不符 | allowed 必须含所有档位 |
+| `/api/health` 现在带 `data_dir` | 数据目录是本地信息，挂在 `/api/update-check`（要打 GitHub）上会一直「读取中」 | 本地信息不要依赖远端检查 |
 
 ## 里程碑
 
