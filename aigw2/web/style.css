@@ -723,7 +723,9 @@ code {
 /* 分组标题行（也是虚拟化的一部分：算进行高里） */
 .src-row.grp:hover { background: var(--surface-2); }
 
-.src-detail-col { min-width: 0; }
+/* ★ scroll-margin-top：窄屏点平台自动滚到详情时，给吸顶栏留出余量——
+   没有它详情卡顶部（含标题）会滑进 topbar 底下（实测 topbar 高 73px）。 */
+.src-detail-col { min-width: 0; scroll-margin-top: 84px; }
 
 /* 详情头部 */
 .sd-hd .ttl { flex: 1; min-width: 0; }
