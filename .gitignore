@@ -184,3 +184,5 @@ aigw2/crates/*/src/._*
 /aigw2/autoresearch-dashboard.html
 /_probe_card.png
 /_p0_*.png
+/_walk_p0.js
+aigw2/_walk_p0.js
